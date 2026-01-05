@@ -6,3 +6,9 @@ license.workspace = true
 description = "Filesystem abstraction for IBSR"
 
 [dependencies]
+thiserror.workspace = true
+ibsr-schema = { path = "../ibsr-schema" }
+ibsr-clock = { path = "../ibsr-clock" }
+
+[dev-dependencies]
+tempfile = "3.10"
