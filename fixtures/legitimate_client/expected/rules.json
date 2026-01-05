@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "generated_at": 1000,
+  "match_criteria": {
+    "proto": "tcp",
+    "dst_port": 8080
+  },
+  "triggers": [],
+  "exceptions": []
+}

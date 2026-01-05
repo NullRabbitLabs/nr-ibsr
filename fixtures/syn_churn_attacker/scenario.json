@@ -1,0 +1,5 @@
+{
+  "name": "syn_churn_attacker",
+  "description": "Clear SYN churn attacker with high syn_rate and low success_ratio",
+  "generated_at": 1000
+}

@@ -1,0 +1,5 @@
+{
+  "name": "allowlisted_attacker",
+  "description": "Attacker pattern with IP in allowlist - must remain ALLOW",
+  "generated_at": 1000
+}

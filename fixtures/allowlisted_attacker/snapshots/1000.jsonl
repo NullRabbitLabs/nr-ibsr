@@ -1,0 +1,1 @@
+{"version":0,"ts_unix_sec":1000,"dst_port":8080,"buckets":[{"key_type":"src_ip","key_value":167772161,"syn":5000,"ack":50,"rst":0,"packets":5050,"bytes":505000}]}

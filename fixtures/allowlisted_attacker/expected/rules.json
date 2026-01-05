@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "generated_at": 1000,
+  "match_criteria": {
+    "proto": "tcp",
+    "dst_port": 8080
+  },
+  "triggers": [],
+  "exceptions": [
+    {
+      "key_type": "src_ip",
+      "key_value": "10.0.0.1"
+    }
+  ]
+}

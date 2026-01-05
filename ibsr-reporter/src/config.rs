@@ -83,6 +83,18 @@ impl ReporterConfig {
         self.allowlist = allowlist;
         self
     }
+
+    /// Builder: set fp_safe_ratio.
+    pub fn with_fp_safe_ratio(mut self, ratio: f64) -> Self {
+        self.fp_safe_ratio = ratio;
+        self
+    }
+
+    /// Builder: set min_samples_for_fp.
+    pub fn with_min_samples_for_fp(mut self, min_samples: usize) -> Self {
+        self.min_samples_for_fp = min_samples;
+        self
+    }
 }
 
 /// Allowlist of IPs and CIDRs that are always allowed.

@@ -1,0 +1,5 @@
+{
+  "name": "legitimate_client",
+  "description": "Legitimate client with low syn_rate and high success_ratio",
+  "generated_at": 1000
+}

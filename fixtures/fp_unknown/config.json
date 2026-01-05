@@ -1,0 +1,9 @@
+{
+  "dst_port": 8080,
+  "window_sec": 10,
+  "syn_rate_threshold": 100.0,
+  "success_ratio_threshold": 0.1,
+  "block_duration_sec": 300,
+  "fp_safe_ratio": 0.5,
+  "min_samples_for_fp": 10
+}

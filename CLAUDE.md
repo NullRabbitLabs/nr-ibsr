@@ -9,11 +9,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 1. **XDP Collector + Snapshot Schema** - Data collection layer ✓ COMPLETE
 2. **IBSR Reporter Core** - Core reporting functionality ✓ COMPLETE
 3. **CLI + IO Boundaries** - Command-line interface and I/O handling ✓ COMPLETE
-4. **Portability & Conformance** - Cross-platform support and testing harness
+4. **Portability & Conformance** - Cross-platform support and testing harness ✓ COMPLETE
 
 ## Current State
 
-Phase 3 is complete. The project now has:
+All phases complete. The project now has:
 
 - XDP/eBPF program for capturing unique source IPs on a target port
 - Rust userspace collector using libbpf-rs
@@ -25,9 +25,11 @@ Phase 3 is complete. The project now has:
 - Abuse detection for TCP SYN churn with configurable thresholds
 - Counterfactual impact analysis with FP bounds
 - **Unified CLI** with three subcommands: `collect`, `report`, `run`
-- Comprehensive test coverage (98%+ lines)
-
-Next: Phase 4 (Portability & Conformance)
+- **Conformance harness** (`ibsr-conformance` crate) with:
+  - Golden fixtures for 5 test scenarios
+  - Deterministic output validation (byte-for-byte)
+  - Fixture loader and runner for other implementations
+- Comprehensive test coverage (97%+ lines)
 
 ## Deployment Target
 

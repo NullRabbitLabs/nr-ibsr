@@ -1,0 +1,2 @@
+source,syn_rate,success_ratio,decision,packets,bytes,syn
+10.0.0.2,10.00,0.9000,allow,200,20000,100
