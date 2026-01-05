@@ -15,8 +15,9 @@ Cargo.lock
 # macOS
 .DS_Store
 
-# Documentation and planning files
-*.md
+# Planning files (not for repo)
+IMPLEMENTATION_PLAN.md
+PROMPT_*.md
 
 # Coverage reports
 *.profraw

@@ -6,3 +6,8 @@ license.workspace = true
 description = "XDP/BPF loader for IBSR"
 
 [dependencies]
+thiserror.workspace = true
+object = { version = "0.36", features = ["write"] }
+regex = "1.10"
+
+[dev-dependencies]
