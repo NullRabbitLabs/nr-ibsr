@@ -1,0 +1,28 @@
+# Build artifacts
+/target/
+debug/
+release/
+
+# Cargo
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Documentation and planning files
+*.md
+
+# Coverage reports
+*.profraw
+*.profdata
+lcov.info
+coverage/
+
+# Docker
+.docker/
