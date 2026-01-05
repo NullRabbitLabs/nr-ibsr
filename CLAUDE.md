@@ -4,20 +4,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**nr-ibsr** is an open source greenfield project. The repository currently contains planning prompts for a phased implementation:
+**nr-ibsr** is an open source greenfield project implementing an eBPF/XDP-based IP collector with snapshot persistence. The implementation follows a phased approach:
 
-1. **XDP Collector + Snapshot Schema** - Data collection layer
-2. **IBSR Reporter Core** - Core reporting functionality
+1. **XDP Collector + Snapshot Schema** - Data collection layer ✓ COMPLETE
+2. **IBSR Reporter Core** - Core reporting functionality ✓ COMPLETE
 3. **CLI + IO Boundaries** - Command-line interface and I/O handling
 4. **Portability & Conformance** - Cross-platform support and testing harness
 
 ## Current State
 
-This is an empty repository awaiting initial implementation. When starting development:
+Phase 2 is complete. The project now has:
 
-- Review the `PROMPT_*.md` files for implementation specifications
-- Follow test-first development as indicated by the prompt file naming convention
-- Implement phases in order (01 → 02 → 03 → 04)
+- XDP/eBPF program for capturing unique source IPs on a target port
+- Rust userspace collector using libbpf-rs
+- JSON snapshot persistence with atomic writes
+- LRU map for memory-bounded IP tracking
+- **Reporter core** that consumes snapshots and produces:
+  - `rules.json` - Deployable XDP-safe enforcement rules
+  - `report.md` - IBSR artifact with 5 required sections
+- Abuse detection for TCP SYN churn with configurable thresholds
+- Counterfactual impact analysis with FP bounds
+- Comprehensive test coverage (99%+ lines)
+
+Next: Phase 3 (CLI + IO Boundaries)
 
 ## Deployment Target
 

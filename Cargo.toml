@@ -6,6 +6,7 @@ members = [
     "ibsr-fs",
     "ibsr-bpf",
     "ibsr-collector",
+    "ibsr-reporter",
 ]
 
 [workspace.package]

@@ -4,4 +4,4 @@
 
 mod snapshot;
 
-pub use snapshot::{BucketEntry, KeyType, Snapshot, SCHEMA_VERSION};
+pub use snapshot::{BucketEntry, KeyType, Snapshot, SnapshotError, SCHEMA_VERSION};

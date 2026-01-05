@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub const SCHEMA_VERSION: u32 = 0;
 
 /// Key type for bucket entries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyType {
     SrcIp,
