@@ -8,5 +8,9 @@ description = "IBSR XDP collector CLI"
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 thiserror.workspace = true
+ibsr-bpf = { path = "../ibsr-bpf" }
+ibsr-clock = { path = "../ibsr-clock" }
+ibsr-fs = { path = "../ibsr-fs" }
+ibsr-schema = { path = "../ibsr-schema" }
 
 [dev-dependencies]
