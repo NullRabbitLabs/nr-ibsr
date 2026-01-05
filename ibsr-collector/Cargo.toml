@@ -5,12 +5,17 @@ edition.workspace = true
 license.workspace = true
 description = "IBSR XDP collector CLI"
 
+[[bin]]
+name = "ibsr"
+path = "src/main.rs"
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 thiserror.workspace = true
 ibsr-bpf = { path = "../ibsr-bpf" }
 ibsr-clock = { path = "../ibsr-clock" }
 ibsr-fs = { path = "../ibsr-fs" }
+ibsr-reporter = { path = "../ibsr-reporter" }
 ibsr-schema = { path = "../ibsr-schema" }
 
 [dev-dependencies]

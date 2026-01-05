@@ -34,6 +34,9 @@ pub trait Filesystem: Send + Sync {
     /// Write data atomically to a path (write to temp, then rename).
     fn write_atomic(&self, path: &Path, data: &[u8]) -> Result<(), FsError>;
 
+    /// Read file contents as a string.
+    fn read_file(&self, path: &Path) -> Result<String, FsError>;
+
     /// List all snapshot files in a directory.
     fn list_snapshots(&self, dir: &Path) -> Result<Vec<SnapshotFile>, FsError>;
 
@@ -63,6 +66,10 @@ impl Filesystem for RealFilesystem {
         fs::rename(&temp_path, path)?;
 
         Ok(())
+    }
+
+    fn read_file(&self, path: &Path) -> Result<String, FsError> {
+        Ok(fs::read_to_string(path)?)
     }
 
     fn list_snapshots(&self, dir: &Path) -> Result<Vec<SnapshotFile>, FsError> {
@@ -108,9 +115,10 @@ impl Filesystem for RealFilesystem {
 }
 
 /// Mock filesystem for testing.
-#[derive(Debug, Default)]
+/// Cloning creates a new handle to the same underlying data.
+#[derive(Debug, Clone, Default)]
 pub struct MockFilesystem {
-    files: std::sync::RwLock<HashMap<PathBuf, Vec<u8>>>,
+    files: std::sync::Arc<std::sync::RwLock<HashMap<PathBuf, Vec<u8>>>>,
 }
 
 impl MockFilesystem {
@@ -138,6 +146,18 @@ impl Filesystem for MockFilesystem {
     fn write_atomic(&self, path: &Path, data: &[u8]) -> Result<(), FsError> {
         self.files.write().unwrap().insert(path.to_path_buf(), data.to_vec());
         Ok(())
+    }
+
+    fn read_file(&self, path: &Path) -> Result<String, FsError> {
+        let files = self.files.read().unwrap();
+        match files.get(path) {
+            Some(data) => String::from_utf8(data.clone())
+                .map_err(|e| FsError::Path(format!("invalid utf8: {}", e))),
+            None => Err(FsError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("file not found: {}", path.display()),
+            ))),
+        }
     }
 
     fn list_snapshots(&self, dir: &Path) -> Result<Vec<SnapshotFile>, FsError> {
@@ -422,6 +442,54 @@ mod tests {
         assert!(fs.exists(&path));
     }
 
+    // --- Read file ---
+
+    #[test]
+    fn test_mock_read_file() {
+        let fs = MockFilesystem::new();
+        let path = PathBuf::from("/tmp/test.txt");
+
+        fs.add_file(path.clone(), b"hello world".to_vec());
+
+        let content = fs.read_file(&path).expect("read");
+        assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn test_mock_read_file_not_found() {
+        let fs = MockFilesystem::new();
+        let path = PathBuf::from("/tmp/nonexistent.txt");
+
+        let result = fs.read_file(&path);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(matches!(err, FsError::Io(_)));
+    }
+
+    #[test]
+    fn test_mock_read_file_multiline() {
+        let fs = MockFilesystem::new();
+        let path = PathBuf::from("/tmp/multiline.txt");
+
+        let content = "line1\nline2\nline3";
+        fs.add_file(path.clone(), content.as_bytes().to_vec());
+
+        let result = fs.read_file(&path).expect("read");
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_mock_read_file_empty() {
+        let fs = MockFilesystem::new();
+        let path = PathBuf::from("/tmp/empty.txt");
+
+        fs.add_file(path.clone(), vec![]);
+
+        let content = fs.read_file(&path).expect("read");
+        assert_eq!(content, "");
+    }
+
     // --- SnapshotWriter ---
 
     #[test]
@@ -646,6 +714,41 @@ mod tests {
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].timestamp, 1000);
+    }
+
+    #[test]
+    fn test_real_fs_read_file() {
+        let dir = tempdir().expect("create temp dir");
+        let fs = RealFilesystem;
+        let path = dir.path().join("test.txt");
+
+        fs::write(&path, b"hello world").expect("write");
+
+        let content = fs.read_file(&path).expect("read");
+        assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn test_real_fs_read_file_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let fs = RealFilesystem;
+        let path = dir.path().join("nonexistent.txt");
+
+        let result = fs.read_file(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_real_fs_read_file_multiline() {
+        let dir = tempdir().expect("create temp dir");
+        let fs = RealFilesystem;
+        let path = dir.path().join("multiline.txt");
+
+        let content = "line1\nline2\nline3";
+        fs::write(&path, content).expect("write");
+
+        let result = fs.read_file(&path).expect("read");
+        assert_eq!(result, content);
     }
 
     #[test]

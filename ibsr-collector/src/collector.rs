@@ -421,6 +421,10 @@ mod tests {
             Ok(())
         }
 
+        fn read_file(&self, _path: &Path) -> Result<String, FsError> {
+            Err(FsError::Path("simulated read failure".to_string()))
+        }
+
         fn list_snapshots(&self, _dir: &Path) -> Result<Vec<ibsr_fs::SnapshotFile>, FsError> {
             Err(FsError::Path("simulated list failure".to_string()))
         }
@@ -461,5 +465,94 @@ mod tests {
         fn create_dir_all(&self, path: &Path) -> Result<(), FsError> {
             self.0.create_dir_all(path)
         }
+
+        fn read_file(&self, path: &Path) -> Result<String, FsError> {
+            self.0.read_file(path)
+        }
+    }
+
+    // =========================================
+    // Additional Tests for Mock Coverage
+    // =========================================
+
+    #[test]
+    fn test_arc_fs_read_file() {
+        let fs = Arc::new(MockFilesystem::new());
+        let output_dir = PathBuf::from("/tmp/test");
+        let file_path = output_dir.join("test.txt");
+        fs.add_file(file_path.clone(), b"test content".to_vec());
+
+        let arc_fs = ArcFs(fs);
+        let content = arc_fs.read_file(&file_path).expect("read");
+        assert_eq!(content, "test content");
+    }
+
+    #[test]
+    fn test_arc_fs_read_file_not_found() {
+        let fs = Arc::new(MockFilesystem::new());
+        let arc_fs = ArcFs(fs);
+        let result = arc_fs.read_file(Path::new("/nonexistent/file.txt"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_arc_fs_exists() {
+        let fs = Arc::new(MockFilesystem::new());
+        let output_dir = PathBuf::from("/tmp/test");
+        let file_path = output_dir.join("exists.txt");
+        fs.add_file(file_path.clone(), vec![]);
+
+        let arc_fs = ArcFs(fs);
+        assert!(arc_fs.exists(&file_path));
+        assert!(!arc_fs.exists(Path::new("/nonexistent")));
+    }
+
+    #[test]
+    fn test_arc_fs_create_dir_all() {
+        let fs = Arc::new(MockFilesystem::new());
+        let arc_fs = ArcFs(fs);
+        let result = arc_fs.create_dir_all(Path::new("/tmp/new/dir"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_failing_filesystem_write_atomic() {
+        let fs = FailingFilesystem;
+        let result = fs.write_atomic(Path::new("/tmp/test"), b"data");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_failing_filesystem_read_file() {
+        let fs = FailingFilesystem;
+        let result = fs.read_file(Path::new("/tmp/test"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_failing_filesystem_remove() {
+        let fs = FailingFilesystem;
+        let result = fs.remove(Path::new("/tmp/test"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_failing_filesystem_exists() {
+        let fs = FailingFilesystem;
+        assert!(!fs.exists(Path::new("/tmp/test")));
+    }
+
+    #[test]
+    fn test_failing_filesystem_create_dir_all() {
+        let fs = FailingFilesystem;
+        let result = fs.create_dir_all(Path::new("/tmp/test"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_collector_error_debug() {
+        let err = CollectorError::MapRead(MapReaderError::ReadError("test".to_string()));
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("MapRead"));
     }
 }

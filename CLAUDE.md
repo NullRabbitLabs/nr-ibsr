@@ -8,12 +8,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 1. **XDP Collector + Snapshot Schema** - Data collection layer ✓ COMPLETE
 2. **IBSR Reporter Core** - Core reporting functionality ✓ COMPLETE
-3. **CLI + IO Boundaries** - Command-line interface and I/O handling
+3. **CLI + IO Boundaries** - Command-line interface and I/O handling ✓ COMPLETE
 4. **Portability & Conformance** - Cross-platform support and testing harness
 
 ## Current State
 
-Phase 2 is complete. The project now has:
+Phase 3 is complete. The project now has:
 
 - XDP/eBPF program for capturing unique source IPs on a target port
 - Rust userspace collector using libbpf-rs
@@ -24,9 +24,10 @@ Phase 2 is complete. The project now has:
   - `report.md` - IBSR artifact with 5 required sections
 - Abuse detection for TCP SYN churn with configurable thresholds
 - Counterfactual impact analysis with FP bounds
-- Comprehensive test coverage (99%+ lines)
+- **Unified CLI** with three subcommands: `collect`, `report`, `run`
+- Comprehensive test coverage (98%+ lines)
 
-Next: Phase 3 (CLI + IO Boundaries)
+Next: Phase 4 (Portability & Conformance)
 
 ## Deployment Target
 
@@ -37,7 +38,7 @@ Next: Phase 3 (CLI + IO Boundaries)
 ## Build & Test Commands
 
 ```bash
-# Run all tests with 100% coverage enforcement (in Docker)
+# Run all tests with coverage enforcement (in Docker)
 docker compose run --rm test
 
 # Build release binary (in Docker, for deployment)
@@ -48,18 +49,72 @@ Development on macOS; all tests run in Docker (Linux container with BPF toolchai
 
 ## CLI Synopsis
 
+### `ibsr collect`
+
+Collect traffic metrics using XDP/eBPF.
+
 ```bash
-ibsr collect --port <PORT> [OPTIONS]
+ibsr collect --dst-port <PORT> [OPTIONS]
 
 Required:
-  --port <PORT>         TCP destination port to monitor
+  --dst-port, -p <PORT>   TCP destination port to monitor
 
 Optional:
-  --iface <IFACE>       Network interface (default: auto-detect from default route)
-  --out-dir <DIR>       Snapshot output directory (default: ./snapshots)
-  --max-files <N>       Max snapshot files to retain (default: 3600)
-  --max-age <SECS>      Max age of snapshots in seconds (default: none)
-  --map-size <N>        LRU map size for unique IPs (default: 100000)
+  --duration-sec <SECS>   Run for N seconds then stop (default: continuous until SIGINT)
+  --iface, -i <IFACE>     Network interface (auto-detect if omitted)
+  --out-dir, -o <DIR>     Snapshot output directory (default: ./snapshots)
+  --max-files <N>         Max snapshot files to retain (default: 3600)
+  --max-age <SECS>        Max age of snapshots in seconds (default: 86400)
+  --map-size <N>          BPF LRU map size (default: 100000)
+```
+
+### `ibsr report`
+
+Generate report from collected snapshots.
+
+```bash
+ibsr report --in <DIR> --out-dir <DIR> [OPTIONS]
+
+Required:
+  --in <DIR>              Input snapshot directory
+  --out-dir <DIR>         Output directory for artifacts
+
+Optional:
+  --allowlist <FILE>      Path to allowlist file (one IP or CIDR per line)
+  --window-sec <SECS>     Analysis window size (default: 10)
+  --syn-rate-threshold <N>       Override SYN rate threshold
+  --success-ratio-threshold <N>  Override success ratio threshold
+  --block-duration-sec <N>       Override block duration
+
+Outputs:
+  report.md               IBSR report with 5 sections
+  rules.json              Deployable XDP-safe rules
+  evidence.csv            Per-source decision evidence
+```
+
+### `ibsr run`
+
+Collect for a duration, then generate report.
+
+```bash
+ibsr run --dst-port <PORT> --duration-sec <SECS> --out-dir <DIR> [OPTIONS]
+
+Required:
+  --dst-port, -p <PORT>   TCP destination port to monitor
+  --duration-sec <SECS>   Collection duration (required for run command)
+  --out-dir <DIR>         Output directory for artifacts
+
+Optional:
+  --snapshot-dir <DIR>    Snapshot directory (default: ./snapshots)
+  --iface, -i <IFACE>     Network interface (auto-detect if omitted)
+  --max-files <N>         Max snapshot files to retain (default: 3600)
+  --max-age <SECS>        Max age of snapshots in seconds (default: 86400)
+  --map-size <N>          BPF LRU map size (default: 100000)
+  --allowlist <FILE>      Path to allowlist file
+  --window-sec <SECS>     Analysis window size (default: 10)
+  --syn-rate-threshold <N>       Override SYN rate threshold
+  --success-ratio-threshold <N>  Override success ratio threshold
+  --block-duration-sec <N>       Override block duration
 ```
 
 ## Git Commit Policy
