@@ -107,4 +107,27 @@ mod tests {
         let sleeper = RealSleeper::new();
         let _cloned = sleeper;
     }
+
+    #[test]
+    fn test_real_sleeper_actually_sleeps() {
+        let sleeper = RealSleeper::new();
+        let start = std::time::Instant::now();
+
+        // Sleep for 1 second
+        sleeper.sleep_sec(1);
+
+        let elapsed = start.elapsed();
+
+        // Verify actual sleep occurred (allow 0.9-1.5s for system scheduling)
+        assert!(
+            elapsed.as_millis() >= 900,
+            "Expected sleep >= 900ms, got {}ms",
+            elapsed.as_millis()
+        );
+        assert!(
+            elapsed.as_millis() < 1500,
+            "Expected sleep < 1500ms, got {}ms",
+            elapsed.as_millis()
+        );
+    }
 }
