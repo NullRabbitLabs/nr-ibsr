@@ -10,6 +10,7 @@ use ibsr_fs::{Filesystem, RotationConfig, SnapshotWriter, StandardSnapshotWriter
 
 use crate::cli::CollectArgs;
 use crate::collector::{collect_once, CollectorConfig};
+use crate::io::{StatusLine, StatusWriter};
 use crate::signal::ShutdownCheck;
 use crate::sleeper::Sleeper;
 
@@ -60,11 +61,16 @@ where
     // Create snapshot writer
     let writer = StandardSnapshotWriter::new(fs.clone(), args.out_dir.clone());
 
+    // Create status writer for heartbeat output
+    let status_path = args.out_dir.join("status.jsonl");
+    let status_writer = StatusWriter::new(fs.clone(), status_path);
+
     // Run collection cycles
     let result = run_collection_loop(
         map_reader,
         clock,
         &writer,
+        &status_writer,
         fs,
         &args.out_dir,
         &config,
@@ -84,6 +90,7 @@ fn run_collection_loop<M, C, F, W, S, H>(
     map_reader: &M,
     clock: &C,
     writer: &W,
+    status_writer: &StatusWriter<F>,
     fs: &F,
     output_dir: &Path,
     config: &CollectorConfig,
@@ -99,9 +106,9 @@ where
     S: Sleeper,
     H: ShutdownCheck,
 {
-    let mut cycles = 0;
-    let mut total_ips = 0;
-    let mut snapshots_written = 0;
+    let mut cycles: u64 = 0;
+    let mut total_ips: usize = 0;
+    let mut snapshots_written: u64 = 0;
     let mut files_rotated = 0;
 
     let start_ts = clock.now_unix_sec();
@@ -121,6 +128,16 @@ where
         snapshots_written += 1;
         files_rotated += result.rotated_count;
 
+        // Write status line after each cycle
+        let status = StatusLine::new(
+            clock.now_unix_sec(),
+            cycles,
+            result.bucket_count as u64,
+            snapshots_written,
+        );
+        // Ignore status write errors - don't fail collection if status write fails
+        let _ = status_writer.append(&status);
+
         // Check if duration has expired (after completing cycle)
         // If duration_sec is None, we run continuously until shutdown
         if let Some(end) = end_ts {
@@ -134,9 +151,9 @@ where
     }
 
     Ok(CollectResult {
-        cycles,
+        cycles: cycles as usize,
         total_ips,
-        snapshots_written,
+        snapshots_written: snapshots_written as usize,
         files_rotated,
     })
 }
@@ -434,5 +451,154 @@ mod tests {
 
         // Should have run 5 cycles before shutdown
         assert_eq!(result.cycles, 5);
+    }
+
+    // ===========================================
+    // Test Category J — Status.jsonl Integration
+    // ===========================================
+
+    #[test]
+    fn test_execute_collect_writes_status_file() {
+        let map_reader = MockMapReader::new();
+        let clock = AdvancingClock::new(1000, 5);
+        let fs = Arc::new(MockFilesystem::new());
+        let sleeper = MockSleeper::new();
+        let shutdown = NeverShutdown::new();
+        let out_dir = PathBuf::from("/tmp/snapshots");
+
+        let args = CollectArgs {
+            dst_port: vec![8899],
+            dst_ports: None,
+            duration_sec: Some(10),
+            iface: None,
+            out_dir: out_dir.clone(),
+            max_files: 100,
+            max_age: 86400,
+            map_size: 100000,
+            verbose: 0,
+            report_interval_sec: 60,
+        };
+
+        execute_collect(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown).expect("execute");
+
+        // Verify status.jsonl was written
+        let status_path = out_dir.join("status.jsonl");
+        let content = fs
+            .get_file(&status_path)
+            .expect("status file should exist");
+        let content_str = String::from_utf8_lossy(&content);
+
+        // Should have one status line
+        let lines: Vec<&str> = content_str.lines().collect();
+        assert_eq!(lines.len(), 1);
+
+        // Parse the status line
+        let status: StatusLine =
+            serde_json::from_str(lines[0]).expect("should be valid JSON");
+        assert_eq!(status.cycle, 1);
+        assert_eq!(status.snapshots_written, 1);
+    }
+
+    #[test]
+    fn test_execute_collect_status_appends_multiple_cycles() {
+        use crate::signal::CountingShutdown;
+
+        let map_reader = MockMapReader::new();
+        let clock = AdvancingClock::new(1000, 1);
+        let fs = Arc::new(MockFilesystem::new());
+        let sleeper = MockSleeper::new();
+        let shutdown = CountingShutdown::new(3);
+        let out_dir = PathBuf::from("/tmp/snapshots");
+
+        let args = CollectArgs {
+            dst_port: vec![8899],
+            dst_ports: None,
+            duration_sec: None, // Continuous until shutdown
+            iface: None,
+            out_dir: out_dir.clone(),
+            max_files: 100,
+            max_age: 86400,
+            map_size: 100000,
+            verbose: 0,
+            report_interval_sec: 60,
+        };
+
+        let result =
+            execute_collect(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown).expect("execute");
+        assert_eq!(result.cycles, 3);
+
+        // Verify status.jsonl has 3 lines
+        let status_path = out_dir.join("status.jsonl");
+        let content = fs
+            .get_file(&status_path)
+            .expect("status file should exist");
+        let content_str = String::from_utf8_lossy(&content);
+        let lines: Vec<&str> = content_str.lines().collect();
+        assert_eq!(lines.len(), 3);
+
+        // Verify each line has correct cycle number
+        for (i, line) in lines.iter().enumerate() {
+            let status: StatusLine = serde_json::from_str(line).expect("valid JSON");
+            assert_eq!(status.cycle, (i + 1) as u64);
+            assert_eq!(status.snapshots_written, (i + 1) as u64);
+        }
+    }
+
+    #[test]
+    fn test_execute_collect_status_tracks_ips() {
+        let mut map_reader = MockMapReader::new();
+        map_reader.add_counter(
+            0x0A000001,
+            Counters {
+                syn: 100,
+                ack: 50,
+                handshake_ack: 50,
+                rst: 5,
+                packets: 200,
+                bytes: 30000,
+            },
+        );
+        map_reader.add_counter(
+            0x0A000002,
+            Counters {
+                syn: 50,
+                ack: 25,
+                handshake_ack: 25,
+                rst: 2,
+                packets: 100,
+                bytes: 15000,
+            },
+        );
+
+        let clock = AdvancingClock::new(1000, 5);
+        let fs = Arc::new(MockFilesystem::new());
+        let sleeper = MockSleeper::new();
+        let shutdown = NeverShutdown::new();
+        let out_dir = PathBuf::from("/tmp/snapshots");
+
+        let args = CollectArgs {
+            dst_port: vec![8899],
+            dst_ports: None,
+            duration_sec: Some(10),
+            iface: None,
+            out_dir: out_dir.clone(),
+            max_files: 100,
+            max_age: 86400,
+            map_size: 100000,
+            verbose: 0,
+            report_interval_sec: 60,
+        };
+
+        execute_collect(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown).expect("execute");
+
+        // Verify status tracks IPs collected
+        let status_path = out_dir.join("status.jsonl");
+        let content = fs
+            .get_file(&status_path)
+            .expect("status file should exist");
+        let content_str = String::from_utf8_lossy(&content);
+        let status: StatusLine =
+            serde_json::from_str(content_str.lines().next().unwrap()).expect("valid JSON");
+        assert_eq!(status.ips_collected, 2);
     }
 }

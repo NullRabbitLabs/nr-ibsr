@@ -14,12 +14,6 @@ pub mod codes {
     pub const IO_ERROR: i32 = 2;
     /// Collector error.
     pub const COLLECTOR_ERROR: i32 = 3;
-    /// Reporter error.
-    pub const REPORTER_ERROR: i32 = 4;
-    /// No snapshots found.
-    pub const NO_SNAPSHOTS: i32 = 5;
-    /// Allowlist parse error.
-    pub const ALLOWLIST_ERROR: i32 = 6;
     /// No network interface found.
     pub const NO_INTERFACE: i32 = 7;
     /// BPF error (load, attach, map operations).
@@ -34,10 +28,6 @@ pub fn exit_code(error: &CommandError) -> i32 {
         CommandError::InvalidArgument(_) => codes::INVALID_ARGS,
         CommandError::Filesystem(_) => codes::IO_ERROR,
         CommandError::Collector(_) => codes::COLLECTOR_ERROR,
-        CommandError::Ingest(_) => codes::REPORTER_ERROR,
-        CommandError::Allowlist(_) => codes::ALLOWLIST_ERROR,
-        CommandError::Output(_) => codes::IO_ERROR,
-        CommandError::NoSnapshots(_) => codes::NO_SNAPSHOTS,
         CommandError::NoInterface => codes::NO_INTERFACE,
         CommandError::Bpf(_) => codes::BPF_ERROR,
     }
@@ -47,10 +37,8 @@ pub fn exit_code(error: &CommandError) -> i32 {
 mod tests {
     use super::*;
     use crate::cli::CliError;
-    use crate::io::AllowlistLoadError;
     use crate::CollectorError;
     use ibsr_fs::FsError;
-    use ibsr_reporter::ingest::IngestError;
 
     #[test]
     fn test_exit_code_invalid_argument() {
@@ -66,26 +54,9 @@ mod tests {
 
     #[test]
     fn test_exit_code_collector() {
-        let error = CommandError::Collector(CollectorError::Write(FsError::Path("test".to_string())));
+        let error =
+            CommandError::Collector(CollectorError::Write(FsError::Path("test".to_string())));
         assert_eq!(exit_code(&error), codes::COLLECTOR_ERROR);
-    }
-
-    #[test]
-    fn test_exit_code_ingest() {
-        let error = CommandError::Ingest(IngestError::NoSnapshots);
-        assert_eq!(exit_code(&error), codes::REPORTER_ERROR);
-    }
-
-    #[test]
-    fn test_exit_code_allowlist() {
-        let error = CommandError::Allowlist(AllowlistLoadError::Read(FsError::Path("test".to_string())));
-        assert_eq!(exit_code(&error), codes::ALLOWLIST_ERROR);
-    }
-
-    #[test]
-    fn test_exit_code_no_snapshots() {
-        let error = CommandError::NoSnapshots("/tmp".to_string());
-        assert_eq!(exit_code(&error), codes::NO_SNAPSHOTS);
     }
 
     #[test]
@@ -100,10 +71,13 @@ mod tests {
         assert_eq!(codes::INVALID_ARGS, 1);
         assert_eq!(codes::IO_ERROR, 2);
         assert_eq!(codes::COLLECTOR_ERROR, 3);
-        assert_eq!(codes::REPORTER_ERROR, 4);
-        assert_eq!(codes::NO_SNAPSHOTS, 5);
-        assert_eq!(codes::ALLOWLIST_ERROR, 6);
         assert_eq!(codes::NO_INTERFACE, 7);
         assert_eq!(codes::SIGINT, 130);
+    }
+
+    #[test]
+    fn test_exit_code_bpf() {
+        let error = CommandError::Bpf(ibsr_bpf::BpfError::InsufficientPermissions);
+        assert_eq!(exit_code(&error), codes::BPF_ERROR);
     }
 }

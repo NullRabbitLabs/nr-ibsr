@@ -4,32 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**nr-ibsr** is an open source greenfield project implementing an eBPF/XDP-based IP collector with snapshot persistence. The implementation follows a phased approach:
+**nr-ibsr** is an open source greenfield project implementing an eBPF/XDP-based IP collector with snapshot persistence. The on-box binary is a **strictly passive snapshot recorder** - it collects traffic metrics and writes snapshots to disk, but does NOT perform any analysis.
 
-1. **XDP Collector + Snapshot Schema** - Data collection layer ✓ COMPLETE
-2. **IBSR Reporter Core** - Core reporting functionality ✓ COMPLETE
-3. **CLI + IO Boundaries** - Command-line interface and I/O handling ✓ COMPLETE
-4. **Portability & Conformance** - Cross-platform support and testing harness ✓ COMPLETE
+Analysis and report generation happen offline using tools in `offline-tools/`.
 
-## Current State
+## Architecture
 
-All phases complete. The project now has:
-
-- XDP/eBPF program for capturing unique source IPs on a target port
+### On-Box Binary (`ibsr collect`)
+- XDP/eBPF program for capturing unique source IPs on target ports
 - Rust userspace collector using libbpf-rs
 - JSON snapshot persistence with atomic writes
 - LRU map for memory-bounded IP tracking
-- **Reporter core** that consumes snapshots and produces:
-  - `rules.json` - Deployable XDP-safe enforcement rules
-  - `report.md` - IBSR artifact with 5 required sections
-- Abuse detection for TCP SYN churn with configurable thresholds
-- Counterfactual impact analysis with FP bounds
-- **Unified CLI** with three subcommands: `collect`, `report`, `run`
-- **Conformance harness** (`ibsr-conformance` crate) with:
-  - Golden fixtures for 5 test scenarios
-  - Deterministic output validation (byte-for-byte)
-  - Fixture loader and runner for other implementations
-- Comprehensive test coverage (97%+ lines)
+- Append-only `status.jsonl` heartbeat for monitoring
+- Single subcommand: `collect`
+
+### Offline Tools (`offline-tools/`)
+- **ibsr-reporter**: Consumes snapshots and produces reports, rules, and evidence
+- **ibsr-conformance**: Golden fixtures and conformance testing harness
+
+## Current State
+
+- XDP/eBPF traffic collection is complete
+- Snapshot persistence with rotation is complete
+- Status heartbeat (`status.jsonl`) is implemented
+- Reporter and conformance tooling moved to `offline-tools/`
+- Comprehensive test coverage (99%+ lines)
 
 ## Deployment Target
 
@@ -59,65 +58,38 @@ Collect traffic metrics using XDP/eBPF.
 ibsr collect --dst-port <PORT> [OPTIONS]
 
 Required:
-  --dst-port, -p <PORT>   TCP destination port to monitor
+  --dst-port, -p <PORT>   TCP destination port(s) to monitor (repeatable, max 8)
+  --dst-ports <PORTS>     Comma-separated list of ports (alternative to -p)
 
 Optional:
   --duration-sec <SECS>   Run for N seconds then stop (default: continuous until SIGINT)
   --iface, -i <IFACE>     Network interface (auto-detect if omitted)
-  --out-dir, -o <DIR>     Snapshot output directory (default: ./snapshots)
+  --out-dir, -o <DIR>     Snapshot output directory (default: /var/lib/ibsr/snapshots)
   --max-files <N>         Max snapshot files to retain (default: 3600)
   --max-age <SECS>        Max age of snapshots in seconds (default: 86400)
   --map-size <N>          BPF LRU map size (default: 100000)
-```
-
-### `ibsr report`
-
-Generate report from collected snapshots.
-
-```bash
-ibsr report --in <DIR> --out-dir <DIR> [OPTIONS]
-
-Required:
-  --in <DIR>              Input snapshot directory
-  --out-dir <DIR>         Output directory for artifacts
-
-Optional:
-  --allowlist <FILE>      Path to allowlist file (one IP or CIDR per line)
-  --window-sec <SECS>     Analysis window size (default: 10)
-  --syn-rate-threshold <N>       Override SYN rate threshold
-  --success-ratio-threshold <N>  Override success ratio threshold
-  --block-duration-sec <N>       Override block duration
+  -v, --verbose           Increase verbosity (-v, -vv)
+  --report-interval-sec   Status report interval (default: 60)
 
 Outputs:
-  report.md               IBSR report with 5 sections
-  rules.json              Deployable XDP-safe rules
-  evidence.csv            Per-source decision evidence
+  snapshot_<timestamp>.jsonl   Per-cycle traffic snapshot
+  status.jsonl                 Append-only heartbeat/progress log
 ```
 
-### `ibsr run`
+### Status File Format
 
-Collect for a duration, then generate report.
+The `status.jsonl` file is written to the output directory, one JSON line per collection cycle:
 
-```bash
-ibsr run --dst-port <PORT> --duration-sec <SECS> --out-dir <DIR> [OPTIONS]
-
-Required:
-  --dst-port, -p <PORT>   TCP destination port to monitor
-  --duration-sec <SECS>   Collection duration (required for run command)
-  --out-dir <DIR>         Output directory for artifacts
-
-Optional:
-  --snapshot-dir <DIR>    Snapshot directory (default: ./snapshots)
-  --iface, -i <IFACE>     Network interface (auto-detect if omitted)
-  --max-files <N>         Max snapshot files to retain (default: 3600)
-  --max-age <SECS>        Max age of snapshots in seconds (default: 86400)
-  --map-size <N>          BPF LRU map size (default: 100000)
-  --allowlist <FILE>      Path to allowlist file
-  --window-sec <SECS>     Analysis window size (default: 10)
-  --syn-rate-threshold <N>       Override SYN rate threshold
-  --success-ratio-threshold <N>  Override success ratio threshold
-  --block-duration-sec <N>       Override block duration
+```json
+{"timestamp":1704067200,"cycle":1,"ips_collected":42,"snapshots_written":1}
+{"timestamp":1704067201,"cycle":2,"ips_collected":45,"snapshots_written":2}
 ```
+
+Fields:
+- `timestamp`: Unix epoch seconds when cycle completed
+- `cycle`: Collection cycle number (1-indexed)
+- `ips_collected`: Unique IPs in this cycle
+- `snapshots_written`: Cumulative snapshots written
 
 ## Git Commit Policy
 

@@ -13,10 +13,11 @@ path = "src/main.rs"
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3.4"
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 ibsr-bpf = { path = "../ibsr-bpf" }
 ibsr-clock = { path = "../ibsr-clock" }
 ibsr-fs = { path = "../ibsr-fs" }
-ibsr-reporter = { path = "../ibsr-reporter" }
 ibsr-schema = { path = "../ibsr-schema" }
 
 [dev-dependencies]

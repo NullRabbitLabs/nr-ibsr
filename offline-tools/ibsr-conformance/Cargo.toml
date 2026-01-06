@@ -3,13 +3,12 @@ name = "ibsr-conformance"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
 description = "Conformance harness for IBSR reporter"
 
 [dependencies]
 ibsr-reporter = { path = "../ibsr-reporter" }
-ibsr-schema = { path = "../ibsr-schema" }
-ibsr-clock = { path = "../ibsr-clock" }
+ibsr-schema = { path = "../../ibsr-schema" }
+ibsr-clock = { path = "../../ibsr-clock" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

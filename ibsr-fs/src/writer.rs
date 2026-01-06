@@ -34,6 +34,10 @@ pub trait Filesystem: Send + Sync {
     /// Write data atomically to a path (write to temp, then rename).
     fn write_atomic(&self, path: &Path, data: &[u8]) -> Result<(), FsError>;
 
+    /// Append data to a file atomically.
+    /// Creates the file if it doesn't exist.
+    fn append_atomic(&self, path: &Path, data: &[u8]) -> Result<(), FsError>;
+
     /// Read file contents as a string.
     fn read_file(&self, path: &Path) -> Result<String, FsError>;
 
@@ -64,6 +68,24 @@ impl Filesystem for RealFilesystem {
 
         // Rename to final path (atomic on most filesystems)
         fs::rename(&temp_path, path)?;
+
+        Ok(())
+    }
+
+    fn append_atomic(&self, path: &Path, data: &[u8]) -> Result<(), FsError> {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+
+        // Create parent directory if needed
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Open file in append mode, creating if doesn't exist
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+
+        file.write_all(data)?;
+        file.sync_all()?;
 
         Ok(())
     }
@@ -146,6 +168,13 @@ impl MockFilesystem {
 impl Filesystem for MockFilesystem {
     fn write_atomic(&self, path: &Path, data: &[u8]) -> Result<(), FsError> {
         self.files.write().unwrap().insert(path.to_path_buf(), data.to_vec());
+        Ok(())
+    }
+
+    fn append_atomic(&self, path: &Path, data: &[u8]) -> Result<(), FsError> {
+        let mut files = self.files.write().unwrap();
+        let entry = files.entry(path.to_path_buf()).or_insert_with(Vec::new);
+        entry.extend_from_slice(data);
         Ok(())
     }
 
@@ -347,6 +376,47 @@ mod tests {
         fs.write_atomic(&path, b"second").expect("write");
 
         assert_eq!(fs.get_file(&path), Some(b"second".to_vec()));
+    }
+
+    // --- Append atomic ---
+
+    #[test]
+    fn test_mock_append_atomic_creates_file() {
+        let fs = MockFilesystem::new();
+        let path = PathBuf::from("/tmp/status.jsonl");
+
+        fs.append_atomic(&path, b"line1\n").expect("append");
+
+        assert!(fs.exists(&path));
+        assert_eq!(fs.get_file(&path), Some(b"line1\n".to_vec()));
+    }
+
+    #[test]
+    fn test_mock_append_atomic_appends() {
+        let fs = MockFilesystem::new();
+        let path = PathBuf::from("/tmp/status.jsonl");
+
+        fs.append_atomic(&path, b"line1\n").expect("append 1");
+        fs.append_atomic(&path, b"line2\n").expect("append 2");
+        fs.append_atomic(&path, b"line3\n").expect("append 3");
+
+        assert_eq!(
+            fs.get_file(&path),
+            Some(b"line1\nline2\nline3\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_mock_append_atomic_to_existing() {
+        let fs = MockFilesystem::new();
+        let path = PathBuf::from("/tmp/status.jsonl");
+
+        // Pre-populate file
+        fs.add_file(path.clone(), b"existing\n".to_vec());
+
+        fs.append_atomic(&path, b"new\n").expect("append");
+
+        assert_eq!(fs.get_file(&path), Some(b"existing\nnew\n".to_vec()));
     }
 
     // --- List snapshots ---
@@ -615,6 +685,57 @@ mod tests {
         fs.write_atomic(&path, b"second").expect("write 2");
 
         assert_eq!(fs::read(&path).unwrap(), b"second");
+    }
+
+    #[test]
+    fn test_real_fs_append_atomic_creates_file() {
+        let dir = tempdir().expect("create temp dir");
+        let fs = RealFilesystem;
+        let path = dir.path().join("status.jsonl");
+
+        fs.append_atomic(&path, b"line1\n").expect("append");
+
+        assert!(path.exists());
+        assert_eq!(fs::read(&path).unwrap(), b"line1\n");
+    }
+
+    #[test]
+    fn test_real_fs_append_atomic_appends() {
+        let dir = tempdir().expect("create temp dir");
+        let fs = RealFilesystem;
+        let path = dir.path().join("status.jsonl");
+
+        fs.append_atomic(&path, b"line1\n").expect("append 1");
+        fs.append_atomic(&path, b"line2\n").expect("append 2");
+        fs.append_atomic(&path, b"line3\n").expect("append 3");
+
+        assert_eq!(fs::read(&path).unwrap(), b"line1\nline2\nline3\n");
+    }
+
+    #[test]
+    fn test_real_fs_append_atomic_to_existing() {
+        let dir = tempdir().expect("create temp dir");
+        let fs = RealFilesystem;
+        let path = dir.path().join("status.jsonl");
+
+        // Pre-populate file
+        fs::write(&path, b"existing\n").expect("write");
+
+        fs.append_atomic(&path, b"new\n").expect("append");
+
+        assert_eq!(fs::read(&path).unwrap(), b"existing\nnew\n");
+    }
+
+    #[test]
+    fn test_real_fs_append_atomic_creates_parent_dirs() {
+        let dir = tempdir().expect("create temp dir");
+        let fs = RealFilesystem;
+        let path = dir.path().join("nested").join("dir").join("status.jsonl");
+
+        fs.append_atomic(&path, b"data\n").expect("append");
+
+        assert!(path.exists());
+        assert_eq!(fs::read(&path).unwrap(), b"data\n");
     }
 
     #[test]

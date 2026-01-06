@@ -1,104 +1,30 @@
-Update the existing `ibsr` single-binary tool to address the following issues observed on Debian:
+While the core of the tool is high quality and professional, there are three primary gaps between your current implementation and the requirements outlined in **prompt.md**.
 
-Observed problems:
-- Reporter processed stale snapshots from previous runs (snapshots processed > collection cycles, duration mismatch).
-- Output files overwrite and accumulate data in the same directory.
-- `rules.json` output is invalid JSON (missing closing brace / incomplete write).
-- `evidence.csv` is missing newline at EOF (output glued to shell prompt).
-- SYN flood test (nmap synflood) did not trigger offenders; current `success_ratio` metric is wrong because ACK count includes established-session ACKs, producing impossible ratios (>1).
-- CLI lacks `-v/--verbose` logging.
-- Collection being duration-only is disliked; prefer continuous with optional duration.
-- Need status reporting interval (“it’s running…” messages).
-- Need to monitor multiple destination ports (“a couple of ports”).
+### 1. BPF Multi-Port Implementation
 
-Hard constraints:
-- Tests-first: **ALL tests written before implementation**; no function without a test.
-- 100% coverage enforced.
-- macOS dev; tests run via docker-compose (unit tests default non-privileged; integration tests in separate privileged compose file if needed).
-- Collector remains passive: never drop/redirect/copy packets; no payload inspection beyond deriving header lengths.
-- Guard in `../nr-guard` must not be edited and is not used at runtime.
+The most significant missing feature is actual multi-port filtering at the kernel level.
 
-Implement the following changes:
+* **BPF C Program:** The `counter.bpf.c` program defines a `config_map` with `max_entries, 1` and a single `__u16` value. The logic only checks the TCP destination port against this one configured value. To meet Requirement 5, this map needs to store an array or a bitmask of ports, and the C code must iterate through or check the set of allowed ports.
+* **Rust Loader:** The `BpfMapReader::new` function currently accepts only a single `u16` port.
+* **CLI Orchestration:** In `main.rs`, both `run_collect` and `run_run` contain an explicit `TODO: Multi-port BPF support` and currently only pass `ports[0]` to the reader.
 
-1) Timestamped run directories (no overwrite, no stale snapshots)
-- `ibsr run` must create a unique run directory inside `--out-dir`, e.g. `--out-dir ./output` creates `./output/ibsr-YYYYMMDD-HHMMSSZ/`.
-- All artifacts must be written inside that run dir:
-  - `snapshots/` (or equivalent)
-  - `report.md`, `rules.json`, `evidence.csv`
-- Reporter must only read snapshots from the run dir created in this invocation (no mixing).
-- Add tests that prove:
-  - new run dir is created and unique
-  - files are written into that directory
-  - reporter reads only those snapshots
-  - no overwrite of previous runs
+### 2. Status Reporting Interval (Requirement 4)
 
-2) JSON/CSV correctness
-- Fix `rules.json` writing: always write complete, valid JSON with closing braces and newline at EOF.
-- Fix `evidence.csv`: always newline-terminate each row and newline at EOF.
-- Add tests:
-  - rules.json parses as JSON (strict parser)
-  - evidence.csv ends with newline and has correct column count
+The requirement for periodic “it’s running…” messages is not yet implemented.
 
-3) Collection mode: continuous by default, optional duration
-- `ibsr collect` and `ibsr run`:
-  - default: run until SIGINT/Ctrl+C
-  - optional: `--duration-sec` stops automatically after N seconds
-- Add tests for:
-  - duration specified stops
-  - no duration => continues (test via mocked clock + cancellation token, not real sleep)
+* **Collection Loop:** The `run_collection_loop` in `collect.rs` sleeps for 1 second between cycles but lacks the logic to track the `report_interval_sec`.
+* **Missing Metrics:** The loop does not calculate or print the periodic status report containing elapsed time, snapshots written, matched packets/SYNs, unique keys, and top talkers required by the prompt.
 
-4) Verbose logging + status reporting interval
-- Add `-v/--verbose` and `-vv`:
-  - default: minimal output
-  - -v: show config summary + per-report-interval status line
-  - -vv: include internal counters, snapshot counts, matched packet/syn totals
-- Add `--report-interval-sec` (default 60):
-  - prints “still running” status (elapsed, snapshots written, matched packets/syn, unique keys, top talkers)
-  - ensure this does not require root or kernel in unit tests; use mocks.
-- Add tests for deterministic logging output given mocked clock and mocked counters.
+### 3. Interface and Attachment Visibility (Requirement 7)
 
-5) Monitor multiple destination ports
-- Replace single `--dst-port` with one of:
-  - `--dst-ports 22,8899` (comma-separated) OR allow repeatable `--dst-port`.
-- Limit to a small bounded set (e.g. max 8) to keep XDP bounded.
-- XDP filter must match if dest port is in the configured set.
-- Snapshot output must not mix ports incorrectly:
-  - Either write separate snapshot streams per port (recommended), OR include dst_port per BucketEntry.
-- Add tests:
-  - parsing `--dst-ports`
-  - enforcing max ports
-  - snapshot schema reflects correct port association
-  - reporter handles multi-port snapshots deterministically
+The tool is missing the "operator UX" logs that provide visibility into the BPF attachment process.
 
-6) Fix SYN-flood detection metric (handshake approximation)
-- Current `success_ratio = total_ack / total_syn` is invalid because it counts established ACKs.
-- Replace ack counting with “handshake ACK” approximation:
-  - count ACK packets where:
-    - ACK set
-    - SYN not set
-    - RST not set
-    - payload length == 0 (derive from IP total length - IP header - TCP header)
-- Define `handshake_success_ratio = handshake_ack / max(syn, 1)`.
-- Use this in trigger condition instead of total_ack.
-- Add tests using synthetic packet events/counters showing:
-  - established ACK traffic does not inflate handshake_ack
-  - synflood (many SYN, few handshake_ack) triggers offenders
-  - legitimate traffic (SYN with handshake_ack) does not trigger
+* **Missing Logs:** There is currently no output confirming the **selected interface name**, the **attach mode** (native vs. generic), or a confirmation that the **XDP program attached successfully**.
+* **Real-time Totals:** Requirement 7 also asks for logs showing matched packet and SYN totals increasing *during* collection; currently, a summary is only printed once collection finishes or the program exits.
 
-7) Interface detection visibility
-- Ensure logs show:
-  - selected interface name
-  - attach mode (native/generic)
-  - confirmation that XDP attached successfully
-  - matched packet/syn totals increasing during collection
-- Add tests around interface selection logic (mock routing table or mock detector) and logging output.
+### Summary Checklist of Missing Items:
 
-Testing rules (strict):
-- Write all tests first for each change above.
-- Any new function must be covered by at least one test.
-- Use mocks for filesystem/clock/bpf-map access/CLI output.
-- Unit tests must not require privileged BPF.
-- Integration tests requiring attach/load BPF go into a separate `docker-compose.integration.yml`.
-
-Deliverable:
-- Updated code passing all tests and 100% coverage, with deterministic outputs and improved operator UX.
+* [ ] **Update BPF C code** to handle multiple destination ports (up to 8).
+* [ ] **Update `BpfMapReader**` to load and manage a set of ports rather than one.
+* [ ] **Implement the status timer** in `run_collection_loop` to trigger messages every `report_interval_sec`.
+* [ ] **Add start-up logging** in `main.rs` or the command execution paths to show interface, mode, and attachment success.

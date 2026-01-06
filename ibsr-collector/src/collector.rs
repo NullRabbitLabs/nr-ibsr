@@ -424,6 +424,10 @@ mod tests {
             Ok(())
         }
 
+        fn append_atomic(&self, _path: &Path, _data: &[u8]) -> Result<(), FsError> {
+            Ok(())
+        }
+
         fn read_file(&self, _path: &Path) -> Result<String, FsError> {
             Err(FsError::Path("simulated read failure".to_string()))
         }
@@ -451,6 +455,10 @@ mod tests {
     impl Filesystem for ArcFs {
         fn write_atomic(&self, path: &Path, data: &[u8]) -> Result<(), FsError> {
             self.0.write_atomic(path, data)
+        }
+
+        fn append_atomic(&self, path: &Path, data: &[u8]) -> Result<(), FsError> {
+            self.0.append_atomic(path, data)
         }
 
         fn list_snapshots(&self, dir: &Path) -> Result<Vec<ibsr_fs::SnapshotFile>, FsError> {
