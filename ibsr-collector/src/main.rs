@@ -39,15 +39,11 @@ fn run_collect(
     args: ibsr_collector::CollectArgs,
     shutdown: &ShutdownFlag,
 ) -> Result<(), CommandError> {
-    #[cfg(feature = "bpf")]
     let map_reader = ibsr_bpf::BpfMapReader::new(
         args.iface.as_deref().unwrap_or("eth0"),
         args.dst_port,
         args.map_size,
     )?;
-
-    #[cfg(not(feature = "bpf"))]
-    let map_reader = ibsr_bpf::MockMapReader::new();
 
     let clock = SystemClock;
     let fs = RealFilesystem;
@@ -88,15 +84,11 @@ fn run_run(
     args: ibsr_collector::RunArgs,
     shutdown: &ShutdownFlag,
 ) -> Result<(), CommandError> {
-    #[cfg(feature = "bpf")]
     let map_reader = ibsr_bpf::BpfMapReader::new(
         args.iface.as_deref().unwrap_or("eth0"),
         args.dst_port,
         args.map_size,
     )?;
-
-    #[cfg(not(feature = "bpf"))]
-    let map_reader = ibsr_bpf::MockMapReader::new();
 
     let clock = SystemClock;
     let fs = RealFilesystem;

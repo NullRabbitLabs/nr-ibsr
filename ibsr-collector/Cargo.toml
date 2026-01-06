@@ -9,10 +9,6 @@ description = "IBSR XDP collector CLI"
 name = "ibsr"
 path = "src/main.rs"
 
-[features]
-default = []
-bpf = ["ibsr-bpf/bpf"]
-
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3.4"
