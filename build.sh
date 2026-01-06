@@ -46,8 +46,8 @@ esac
 
 echo "Building IBSR for $ARCH ($PLATFORM)..."
 
-# Build the image with all source files
-docker build --platform "$PLATFORM" -t ibsr-build .
+# Build the image with all source files (no-cache to pick up code changes)
+docker build --no-cache --platform "$PLATFORM" -t ibsr-build .
 
 # Run cargo build inside container (no volume mount to avoid target dir conflicts)
 CONTAINER_ID=$(docker create --platform "$PLATFORM" ibsr-build cargo build --release)

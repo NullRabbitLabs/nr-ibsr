@@ -2,7 +2,7 @@
 //!
 //! Runs the XDP collector to gather traffic metrics.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use chrono::{TimeZone, Utc};
 use ibsr_bpf::MapReader;
@@ -16,7 +16,7 @@ use crate::logger::Logger;
 use crate::signal::ShutdownCheck;
 use crate::sleeper::Sleeper;
 
-use super::{CommandError, CommandResult};
+use super::CommandResult;
 
 /// Format run directory name from Unix timestamp.
 /// Format: ibsr-YYYYMMDD-HHMMSSZ
@@ -69,15 +69,15 @@ where
     let run_ts = clock.now_unix_sec();
     let run_dir_name = format_run_dir_name(run_ts);
     let run_dir = args.out_dir.join(&run_dir_name);
-    fs.create_dir_all(&run_dir)
-        .map_err(|e| CommandError::IoError(e.to_string()))?;
+    fs.create_dir_all(&run_dir)?;
 
     // Log startup configuration at verbose level
     let ports = args.get_all_ports();
     logger.verbose(&format!(
-        "Starting collector: ports={:?}, out_dir={}, report_interval={}s",
+        "Starting collector: ports={:?}, out_dir={}, snapshot_interval={}s, report_interval={}s",
         ports,
         run_dir.display(),
+        args.snapshot_interval_sec,
         args.report_interval_sec
     ));
 
@@ -104,6 +104,7 @@ where
         &run_dir,
         &config,
         args.duration_sec,
+        args.snapshot_interval_sec,
         args.report_interval_sec,
         sleeper,
         shutdown,
@@ -116,7 +117,11 @@ where
 /// Run the collection loop.
 ///
 /// If duration_sec is Some, runs for that duration.
-/// If duration_sec is None, runs a single cycle (for testing) or until interrupted.
+/// If duration_sec is None, runs continuously until shutdown.
+///
+/// Internal counter reads happen every cycle (1 second), but snapshots
+/// are only written at `snapshot_interval_sec` intervals.
+#[allow(clippy::too_many_arguments)]
 fn run_collection_loop<M, C, F, W, S, H, L>(
     map_reader: &M,
     clock: &C,
@@ -126,6 +131,7 @@ fn run_collection_loop<M, C, F, W, S, H, L>(
     output_dir: &Path,
     config: &CollectorConfig,
     duration_sec: Option<u64>,
+    snapshot_interval_sec: u64,
     report_interval_sec: u64,
     sleeper: &S,
     shutdown: &H,
@@ -142,11 +148,13 @@ where
 {
     let mut cycles: u64 = 0;
     let mut total_ips: usize = 0;
+    let mut interval_ips: usize = 0;  // IPs collected since last snapshot
     let mut snapshots_written: u64 = 0;
     let mut files_rotated = 0;
 
     let start_ts = clock.now_unix_sec();
     let end_ts = duration_sec.map(|d| start_ts + d);
+    let mut last_snapshot_ts = start_ts;
     let mut last_report_ts = start_ts;
 
     loop {
@@ -155,38 +163,44 @@ where
             break;
         }
 
-        // Run one collection cycle
-        let result = collect_once(map_reader, clock, writer, fs, output_dir, config)?;
-
-        cycles += 1;
-        total_ips += result.bucket_count;
-        snapshots_written += 1;
-        files_rotated += result.rotated_count;
-
-        // Write status line after each cycle
         let current_ts = clock.now_unix_sec();
-        let status = StatusLine::new(
-            current_ts,
-            cycles,
-            result.bucket_count as u64,
-            snapshots_written,
-        );
-        // Ignore status write errors - don't fail collection if status write fails
-        let _ = status_writer.append(&status);
+
+        // Check if it's time to write a snapshot
+        let should_write_snapshot = current_ts >= last_snapshot_ts + snapshot_interval_sec;
+
+        if should_write_snapshot {
+            // Run collection and write snapshot
+            let result = collect_once(map_reader, clock, writer, fs, output_dir, config)?;
+
+            cycles += 1;
+            interval_ips = result.bucket_count;
+            total_ips += result.bucket_count;
+            snapshots_written += 1;
+            files_rotated += result.rotated_count;
+            last_snapshot_ts = current_ts;
+
+            // Write status line after snapshot
+            let status = StatusLine::new(
+                current_ts,
+                cycles,
+                result.bucket_count as u64,
+                snapshots_written,
+            );
+            let _ = status_writer.append(&status);
+        }
 
         // Log periodic status to stdout based on report_interval_sec
         if current_ts >= last_report_ts + report_interval_sec {
             logger.info(&format!(
-                "cycle={} ips={} snapshots={} rotated={}",
-                cycles, result.bucket_count, snapshots_written, files_rotated
+                "cycle={} interval_ips={} total_ips={} snapshots={} snapshot_interval={}s",
+                cycles, interval_ips, total_ips, snapshots_written, snapshot_interval_sec
             ));
             last_report_ts = current_ts;
         }
 
-        // Check if duration has expired (after completing cycle)
-        // If duration_sec is None, we run continuously until shutdown
+        // Check if duration has expired
         if let Some(end) = end_ts {
-            if clock.now_unix_sec() >= end {
+            if current_ts >= end {
                 break;
             }
         }
@@ -206,6 +220,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logger::NullLogger;
     use crate::signal::NeverShutdown;
     use crate::sleeper::MockSleeper;
     use ibsr_bpf::{Counters, MockMapReader};
@@ -221,14 +236,12 @@ mod tests {
     #[test]
     fn test_execute_collect_empty_map() {
         let map_reader = MockMapReader::new();
-        // AdvancingClock: starts at 1000, increments by 5 each call
-        // - Call 1 (start_ts): 1000, end_ts = 1010
-        // - Call 2 (collect_once): 1005
-        // - Call 3 (end check): 1010 >= 1010, exit
-        let clock = AdvancingClock::new(1000, 5);
+        // AdvancingClock: starts at 1704067200 (2024-01-01 00:00:00), increments by 5 each call
+        let clock = AdvancingClock::new(1704067200, 5);
         let fs = MockFilesystem::new();
         let sleeper = MockSleeper::new();
         let shutdown = NeverShutdown::new();
+        let logger = NullLogger;
         let args = CollectArgs {
             dst_port: vec![8899],
             dst_ports: None,
@@ -240,10 +253,11 @@ mod tests {
             map_size: 100000,
             verbose: 0,
             report_interval_sec: 60,
+            snapshot_interval_sec: 1, // Write snapshot immediately for test
         };
 
         let result =
-            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown).expect("execute");
+            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown, &logger).expect("execute");
 
         assert_eq!(result.cycles, 1);
         assert_eq!(result.total_ips, 0);
@@ -276,10 +290,11 @@ mod tests {
             },
         );
 
-        let clock = AdvancingClock::new(1000, 5);
+        let clock = AdvancingClock::new(1704067200, 5);
         let fs = MockFilesystem::new();
         let sleeper = MockSleeper::new();
         let shutdown = NeverShutdown::new();
+        let logger = NullLogger;
         let args = CollectArgs {
             dst_port: vec![8899],
             dst_ports: None,
@@ -291,10 +306,11 @@ mod tests {
             map_size: 100000,
             verbose: 0,
             report_interval_sec: 60,
+            snapshot_interval_sec: 1,
         };
 
         let result =
-            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown).expect("execute");
+            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown, &logger).expect("execute");
 
         assert_eq!(result.cycles, 1);
         assert_eq!(result.total_ips, 2);
@@ -306,11 +322,12 @@ mod tests {
         use crate::signal::CountingShutdown;
 
         let map_reader = MockMapReader::new();
-        let clock = AdvancingClock::new(1000, 1);
+        let clock = AdvancingClock::new(1704067200, 1);
         let fs = MockFilesystem::new();
         let sleeper = MockSleeper::new();
         // Allow exactly 1 cycle before shutdown
         let shutdown = CountingShutdown::new(1);
+        let logger = NullLogger;
         let args = CollectArgs {
             dst_port: vec![8899],
             dst_ports: None,
@@ -322,10 +339,11 @@ mod tests {
             map_size: 100000,
             verbose: 0,
             report_interval_sec: 60,
+            snapshot_interval_sec: 1,
         };
 
         let result =
-            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown).expect("execute");
+            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown, &logger).expect("execute");
 
         // With CountingShutdown(1), first check returns false, we run 1 cycle,
         // then second check returns true and we exit
@@ -335,11 +353,11 @@ mod tests {
     #[test]
     fn test_execute_collect_invalid_port() {
         let map_reader = MockMapReader::new();
-        // MockClock is fine here since we error before the loop runs
-        let clock = MockClock::new(1000);
+        let clock = MockClock::new(1704067200);
         let fs = MockFilesystem::new();
         let sleeper = MockSleeper::new();
         let shutdown = NeverShutdown::new();
+        let logger = NullLogger;
         let args = CollectArgs {
             dst_port: vec![], // No ports specified - Invalid
             dst_ports: None,
@@ -351,9 +369,10 @@ mod tests {
             map_size: 100000,
             verbose: 0,
             report_interval_sec: 60,
+            snapshot_interval_sec: 1,
         };
 
-        let result = execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown);
+        let result = execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown, &logger);
         assert!(result.is_err());
         assert!(matches!(result, Err(CommandError::InvalidArgument(_))));
     }
@@ -361,11 +380,11 @@ mod tests {
     #[test]
     fn test_execute_collect_invalid_max_files() {
         let map_reader = MockMapReader::new();
-        // MockClock is fine here since we error before the loop runs
-        let clock = MockClock::new(1000);
+        let clock = MockClock::new(1704067200);
         let fs = MockFilesystem::new();
         let sleeper = MockSleeper::new();
         let shutdown = NeverShutdown::new();
+        let logger = NullLogger;
         let args = CollectArgs {
             dst_port: vec![8899],
             dst_ports: None,
@@ -377,9 +396,10 @@ mod tests {
             map_size: 100000,
             verbose: 0,
             report_interval_sec: 60,
+            snapshot_interval_sec: 1,
         };
 
-        let result = execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown);
+        let result = execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown, &logger);
         assert!(result.is_err());
         assert!(matches!(result, Err(CommandError::InvalidArgument(_))));
     }
@@ -387,16 +407,18 @@ mod tests {
     #[test]
     fn test_execute_collect_triggers_rotation() {
         let map_reader = MockMapReader::new();
-        let clock = AdvancingClock::new(5000, 5);
+        // Start at 2024-01-01 05:00:00
+        let clock = AdvancingClock::new(1704085200, 5);
         let fs = MockFilesystem::new();
         let sleeper = MockSleeper::new();
         let shutdown = NeverShutdown::new();
+        let logger = NullLogger;
         let out_dir = PathBuf::from("/tmp/snapshots");
 
-        // Pre-populate with old snapshots
-        fs.add_file(out_dir.join("snapshot_1000.jsonl"), vec![]);
-        fs.add_file(out_dir.join("snapshot_2000.jsonl"), vec![]);
-        fs.add_file(out_dir.join("snapshot_3000.jsonl"), vec![]);
+        // Pre-populate with old hourly snapshots
+        fs.add_file(out_dir.join("snapshot_2024010100.jsonl"), vec![]);
+        fs.add_file(out_dir.join("snapshot_2024010101.jsonl"), vec![]);
+        fs.add_file(out_dir.join("snapshot_2024010102.jsonl"), vec![]);
 
         let args = CollectArgs {
             dst_port: vec![8899],
@@ -409,10 +431,11 @@ mod tests {
             map_size: 100000,
             verbose: 0,
             report_interval_sec: 60,
+            snapshot_interval_sec: 1,
         };
 
         let result =
-            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown).expect("execute");
+            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown, &logger).expect("execute");
 
         // Should have rotated some files
         assert!(result.files_rotated > 0);
@@ -434,11 +457,12 @@ mod tests {
     #[test]
     fn test_execute_collect_writes_snapshot() {
         let map_reader = MockMapReader::new();
-        // AdvancingClock starts at 1000, so snapshot timestamp is 1005 (second call)
-        let clock = AdvancingClock::new(1000, 5);
+        // 2024-01-01 00:00:00 UTC = 1704067200
+        let clock = AdvancingClock::new(1704067200, 5);
         let fs = Arc::new(MockFilesystem::new());
         let sleeper = MockSleeper::new();
         let shutdown = NeverShutdown::new();
+        let logger = NullLogger;
         let out_dir = PathBuf::from("/tmp/snapshots");
 
         let args = CollectArgs {
@@ -452,15 +476,18 @@ mod tests {
             map_size: 100000,
             verbose: 0,
             report_interval_sec: 60,
+            snapshot_interval_sec: 1,
         };
 
-        execute_collect(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown).expect("execute");
+        execute_collect(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown, &logger).expect("execute");
 
-        // Verify snapshot was written
-        let files = fs.list_snapshots(&out_dir).expect("list");
-        assert_eq!(files.len(), 1);
-        // Timestamp is from the second clock call (1005) since first is for start_ts
-        assert_eq!(files[0].timestamp, 1005);
+        // Verify snapshot was written - files go to run directory, not out_dir directly
+        // The run directory is named like ibsr-YYYYMMDD-HHMMSSZ
+        let files = fs.files();
+        let snapshot_files: Vec<_> = files.keys()
+            .filter(|p| p.to_string_lossy().contains("snapshot_") && p.to_string_lossy().ends_with(".jsonl"))
+            .collect();
+        assert_eq!(snapshot_files.len(), 1);
     }
 
     // ===========================================
@@ -472,11 +499,12 @@ mod tests {
         use crate::signal::CountingShutdown;
 
         let map_reader = MockMapReader::new();
-        let clock = AdvancingClock::new(1000, 1);
+        let clock = AdvancingClock::new(1704067200, 1);
         let fs = MockFilesystem::new();
         let sleeper = MockSleeper::new();
         // Signal shutdown after 5 cycles
         let shutdown = CountingShutdown::new(5);
+        let logger = NullLogger;
 
         let args = CollectArgs {
             dst_port: vec![8899],
@@ -489,10 +517,11 @@ mod tests {
             map_size: 100000,
             verbose: 0,
             report_interval_sec: 60,
+            snapshot_interval_sec: 1,
         };
 
         let result =
-            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown).expect("execute");
+            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown, &logger).expect("execute");
 
         // Should have run 5 cycles before shutdown
         assert_eq!(result.cycles, 5);
@@ -505,10 +534,11 @@ mod tests {
     #[test]
     fn test_execute_collect_writes_status_file() {
         let map_reader = MockMapReader::new();
-        let clock = AdvancingClock::new(1000, 5);
+        let clock = AdvancingClock::new(1704067200, 5);
         let fs = Arc::new(MockFilesystem::new());
         let sleeper = MockSleeper::new();
         let shutdown = NeverShutdown::new();
+        let logger = NullLogger;
         let out_dir = PathBuf::from("/tmp/snapshots");
 
         let args = CollectArgs {
@@ -522,15 +552,20 @@ mod tests {
             map_size: 100000,
             verbose: 0,
             report_interval_sec: 60,
+            snapshot_interval_sec: 1,
         };
 
-        execute_collect(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown).expect("execute");
+        execute_collect(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown, &logger).expect("execute");
 
-        // Verify status.jsonl was written
-        let status_path = out_dir.join("status.jsonl");
-        let content = fs
-            .get_file(&status_path)
-            .expect("status file should exist");
+        // Verify status.jsonl was written - it goes in run directory
+        let files = fs.files();
+        let status_files: Vec<_> = files.keys()
+            .filter(|p| p.to_string_lossy().ends_with("status.jsonl"))
+            .collect();
+        assert_eq!(status_files.len(), 1);
+
+        let status_path = status_files[0];
+        let content = fs.get_file(status_path).expect("status file should exist");
         let content_str = String::from_utf8_lossy(&content);
 
         // Should have one status line
@@ -549,10 +584,11 @@ mod tests {
         use crate::signal::CountingShutdown;
 
         let map_reader = MockMapReader::new();
-        let clock = AdvancingClock::new(1000, 1);
+        let clock = AdvancingClock::new(1704067200, 1);
         let fs = Arc::new(MockFilesystem::new());
         let sleeper = MockSleeper::new();
         let shutdown = CountingShutdown::new(3);
+        let logger = NullLogger;
         let out_dir = PathBuf::from("/tmp/snapshots");
 
         let args = CollectArgs {
@@ -566,17 +602,20 @@ mod tests {
             map_size: 100000,
             verbose: 0,
             report_interval_sec: 60,
+            snapshot_interval_sec: 1,
         };
 
         let result =
-            execute_collect(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown).expect("execute");
+            execute_collect(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown, &logger).expect("execute");
         assert_eq!(result.cycles, 3);
 
         // Verify status.jsonl has 3 lines
-        let status_path = out_dir.join("status.jsonl");
-        let content = fs
-            .get_file(&status_path)
-            .expect("status file should exist");
+        let files = fs.files();
+        let status_files: Vec<_> = files.keys()
+            .filter(|p| p.to_string_lossy().ends_with("status.jsonl"))
+            .collect();
+        let status_path = status_files[0];
+        let content = fs.get_file(status_path).expect("status file should exist");
         let content_str = String::from_utf8_lossy(&content);
         let lines: Vec<&str> = content_str.lines().collect();
         assert_eq!(lines.len(), 3);
@@ -615,10 +654,11 @@ mod tests {
             },
         );
 
-        let clock = AdvancingClock::new(1000, 5);
+        let clock = AdvancingClock::new(1704067200, 5);
         let fs = Arc::new(MockFilesystem::new());
         let sleeper = MockSleeper::new();
         let shutdown = NeverShutdown::new();
+        let logger = NullLogger;
         let out_dir = PathBuf::from("/tmp/snapshots");
 
         let args = CollectArgs {
@@ -632,15 +672,18 @@ mod tests {
             map_size: 100000,
             verbose: 0,
             report_interval_sec: 60,
+            snapshot_interval_sec: 1,
         };
 
-        execute_collect(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown).expect("execute");
+        execute_collect(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown, &logger).expect("execute");
 
         // Verify status tracks IPs collected
-        let status_path = out_dir.join("status.jsonl");
-        let content = fs
-            .get_file(&status_path)
-            .expect("status file should exist");
+        let files = fs.files();
+        let status_files: Vec<_> = files.keys()
+            .filter(|p| p.to_string_lossy().ends_with("status.jsonl"))
+            .collect();
+        let status_path = status_files[0];
+        let content = fs.get_file(status_path).expect("status file should exist");
         let content_str = String::from_utf8_lossy(&content);
         let status: StatusLine =
             serde_json::from_str(content_str.lines().next().unwrap()).expect("valid JSON");

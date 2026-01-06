@@ -129,12 +129,15 @@ mod tests {
     }
 
     // --- Max files retention ---
+    // Note: Tests use hourly filenames (snapshot_YYYYMMDDHH.jsonl)
+    // Base timestamp: 2024-01-01 00:00:00 UTC = 1704067200
+    // Each hour adds 3600 seconds
 
     #[test]
     fn test_rotate_no_files() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(1000);
-        let config = RotationConfig::new(10, 3600);
+        let clock = MockClock::new(1704067200); // 2024-01-01 00:00:00
+        let config = RotationConfig::new(10, 86400);
         let dir = PathBuf::from("/tmp/snapshots");
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
@@ -146,14 +149,16 @@ mod tests {
     #[test]
     fn test_rotate_under_max_files() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(5000);
+        let clock = MockClock::new(1704085200); // 2024-01-01 05:00:00
         let config = RotationConfig::new(10, 86400);
         let dir = PathBuf::from("/tmp/snapshots");
 
-        // Add 5 files (under the limit of 10)
-        for i in 1..=5 {
-            fs.add_file(dir.join(format!("snapshot_{}.jsonl", i * 1000)), vec![]);
-        }
+        // Add 5 hourly files (under the limit of 10)
+        fs.add_file(dir.join("snapshot_2024010100.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010101.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010102.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010103.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010104.jsonl"), vec![]);
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
 
@@ -164,14 +169,16 @@ mod tests {
     #[test]
     fn test_rotate_at_max_files() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(10000);
+        let clock = MockClock::new(1704085200); // 2024-01-01 05:00:00
         let config = RotationConfig::new(5, 86400);
         let dir = PathBuf::from("/tmp/snapshots");
 
         // Add exactly 5 files (at the limit)
-        for i in 1..=5 {
-            fs.add_file(dir.join(format!("snapshot_{}.jsonl", i * 1000)), vec![]);
-        }
+        fs.add_file(dir.join("snapshot_2024010100.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010101.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010102.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010103.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010104.jsonl"), vec![]);
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
 
@@ -182,14 +189,16 @@ mod tests {
     #[test]
     fn test_rotate_over_max_files() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(10000);
+        let clock = MockClock::new(1704085200); // 2024-01-01 05:00:00
         let config = RotationConfig::new(3, 86400);
         let dir = PathBuf::from("/tmp/snapshots");
 
         // Add 5 files (over the limit of 3)
-        for i in 1..=5 {
-            fs.add_file(dir.join(format!("snapshot_{}.jsonl", i * 1000)), vec![]);
-        }
+        fs.add_file(dir.join("snapshot_2024010100.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010101.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010102.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010103.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010104.jsonl"), vec![]);
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
 
@@ -198,23 +207,23 @@ mod tests {
 
         let remaining = fs.list_snapshots(&dir).unwrap();
         assert_eq!(remaining.len(), 3);
-        // Should keep the 3 newest files
-        assert_eq!(remaining[0].timestamp, 3000);
-        assert_eq!(remaining[1].timestamp, 4000);
-        assert_eq!(remaining[2].timestamp, 5000);
+        // Should keep the 3 newest files: 02, 03, 04
+        assert_eq!(remaining[0].timestamp, 1704074400); // 02:00
+        assert_eq!(remaining[1].timestamp, 1704078000); // 03:00
+        assert_eq!(remaining[2].timestamp, 1704081600); // 04:00
     }
 
     #[test]
     fn test_rotate_removes_oldest_first() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(10000);
+        let clock = MockClock::new(1704085200); // 2024-01-01 05:00:00
         let config = RotationConfig::new(2, 86400);
         let dir = PathBuf::from("/tmp/snapshots");
 
-        fs.add_file(dir.join("snapshot_1000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_3000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_2000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_4000.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010100.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010103.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010101.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010104.jsonl"), vec![]);
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
 
@@ -222,9 +231,9 @@ mod tests {
 
         let remaining = fs.list_snapshots(&dir).unwrap();
         assert_eq!(remaining.len(), 2);
-        // Should keep newest: 3000 and 4000
-        assert_eq!(remaining[0].timestamp, 3000);
-        assert_eq!(remaining[1].timestamp, 4000);
+        // Should keep newest: 03 and 04
+        assert_eq!(remaining[0].timestamp, 1704078000); // 03:00
+        assert_eq!(remaining[1].timestamp, 1704081600); // 04:00
     }
 
     // --- Max age retention ---
@@ -232,14 +241,14 @@ mod tests {
     #[test]
     fn test_rotate_no_expired_files() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(5000);
-        let config = RotationConfig::new(100, 3600); // 1 hour max age
+        let clock = MockClock::new(1704078000); // 2024-01-01 03:00:00
+        let config = RotationConfig::new(100, 14400); // 4 hours max age
         let dir = PathBuf::from("/tmp/snapshots");
 
-        // All files are within max age
-        fs.add_file(dir.join("snapshot_4000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_4500.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_4900.jsonl"), vec![]);
+        // All files are within max age (4 hours = 14400 sec)
+        fs.add_file(dir.join("snapshot_2024010100.jsonl"), vec![]); // age = 3h
+        fs.add_file(dir.join("snapshot_2024010101.jsonl"), vec![]); // age = 2h
+        fs.add_file(dir.join("snapshot_2024010102.jsonl"), vec![]); // age = 1h
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
 
@@ -250,18 +259,18 @@ mod tests {
     #[test]
     fn test_rotate_some_expired_files() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(10000);
-        let config = RotationConfig::new(100, 3600); // 1 hour max age
+        // Current time: 2024-01-01 10:00:00 = 1704103200
+        let clock = MockClock::new(1704103200);
+        let config = RotationConfig::new(100, 7200); // 2 hour max age
         let dir = PathBuf::from("/tmp/snapshots");
 
-        // Files at: 1000, 5000, 9000
-        // At time 10000, max_age 3600:
-        // - 1000: age = 9000 > 3600, expired
-        // - 5000: age = 5000 > 3600, expired
-        // - 9000: age = 1000 < 3600, keep
-        fs.add_file(dir.join("snapshot_1000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_5000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_9000.jsonl"), vec![]);
+        // Files at different hours:
+        // - 06:00 (1704088800): age = 4h > 2h, expired
+        // - 07:00 (1704092400): age = 3h > 2h, expired
+        // - 09:00 (1704099600): age = 1h < 2h, keep
+        fs.add_file(dir.join("snapshot_2024010106.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010107.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010109.jsonl"), vec![]);
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
 
@@ -269,19 +278,20 @@ mod tests {
 
         let remaining = fs.list_snapshots(&dir).unwrap();
         assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].timestamp, 9000);
+        assert_eq!(remaining[0].timestamp, 1704099600); // 09:00
     }
 
     #[test]
     fn test_rotate_all_expired_files() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(100000);
-        let config = RotationConfig::new(100, 3600);
+        // Current time: 2024-01-02 00:00:00 = 1704153600
+        let clock = MockClock::new(1704153600);
+        let config = RotationConfig::new(100, 7200); // 2 hour max age
         let dir = PathBuf::from("/tmp/snapshots");
 
-        // All files are old
-        fs.add_file(dir.join("snapshot_1000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_2000.jsonl"), vec![]);
+        // All files are old (from previous day)
+        fs.add_file(dir.join("snapshot_2024010100.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010101.jsonl"), vec![]);
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
 
@@ -292,13 +302,14 @@ mod tests {
     #[test]
     fn test_rotate_exact_age_boundary() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(5000);
-        let config = RotationConfig::new(100, 1000); // 1000 sec max age
+        // Current time: 2024-01-01 02:00:00 = 1704074400
+        let clock = MockClock::new(1704074400);
+        let config = RotationConfig::new(100, 7200); // 2 hour max age
         let dir = PathBuf::from("/tmp/snapshots");
 
-        // File at 4000, age = 1000, exactly at boundary
-        // age > max_age_secs means 1000 > 1000 is false, so not expired
-        fs.add_file(dir.join("snapshot_4000.jsonl"), vec![]);
+        // File at 00:00 (1704067200), age = 2h exactly
+        // age > max_age_secs means 7200 > 7200 is false, so not expired
+        fs.add_file(dir.join("snapshot_2024010100.jsonl"), vec![]);
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
 
@@ -307,14 +318,15 @@ mod tests {
     }
 
     #[test]
-    fn test_rotate_one_second_over_age() {
+    fn test_rotate_one_hour_over_age() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(5001);
-        let config = RotationConfig::new(100, 1000);
+        // Current time: 2024-01-01 03:00:00 = 1704078000
+        let clock = MockClock::new(1704078000);
+        let config = RotationConfig::new(100, 7200); // 2 hour max age
         let dir = PathBuf::from("/tmp/snapshots");
 
-        // File at 4000, age = 1001 > 1000, expired
-        fs.add_file(dir.join("snapshot_4000.jsonl"), vec![]);
+        // File at 00:00 (1704067200), age = 3h > 2h, expired
+        fs.add_file(dir.join("snapshot_2024010100.jsonl"), vec![]);
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
 
@@ -327,29 +339,30 @@ mod tests {
     #[test]
     fn test_rotate_both_limits() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(10000);
-        let config = RotationConfig::new(2, 5000); // max 2 files, max age 5000 sec
+        // Current time: 2024-01-01 10:00:00 = 1704103200
+        let clock = MockClock::new(1704103200);
+        let config = RotationConfig::new(2, 18000); // max 2 files, max age 5h
         let dir = PathBuf::from("/tmp/snapshots");
 
-        // Files: 1000 (age 9000, expired), 6000 (age 4000, keep), 7000, 8000, 9000
-        // After age removal: 6000, 7000, 8000, 9000 (4 files)
-        // After count removal: 8000, 9000 (2 files)
-        fs.add_file(dir.join("snapshot_1000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_6000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_7000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_8000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_9000.jsonl"), vec![]);
+        // Files: 04:00 (age 6h, expired), 06:00 (age 4h, keep), 07:00, 08:00, 09:00
+        // After age removal: 06:00, 07:00, 08:00, 09:00 (4 files)
+        // After count removal: 08:00, 09:00 (2 files)
+        fs.add_file(dir.join("snapshot_2024010104.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010106.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010107.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010108.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010109.jsonl"), vec![]);
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
 
-        assert_eq!(result.removed_by_age, 1);  // 1000
-        assert_eq!(result.removed_by_count, 2); // 6000, 7000
+        assert_eq!(result.removed_by_age, 1);   // 04:00
+        assert_eq!(result.removed_by_count, 2); // 06:00, 07:00
         assert_eq!(result.total_removed(), 3);
 
         let remaining = fs.list_snapshots(&dir).unwrap();
         assert_eq!(remaining.len(), 2);
-        assert_eq!(remaining[0].timestamp, 8000);
-        assert_eq!(remaining[1].timestamp, 9000);
+        assert_eq!(remaining[0].timestamp, 1704096000); // 08:00
+        assert_eq!(remaining[1].timestamp, 1704099600); // 09:00
     }
 
     // --- RotationResult ---
@@ -367,17 +380,18 @@ mod tests {
     #[test]
     fn test_rotation_result_paths() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(10000);
+        // Current time: 2024-01-01 05:00:00
+        let clock = MockClock::new(1704085200);
         let config = RotationConfig::new(1, 86400);
         let dir = PathBuf::from("/tmp/snapshots");
 
-        fs.add_file(dir.join("snapshot_1000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_2000.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010100.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010101.jsonl"), vec![]);
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
 
         assert_eq!(result.removed_paths.len(), 1);
-        assert!(result.removed_paths[0].to_string_lossy().contains("1000"));
+        assert!(result.removed_paths[0].to_string_lossy().contains("2024010100"));
     }
 
     // --- Edge cases ---
@@ -385,11 +399,11 @@ mod tests {
     #[test]
     fn test_rotate_max_files_zero() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(10000);
+        let clock = MockClock::new(1704085200); // 2024-01-01 05:00:00
         let config = RotationConfig::new(0, 86400);
         let dir = PathBuf::from("/tmp/snapshots");
 
-        fs.add_file(dir.join("snapshot_9000.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010104.jsonl"), vec![]);
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
 
@@ -401,13 +415,14 @@ mod tests {
     #[test]
     fn test_rotate_max_age_zero() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(10000);
+        // Current time: exactly at hour 00:00 = 1704067200
+        let clock = MockClock::new(1704067200);
         let config = RotationConfig::new(100, 0);
         let dir = PathBuf::from("/tmp/snapshots");
 
-        // Files at 10000 (age = 0, boundary)
+        // File at same time (age = 0, boundary)
         // age > 0 is false for age = 0
-        fs.add_file(dir.join("snapshot_10000.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010100.jsonl"), vec![]);
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
 
@@ -419,13 +434,14 @@ mod tests {
     #[test]
     fn test_rotate_timestamp_in_future() {
         let fs = MockFilesystem::new();
-        let clock = MockClock::new(1000);
-        let config = RotationConfig::new(100, 500);
+        // Current time: 2024-01-01 00:00 = 1704067200
+        let clock = MockClock::new(1704067200);
+        let config = RotationConfig::new(100, 3600);
         let dir = PathBuf::from("/tmp/snapshots");
 
         // File timestamp is in the "future" relative to clock
         // saturating_sub will make age = 0
-        fs.add_file(dir.join("snapshot_2000.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010105.jsonl"), vec![]);
 
         let result = rotate_snapshots(&fs, &dir, &config, &clock).expect("rotate");
 

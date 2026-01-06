@@ -83,16 +83,35 @@ int xdp_counter(struct xdp_md *ctx)
     if ((void *)(tcp + 1) > data_end)
         return XDP_PASS;
 
-    // Check if packet matches any configured destination port
+    // Check if packet matches any configured destination port (manually unrolled)
     int port_matched = 0;
-    #pragma unroll
-    for (__u32 i = 0; i < 8; i++) {
-        __u16 *port_cfg = bpf_map_lookup_elem(&config_map, &i);
-        if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) {
-            port_matched = 1;
-            break;
-        }
-    }
+    __u32 key;
+    __u16 *port_cfg;
+
+    key = 0; port_cfg = bpf_map_lookup_elem(&config_map, &key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+
+    key = 1; port_cfg = bpf_map_lookup_elem(&config_map, &key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+
+    key = 2; port_cfg = bpf_map_lookup_elem(&config_map, &key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+
+    key = 3; port_cfg = bpf_map_lookup_elem(&config_map, &key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+
+    key = 4; port_cfg = bpf_map_lookup_elem(&config_map, &key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+
+    key = 5; port_cfg = bpf_map_lookup_elem(&config_map, &key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+
+    key = 6; port_cfg = bpf_map_lookup_elem(&config_map, &key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+
+    key = 7; port_cfg = bpf_map_lookup_elem(&config_map, &key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+
     if (!port_matched)
         return XDP_PASS;
 

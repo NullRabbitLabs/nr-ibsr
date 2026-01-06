@@ -1,12 +1,14 @@
 //! Snapshot writer abstraction for IBSR.
 //!
 //! Provides traits and implementations for writing snapshots to the filesystem
-//! with atomic write semantics (write to temp, then rename).
+//! as hourly-chunked append-only JSONL files.
 
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+use chrono::{TimeZone, Utc};
 
 use ibsr_schema::Snapshot;
 use thiserror::Error;
@@ -228,22 +230,40 @@ impl Filesystem for MockFilesystem {
     }
 }
 
-/// Parse timestamp from snapshot filename.
-/// Expected format: snapshot_<timestamp>.jsonl
+/// Parse hour timestamp from hourly snapshot filename.
+/// Expected format: snapshot_YYYYMMDDHH.jsonl
+/// Returns the Unix timestamp of the start of that hour.
 pub fn parse_snapshot_filename(path: &Path) -> Option<u64> {
     let stem = path.file_stem()?.to_str()?;
     let parts: Vec<&str> = stem.split('_').collect();
-    if parts.len() == 2 && parts[0] == "snapshot" {
-        parts[1].parse().ok()
-    } else {
-        None
+    if parts.len() != 2 || parts[0] != "snapshot" {
+        return None;
     }
+
+    let hour_str = parts[1];
+    // Expected format: YYYYMMDDHH (10 chars)
+    if hour_str.len() != 10 {
+        return None;
+    }
+
+    let year: i32 = hour_str[0..4].parse().ok()?;
+    let month: u32 = hour_str[4..6].parse().ok()?;
+    let day: u32 = hour_str[6..8].parse().ok()?;
+    let hour: u32 = hour_str[8..10].parse().ok()?;
+
+    // Create DateTime from parts
+    Utc.with_ymd_and_hms(year, month, day, hour, 0, 0)
+        .single()
+        .map(|dt| dt.timestamp() as u64)
 }
 
-/// Generate snapshot filename from timestamp.
-/// Format: snapshot_<timestamp>.jsonl
+/// Generate hourly snapshot filename from timestamp.
+/// Format: snapshot_YYYYMMDDHH.jsonl (one file per hour)
 pub fn snapshot_filename(timestamp: u64) -> String {
-    format!("snapshot_{}.jsonl", timestamp)
+    Utc.timestamp_opt(timestamp as i64, 0)
+        .single()
+        .map(|dt| format!("snapshot_{}.jsonl", dt.format("%Y%m%d%H")))
+        .unwrap_or_else(|| format!("snapshot_{}.jsonl", timestamp))
 }
 
 /// Trait for writing snapshots.
@@ -274,13 +294,14 @@ impl<F: Filesystem> SnapshotWriter for StandardSnapshotWriter<F> {
         // Ensure output directory exists
         self.fs.create_dir_all(&self.output_dir)?;
 
-        // Generate filename and path
+        // Generate hourly filename and path
         let filename = snapshot_filename(snapshot.ts_unix_sec);
         let path = self.output_dir.join(&filename);
 
-        // Serialize and write atomically
-        let json = snapshot.to_json();
-        self.fs.write_atomic(&path, json.as_bytes())?;
+        // Serialize as JSON line and append to hourly file
+        let mut json = snapshot.to_json();
+        json.push('\n');
+        self.fs.append_atomic(&path, json.as_bytes())?;
 
         Ok(path)
     }
@@ -297,41 +318,52 @@ mod tests {
     // Test Category D — Filesystem / Writer
     // ===========================================
 
-    // --- Timestamped naming scheme ---
+    // --- Hourly naming scheme ---
 
     #[test]
     fn test_snapshot_filename_format() {
-        let filename = snapshot_filename(1234567890);
-        assert_eq!(filename, "snapshot_1234567890.jsonl");
+        // 1704067200 = 2024-01-01 00:00:00 UTC
+        let filename = snapshot_filename(1704067200);
+        assert_eq!(filename, "snapshot_2024010100.jsonl");
+    }
+
+    #[test]
+    fn test_snapshot_filename_mid_hour() {
+        // 1704069000 = 2024-01-01 00:30:00 UTC (same hour as above)
+        let filename = snapshot_filename(1704069000);
+        assert_eq!(filename, "snapshot_2024010100.jsonl");
+    }
+
+    #[test]
+    fn test_snapshot_filename_next_hour() {
+        // 1704070800 = 2024-01-01 01:00:00 UTC (next hour)
+        let filename = snapshot_filename(1704070800);
+        assert_eq!(filename, "snapshot_2024010101.jsonl");
     }
 
     #[test]
     fn test_snapshot_filename_zero() {
+        // Epoch 0 = 1970-01-01 00:00:00 UTC
         let filename = snapshot_filename(0);
-        assert_eq!(filename, "snapshot_0.jsonl");
-    }
-
-    #[test]
-    fn test_snapshot_filename_max() {
-        let filename = snapshot_filename(u64::MAX);
-        assert_eq!(filename, format!("snapshot_{}.jsonl", u64::MAX));
+        assert_eq!(filename, "snapshot_1970010100.jsonl");
     }
 
     #[test]
     fn test_parse_snapshot_filename_valid() {
-        let path = PathBuf::from("/tmp/snapshot_1234567890.jsonl");
-        assert_eq!(parse_snapshot_filename(&path), Some(1234567890));
+        // snapshot_2024010100.jsonl -> 2024-01-01 00:00:00 UTC = 1704067200
+        let path = PathBuf::from("/tmp/snapshot_2024010100.jsonl");
+        assert_eq!(parse_snapshot_filename(&path), Some(1704067200));
     }
 
     #[test]
-    fn test_parse_snapshot_filename_zero() {
-        let path = PathBuf::from("snapshot_0.jsonl");
+    fn test_parse_snapshot_filename_zero_epoch() {
+        let path = PathBuf::from("snapshot_1970010100.jsonl");
         assert_eq!(parse_snapshot_filename(&path), Some(0));
     }
 
     #[test]
     fn test_parse_snapshot_filename_invalid_prefix() {
-        let path = PathBuf::from("data_1234567890.jsonl");
+        let path = PathBuf::from("data_2024010100.jsonl");
         assert_eq!(parse_snapshot_filename(&path), None);
     }
 
@@ -342,16 +374,30 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_snapshot_filename_old_unix_format() {
+        // Old format snapshot_1234567890.jsonl should not parse (wrong length)
+        let path = PathBuf::from("snapshot_1234567890.jsonl");
+        assert_eq!(parse_snapshot_filename(&path), None);
+    }
+
+    #[test]
     fn test_parse_snapshot_filename_non_numeric() {
-        let path = PathBuf::from("snapshot_abc.jsonl");
+        let path = PathBuf::from("snapshot_abcdefghij.jsonl");
         assert_eq!(parse_snapshot_filename(&path), None);
     }
 
     #[test]
     fn test_parse_snapshot_filename_wrong_extension() {
-        let path = PathBuf::from("snapshot_1234567890.json");
         // parse_snapshot_filename doesn't check extension, that's done in list_snapshots
-        assert_eq!(parse_snapshot_filename(&path), Some(1234567890));
+        let path = PathBuf::from("snapshot_2024010100.json");
+        assert_eq!(parse_snapshot_filename(&path), Some(1704067200));
+    }
+
+    #[test]
+    fn test_parse_snapshot_filename_invalid_date() {
+        // Invalid month 13
+        let path = PathBuf::from("snapshot_2024130100.jsonl");
+        assert_eq!(parse_snapshot_filename(&path), None);
     }
 
     // --- Atomic write (temp + rename) ---
@@ -436,17 +482,18 @@ mod tests {
         let fs = MockFilesystem::new();
         let dir = PathBuf::from("/tmp/snapshots");
 
-        fs.add_file(dir.join("snapshot_1000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_2000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_1500.jsonl"), vec![]);
+        // 2024-01-01 00:00 = 1704067200, 01:00 = 1704070800, 02:00 = 1704074400
+        fs.add_file(dir.join("snapshot_2024010100.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010102.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010101.jsonl"), vec![]);
 
         let files = fs.list_snapshots(&dir).expect("list");
 
         assert_eq!(files.len(), 3);
         // Should be sorted by timestamp
-        assert_eq!(files[0].timestamp, 1000);
-        assert_eq!(files[1].timestamp, 1500);
-        assert_eq!(files[2].timestamp, 2000);
+        assert_eq!(files[0].timestamp, 1704067200); // 00:00
+        assert_eq!(files[1].timestamp, 1704070800); // 01:00
+        assert_eq!(files[2].timestamp, 1704074400); // 02:00
     }
 
     #[test]
@@ -454,14 +501,14 @@ mod tests {
         let fs = MockFilesystem::new();
         let dir = PathBuf::from("/tmp/snapshots");
 
-        fs.add_file(dir.join("snapshot_1000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_2000.json"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010100.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010101.json"), vec![]);  // wrong extension
         fs.add_file(dir.join("other.txt"), vec![]);
 
         let files = fs.list_snapshots(&dir).expect("list");
 
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].timestamp, 1000);
+        assert_eq!(files[0].timestamp, 1704067200);
     }
 
     #[test]
@@ -469,14 +516,14 @@ mod tests {
         let fs = MockFilesystem::new();
         let dir = PathBuf::from("/tmp/snapshots");
 
-        fs.add_file(dir.join("snapshot_1000.jsonl"), vec![]);
-        fs.add_file(dir.join("data_2000.jsonl"), vec![]);
-        fs.add_file(dir.join("snapshot_abc.jsonl"), vec![]);
+        fs.add_file(dir.join("snapshot_2024010100.jsonl"), vec![]);
+        fs.add_file(dir.join("data_2024010101.jsonl"), vec![]);  // wrong prefix
+        fs.add_file(dir.join("snapshot_abcdefghij.jsonl"), vec![]);  // not numeric
 
         let files = fs.list_snapshots(&dir).expect("list");
 
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].timestamp, 1000);
+        assert_eq!(files[0].timestamp, 1704067200);
     }
 
     // --- Remove ---
@@ -569,10 +616,11 @@ mod tests {
         let fs = MockFilesystem::new();
         let writer = StandardSnapshotWriter::new(fs, PathBuf::from("/tmp/snapshots"));
 
-        let snapshot = Snapshot::new(1234567890, &[8899], vec![]);
+        // 1704067200 = 2024-01-01 00:00:00 UTC
+        let snapshot = Snapshot::new(1704067200, &[8899], vec![]);
         let path = writer.write(&snapshot).expect("write");
 
-        assert_eq!(path, PathBuf::from("/tmp/snapshots/snapshot_1234567890.jsonl"));
+        assert_eq!(path, PathBuf::from("/tmp/snapshots/snapshot_2024010100.jsonl"));
     }
 
     #[test]
@@ -590,17 +638,21 @@ mod tests {
             packets: 305,
             bytes: 45000,
         };
-        let snapshot = Snapshot::new(1234567890, &[8899], vec![bucket]);
+        // 1704067200 = 2024-01-01 00:00:00 UTC
+        let snapshot = Snapshot::new(1704067200, &[8899], vec![bucket]);
         writer.write(&snapshot).expect("write");
 
         // Access the underlying filesystem to check content
-        let path = PathBuf::from("/tmp/snapshots/snapshot_1234567890.jsonl");
+        let path = PathBuf::from("/tmp/snapshots/snapshot_2024010100.jsonl");
         let fs_ref = &writer;
         let content = fs_ref.fs.get_file(&path).expect("file exists");
         let json = String::from_utf8(content).expect("valid utf8");
 
-        // Verify it's valid JSON and matches
-        let restored = Snapshot::from_json(&json).expect("valid snapshot");
+        // Content should end with newline (JSONL format)
+        assert!(json.ends_with('\n'));
+
+        // Verify it's valid JSON and matches (trim trailing newline)
+        let restored = Snapshot::from_json(json.trim()).expect("valid snapshot");
         assert_eq!(restored, snapshot);
     }
 
@@ -613,18 +665,46 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_writer_multiple_writes() {
+    fn test_snapshot_writer_multiple_writes_same_hour() {
         let fs = MockFilesystem::new();
         let writer = StandardSnapshotWriter::new(fs, PathBuf::from("/tmp/snapshots"));
 
-        let snapshot1 = Snapshot::new(1000, &[8899], vec![]);
-        let snapshot2 = Snapshot::new(2000, &[8899], vec![]);
-        let snapshot3 = Snapshot::new(3000, &[8899], vec![]);
+        // All timestamps in 2024-01-01 00:xx:xx UTC (same hour)
+        let snapshot1 = Snapshot::new(1704067200, &[8899], vec![]); // 00:00:00
+        let snapshot2 = Snapshot::new(1704068000, &[8899], vec![]); // 00:13:20
+        let snapshot3 = Snapshot::new(1704069000, &[8899], vec![]); // 00:30:00
 
         writer.write(&snapshot1).expect("write 1");
         writer.write(&snapshot2).expect("write 2");
         writer.write(&snapshot3).expect("write 3");
 
+        // All should go to same hourly file (append behavior)
+        let files = writer.fs.list_snapshots(writer.output_dir()).expect("list");
+        assert_eq!(files.len(), 1);
+
+        // Verify file contains 3 JSON lines
+        let path = PathBuf::from("/tmp/snapshots/snapshot_2024010100.jsonl");
+        let content = writer.fs.get_file(&path).expect("file");
+        let content_str = String::from_utf8(content).expect("utf8");
+        let lines: Vec<&str> = content_str.lines().collect();
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn test_snapshot_writer_multiple_writes_different_hours() {
+        let fs = MockFilesystem::new();
+        let writer = StandardSnapshotWriter::new(fs, PathBuf::from("/tmp/snapshots"));
+
+        // Different hours
+        let snapshot1 = Snapshot::new(1704067200, &[8899], vec![]); // 2024-01-01 00:00
+        let snapshot2 = Snapshot::new(1704070800, &[8899], vec![]); // 2024-01-01 01:00
+        let snapshot3 = Snapshot::new(1704074400, &[8899], vec![]); // 2024-01-01 02:00
+
+        writer.write(&snapshot1).expect("write 1");
+        writer.write(&snapshot2).expect("write 2");
+        writer.write(&snapshot3).expect("write 3");
+
+        // Should create 3 separate hourly files
         let files = writer.fs.list_snapshots(writer.output_dir()).expect("list");
         assert_eq!(files.len(), 3);
     }
@@ -797,17 +877,18 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let fs = RealFilesystem;
 
-        fs::write(dir.path().join("snapshot_1000.jsonl"), b"").expect("write 1");
-        fs::write(dir.path().join("snapshot_2000.jsonl"), b"").expect("write 2");
-        fs::write(dir.path().join("snapshot_1500.jsonl"), b"").expect("write 3");
+        // 2024-01-01 00:00 = 1704067200, 01:00 = 1704070800, 02:00 = 1704074400
+        fs::write(dir.path().join("snapshot_2024010100.jsonl"), b"").expect("write 1");
+        fs::write(dir.path().join("snapshot_2024010102.jsonl"), b"").expect("write 2");
+        fs::write(dir.path().join("snapshot_2024010101.jsonl"), b"").expect("write 3");
 
         let files = fs.list_snapshots(dir.path()).expect("list");
 
         assert_eq!(files.len(), 3);
         // Should be sorted by timestamp
-        assert_eq!(files[0].timestamp, 1000);
-        assert_eq!(files[1].timestamp, 1500);
-        assert_eq!(files[2].timestamp, 2000);
+        assert_eq!(files[0].timestamp, 1704067200); // 00:00
+        assert_eq!(files[1].timestamp, 1704070800); // 01:00
+        assert_eq!(files[2].timestamp, 1704074400); // 02:00
     }
 
     #[test]
@@ -815,14 +896,14 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let fs = RealFilesystem;
 
-        fs::write(dir.path().join("snapshot_1000.jsonl"), b"").expect("write 1");
-        fs::write(dir.path().join("snapshot_2000.json"), b"").expect("write 2");
+        fs::write(dir.path().join("snapshot_2024010100.jsonl"), b"").expect("write 1");
+        fs::write(dir.path().join("snapshot_2024010101.json"), b"").expect("write 2");
         fs::write(dir.path().join("other.txt"), b"").expect("write 3");
 
         let files = fs.list_snapshots(dir.path()).expect("list");
 
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].timestamp, 1000);
+        assert_eq!(files[0].timestamp, 1704067200);
     }
 
     #[test]
@@ -830,14 +911,14 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let fs = RealFilesystem;
 
-        fs::write(dir.path().join("snapshot_1000.jsonl"), b"").expect("write 1");
-        fs::write(dir.path().join("data_2000.jsonl"), b"").expect("write 2");
-        fs::write(dir.path().join("snapshot_abc.jsonl"), b"").expect("write 3");
+        fs::write(dir.path().join("snapshot_2024010100.jsonl"), b"").expect("write 1");
+        fs::write(dir.path().join("data_2024010101.jsonl"), b"").expect("write 2");
+        fs::write(dir.path().join("snapshot_abcdefghij.jsonl"), b"").expect("write 3");
 
         let files = fs.list_snapshots(dir.path()).expect("list");
 
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].timestamp, 1000);
+        assert_eq!(files[0].timestamp, 1704067200);
     }
 
     #[test]
@@ -891,12 +972,14 @@ mod tests {
             packets: 305,
             bytes: 45000,
         };
-        let snapshot = Snapshot::new(1234567890, &[8899], vec![bucket]);
+        // 1704067200 = 2024-01-01 00:00:00 UTC
+        let snapshot = Snapshot::new(1704067200, &[8899], vec![bucket]);
         let path = writer.write(&snapshot).expect("write");
 
         assert!(path.exists());
         let content = fs::read_to_string(&path).expect("read");
-        let restored = Snapshot::from_json(&content).expect("parse");
+        // Content is JSONL format (ends with newline), trim for parsing
+        let restored = Snapshot::from_json(content.trim()).expect("parse");
         assert_eq!(restored, snapshot);
     }
 
@@ -909,7 +992,8 @@ mod tests {
 
         assert!(!output_dir.exists());
 
-        let snapshot = Snapshot::new(1234567890, &[8899], vec![]);
+        // 1704067200 = 2024-01-01 00:00:00 UTC
+        let snapshot = Snapshot::new(1704067200, &[8899], vec![]);
         writer.write(&snapshot).expect("write");
 
         assert!(output_dir.exists());

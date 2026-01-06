@@ -70,6 +70,9 @@ pub enum Command {
 /// Default report interval in seconds.
 pub const DEFAULT_REPORT_INTERVAL_SEC: u64 = 60;
 
+/// Default snapshot interval in seconds.
+pub const DEFAULT_SNAPSHOT_INTERVAL_SEC: u64 = 60;
+
 /// Arguments for the collect command.
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
 pub struct CollectArgs {
@@ -115,6 +118,11 @@ pub struct CollectArgs {
     /// Interval for status reports in seconds.
     #[arg(long, default_value_t = DEFAULT_REPORT_INTERVAL_SEC)]
     pub report_interval_sec: u64,
+
+    /// Interval for writing snapshots to disk in seconds.
+    /// Internal counter reads still happen every second; this controls file emission.
+    #[arg(long, default_value_t = DEFAULT_SNAPSHOT_INTERVAL_SEC)]
+    pub snapshot_interval_sec: u64,
 }
 
 impl CollectArgs {

@@ -7,6 +7,7 @@ description = "Filesystem abstraction for IBSR"
 
 [dependencies]
 thiserror.workspace = true
+chrono.workspace = true
 ibsr-schema = { path = "../ibsr-schema" }
 ibsr-clock = { path = "../ibsr-clock" }
 

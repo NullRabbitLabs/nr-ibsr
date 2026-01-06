@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use ibsr_clock::SystemClock;
 use ibsr_collector::exit::{codes, exit_code};
-use ibsr_collector::logger::{StderrLogger, Verbosity};
+use ibsr_collector::logger::{Logger, StderrLogger, Verbosity};
 use ibsr_collector::{execute_collect, Cli, Command, CommandError, RealSleeper, ShutdownFlag};
 use ibsr_fs::RealFilesystem;
 
