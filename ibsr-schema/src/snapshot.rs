@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Current schema version.
-pub const SCHEMA_VERSION: u32 = 0;
+/// Version 1: Added multi-port support (dst_port -> dst_ports)
+/// Version 2: Added handshake_ack field for accurate SYN-flood detection
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Key type for bucket entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -20,6 +22,10 @@ pub struct BucketEntry {
     pub key_value: u32,
     pub syn: u32,
     pub ack: u32,
+    /// ACKs that are part of handshake completion (ACK=1, SYN=0, RST=0, no payload).
+    /// This is used for accurate SYN-flood detection, as established connection ACKs
+    /// (with payload) should not count toward handshake success ratio.
+    pub handshake_ack: u32,
     pub rst: u32,
     pub packets: u32,
     pub bytes: u64,
@@ -30,13 +36,14 @@ pub struct BucketEntry {
 pub struct Snapshot {
     pub version: u32,
     pub ts_unix_sec: u64,
-    pub dst_port: u16,
+    /// Destination ports being monitored (sorted for deterministic output).
+    pub dst_ports: Vec<u16>,
     pub buckets: Vec<BucketEntry>,
 }
 
 impl Snapshot {
     /// Create a new snapshot with the current schema version.
-    pub fn new(ts_unix_sec: u64, dst_port: u16, mut buckets: Vec<BucketEntry>) -> Self {
+    pub fn new(ts_unix_sec: u64, dst_ports: &[u16], mut buckets: Vec<BucketEntry>) -> Self {
         // Sort buckets for deterministic ordering: by key_type, then key_value
         buckets.sort_by(|a, b| {
             a.key_type
@@ -44,10 +51,14 @@ impl Snapshot {
                 .then_with(|| a.key_value.cmp(&b.key_value))
         });
 
+        // Sort ports for deterministic output
+        let mut sorted_ports = dst_ports.to_vec();
+        sorted_ports.sort_unstable();
+
         Self {
             version: SCHEMA_VERSION,
             ts_unix_sec,
-            dst_port,
+            dst_ports: sorted_ports,
             buckets,
         }
     }
@@ -93,7 +104,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_empty_snapshot() {
-        let snapshot = Snapshot::new(1234567890, 8899, vec![]);
+        let snapshot = Snapshot::new(1234567890, &[8899], vec![]);
 
         let json = snapshot.to_json();
         let restored = Snapshot::from_json(&json).expect("deserialize");
@@ -108,11 +119,12 @@ mod tests {
             key_value: 0x0A000001, // 10.0.0.1
             syn: 100,
             ack: 200,
+            handshake_ack: 95,
             rst: 5,
             packets: 305,
             bytes: 45000,
         };
-        let snapshot = Snapshot::new(1234567890, 8899, vec![bucket]);
+        let snapshot = Snapshot::new(1234567890, &[8899], vec![bucket]);
 
         let json = snapshot.to_json();
         let restored = Snapshot::from_json(&json).expect("deserialize");
@@ -128,6 +140,7 @@ mod tests {
                 key_value: 0x0A000001,
                 syn: 10,
                 ack: 20,
+                handshake_ack: 10,
                 rst: 1,
                 packets: 31,
                 bytes: 4500,
@@ -137,6 +150,7 @@ mod tests {
                 key_value: 0x0A000002,
                 syn: 50,
                 ack: 100,
+                handshake_ack: 50,
                 rst: 0,
                 packets: 150,
                 bytes: 22000,
@@ -146,12 +160,13 @@ mod tests {
                 key_value: 0x0A000000,
                 syn: 60,
                 ack: 120,
+                handshake_ack: 60,
                 rst: 1,
                 packets: 181,
                 bytes: 26500,
             },
         ];
-        let snapshot = Snapshot::new(1234567890, 8000, buckets);
+        let snapshot = Snapshot::new(1234567890, &[8000], buckets);
 
         let json = snapshot.to_json();
         let restored = Snapshot::from_json(&json).expect("deserialize");
@@ -168,6 +183,7 @@ mod tests {
                 key_value: 0x0A000000,
                 syn: 1,
                 ack: 1,
+                handshake_ack: 1,
                 rst: 0,
                 packets: 2,
                 bytes: 100,
@@ -177,6 +193,7 @@ mod tests {
                 key_value: 0x0B000001,
                 syn: 2,
                 ack: 2,
+                handshake_ack: 2,
                 rst: 0,
                 packets: 4,
                 bytes: 200,
@@ -186,13 +203,14 @@ mod tests {
                 key_value: 0x0A000001,
                 syn: 3,
                 ack: 3,
+                handshake_ack: 3,
                 rst: 0,
                 packets: 6,
                 bytes: 300,
             },
         ];
 
-        let snapshot = Snapshot::new(1234567890, 8899, buckets_unordered);
+        let snapshot = Snapshot::new(1234567890, &[8899], buckets_unordered);
 
         // Should be sorted: SrcIp entries first (by key_value), then SrcCidr24
         assert_eq!(snapshot.buckets.len(), 3);
@@ -212,6 +230,7 @@ mod tests {
                 key_value: 0x0B000001,
                 syn: 1,
                 ack: 1,
+                handshake_ack: 1,
                 rst: 0,
                 packets: 2,
                 bytes: 100,
@@ -221,6 +240,7 @@ mod tests {
                 key_value: 0x0A000001,
                 syn: 2,
                 ack: 2,
+                handshake_ack: 2,
                 rst: 0,
                 packets: 4,
                 bytes: 200,
@@ -233,6 +253,7 @@ mod tests {
                 key_value: 0x0A000001,
                 syn: 2,
                 ack: 2,
+                handshake_ack: 2,
                 rst: 0,
                 packets: 4,
                 bytes: 200,
@@ -242,14 +263,15 @@ mod tests {
                 key_value: 0x0B000001,
                 syn: 1,
                 ack: 1,
+                handshake_ack: 1,
                 rst: 0,
                 packets: 2,
                 bytes: 100,
             },
         ];
 
-        let snapshot1 = Snapshot::new(1234567890, 8899, buckets1);
-        let snapshot2 = Snapshot::new(1234567890, 8899, buckets2);
+        let snapshot1 = Snapshot::new(1234567890, &[8899], buckets1);
+        let snapshot2 = Snapshot::new(1234567890, &[8899], buckets2);
 
         let json1 = snapshot1.to_json();
         let json2 = snapshot2.to_json();
@@ -267,6 +289,7 @@ mod tests {
                 key_value: 0x0C000000, // 12.0.0.0/24
                 syn: 1,
                 ack: 1,
+                handshake_ack: 1,
                 rst: 0,
                 packets: 2,
                 bytes: 100,
@@ -276,6 +299,7 @@ mod tests {
                 key_value: 0x0A000000, // 10.0.0.0/24
                 syn: 2,
                 ack: 2,
+                handshake_ack: 2,
                 rst: 0,
                 packets: 4,
                 bytes: 200,
@@ -285,13 +309,14 @@ mod tests {
                 key_value: 0x0B000000, // 11.0.0.0/24
                 syn: 3,
                 ack: 3,
+                handshake_ack: 3,
                 rst: 0,
                 packets: 6,
                 bytes: 300,
             },
         ];
 
-        let snapshot = Snapshot::new(1234567890, 8899, buckets);
+        let snapshot = Snapshot::new(1234567890, &[8899], buckets);
 
         // Should be sorted by key_value within SrcCidr24
         assert_eq!(snapshot.buckets.len(), 3);
@@ -302,11 +327,11 @@ mod tests {
 
     #[test]
     fn test_empty_snapshot_handling() {
-        let snapshot = Snapshot::new(0, 0, vec![]);
+        let snapshot = Snapshot::new(0, &[], vec![]);
 
         assert_eq!(snapshot.version, SCHEMA_VERSION);
         assert_eq!(snapshot.ts_unix_sec, 0);
-        assert_eq!(snapshot.dst_port, 0);
+        assert!(snapshot.dst_ports.is_empty());
         assert!(snapshot.buckets.is_empty());
 
         let json = snapshot.to_json();
@@ -321,11 +346,12 @@ mod tests {
             key_value: u32::MAX,
             syn: u32::MAX,
             ack: u32::MAX,
+            handshake_ack: u32::MAX,
             rst: u32::MAX,
             packets: u32::MAX,
             bytes: u64::MAX,
         };
-        let snapshot = Snapshot::new(u64::MAX, u16::MAX, vec![bucket]);
+        let snapshot = Snapshot::new(u64::MAX, &[u16::MAX], vec![bucket]);
 
         let json = snapshot.to_json();
         let restored = Snapshot::from_json(&json).expect("deserialize");
@@ -334,13 +360,13 @@ mod tests {
         assert_eq!(restored.buckets[0].syn, u32::MAX);
         assert_eq!(restored.buckets[0].bytes, u64::MAX);
         assert_eq!(restored.ts_unix_sec, u64::MAX);
-        assert_eq!(restored.dst_port, u16::MAX);
+        assert_eq!(restored.dst_ports, vec![u16::MAX]);
     }
 
     #[test]
     fn test_version_mismatch_rejected() {
         // Manually craft JSON with wrong version
-        let bad_json = r#"{"version":999,"ts_unix_sec":1234567890,"dst_port":8899,"buckets":[]}"#;
+        let bad_json = r#"{"version":999,"ts_unix_sec":1234567890,"dst_ports":[8899],"buckets":[]}"#;
 
         let result = Snapshot::from_json(bad_json);
 
@@ -349,7 +375,7 @@ mod tests {
         assert!(matches!(
             err,
             SnapshotError::VersionMismatch {
-                expected: 0,
+                expected: 2,
                 found: 999
             }
         ));
@@ -368,7 +394,7 @@ mod tests {
     #[test]
     fn test_missing_field_rejected() {
         // JSON missing required field
-        let bad_json = r#"{"version":0,"ts_unix_sec":1234567890,"buckets":[]}"#;
+        let bad_json = r#"{"version":1,"ts_unix_sec":1234567890,"buckets":[]}"#;
 
         let result = Snapshot::from_json(bad_json);
 
@@ -382,11 +408,12 @@ mod tests {
             key_value: 0x0A000001,
             syn: 100,
             ack: 200,
+            handshake_ack: 95,
             rst: 5,
             packets: 305,
             bytes: 45000,
         };
-        let snapshot = Snapshot::new(1234567890, 8899, vec![bucket]);
+        let snapshot = Snapshot::new(1234567890, &[8899], vec![bucket]);
 
         let json = snapshot.to_json();
 
@@ -401,6 +428,7 @@ mod tests {
             key_value: 0x0A000001,
             syn: 1,
             ack: 1,
+            handshake_ack: 1,
             rst: 0,
             packets: 2,
             bytes: 100,
@@ -410,6 +438,7 @@ mod tests {
             key_value: 0x0A000000,
             syn: 1,
             ack: 1,
+            handshake_ack: 1,
             rst: 0,
             packets: 2,
             bytes: 100,
@@ -424,12 +453,12 @@ mod tests {
 
     #[test]
     fn test_schema_version_constant() {
-        assert_eq!(SCHEMA_VERSION, 0);
+        assert_eq!(SCHEMA_VERSION, 2);
     }
 
     #[test]
     fn test_snapshot_new_sets_version() {
-        let snapshot = Snapshot::new(1234567890, 8899, vec![]);
+        let snapshot = Snapshot::new(1234567890, &[8899], vec![]);
         assert_eq!(snapshot.version, SCHEMA_VERSION);
     }
 }

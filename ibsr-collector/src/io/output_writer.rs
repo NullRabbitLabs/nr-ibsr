@@ -162,7 +162,9 @@ pub fn generate_evidence_csv(decisions: &[KeyDecision]) -> String {
         ));
     }
 
-    lines.join("\n")
+    let mut result = lines.join("\n");
+    result.push('\n');
+    result
 }
 
 /// Convenience function to write the report.
@@ -228,7 +230,7 @@ mod tests {
             generated_at: 1000,
             match_criteria: MatchCriteria {
                 proto: "tcp".to_string(),
-                dst_port: 8899,
+                dst_ports: vec![8899],
             },
             triggers: vec![TriggerRule {
                 key_type: "src_ip".to_string(),
@@ -386,7 +388,7 @@ mod tests {
     #[test]
     fn test_generate_evidence_csv_empty() {
         let csv = generate_evidence_csv(&[]);
-        assert_eq!(csv, "source,syn_rate,success_ratio,decision,packets,bytes,syn");
+        assert_eq!(csv, "source,syn_rate,success_ratio,decision,packets,bytes,syn\n");
     }
 
     #[test]
@@ -481,6 +483,45 @@ mod tests {
         // syn_rate: 2 decimal places, success_ratio: 4 decimal places
         assert!(csv.contains("123.46"));
         assert!(csv.contains("0.1235"));
+    }
+
+    // -------------------------------------------
+    // Issue #2: evidence.csv must end with newline
+    // -------------------------------------------
+
+    #[test]
+    fn test_evidence_csv_ends_with_newline() {
+        let decisions = mock_decisions();
+        let csv = generate_evidence_csv(&decisions);
+        assert!(
+            csv.ends_with('\n'),
+            "CSV must end with newline, got: {:?}",
+            csv.chars().last()
+        );
+    }
+
+    #[test]
+    fn test_evidence_csv_empty_ends_with_newline() {
+        let csv = generate_evidence_csv(&[]);
+        assert!(
+            csv.ends_with('\n'),
+            "Empty CSV must end with newline"
+        );
+    }
+
+    #[test]
+    fn test_evidence_csv_each_row_ends_with_newline() {
+        let decisions = mock_decisions();
+        let csv = generate_evidence_csv(&decisions);
+        let lines: Vec<&str> = csv.split('\n').collect();
+        // Last element after split will be empty due to trailing newline
+        assert!(
+            lines.last().map(|s| s.is_empty()).unwrap_or(false),
+            "CSV should have trailing newline producing empty final split element"
+        );
+        // All non-empty lines should be valid rows
+        let non_empty_lines: Vec<&str> = lines.iter().filter(|s| !s.is_empty()).copied().collect();
+        assert_eq!(non_empty_lines.len(), 3); // header + 2 data rows
     }
 
     // --- Error handling ---

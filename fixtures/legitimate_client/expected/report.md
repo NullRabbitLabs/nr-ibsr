@@ -5,7 +5,7 @@
 - **Time window start**: 1000
 - **Time window end**: 1000
 - **Duration**: 0 seconds
-- **Destination port**: 8080
+- **Destination ports**: 8080
 - **Window size**: 10 seconds
 - **SYN rate threshold**: 100.0 SYN/sec
 - **Success ratio threshold**: 0.10
@@ -41,7 +41,9 @@ No abuse pattern detected matching the trigger conditions.
   "generated_at": 1000,
   "match_criteria": {
     "proto": "tcp",
-    "dst_port": 8080
+    "dst_ports": [
+      8080
+    ]
   },
   "triggers": [],
   "exceptions": []

@@ -19,6 +19,7 @@ pub fn aggregate_snapshots(
             let entry = aggregated.entry(key).or_default();
             entry.syn += bucket.syn as u64;
             entry.ack += bucket.ack as u64;
+            entry.handshake_ack += bucket.handshake_ack as u64;
             entry.rst += bucket.rst as u64;
             entry.packets += bucket.packets as u64;
             entry.bytes += bucket.bytes;
@@ -41,7 +42,7 @@ pub fn aggregate_snapshots(
                     0.0
                 },
                 success_ratio: if raw.syn > 0 {
-                    raw.ack as f64 / raw.syn as f64
+                    raw.handshake_ack as f64 / raw.syn as f64
                 } else {
                     0.0
                 },
@@ -56,6 +57,7 @@ pub fn aggregate_snapshots(
 struct RawCounters {
     syn: u64,
     ack: u64,
+    handshake_ack: u64,
     rst: u64,
     packets: u64,
     bytes: u64,
@@ -79,16 +81,17 @@ mod tests {
     // Category B — Windowing & Aggregation Tests
     // ===========================================
 
-    fn make_snapshot(ts: u64, dst_port: u16, buckets: Vec<BucketEntry>) -> Snapshot {
-        Snapshot::new(ts, dst_port, buckets)
+    fn make_snapshot(ts: u64, dst_ports: &[u16], buckets: Vec<BucketEntry>) -> Snapshot {
+        Snapshot::new(ts, dst_ports, buckets)
     }
 
-    fn make_bucket(key_value: u32, syn: u32, ack: u32, packets: u32, bytes: u64) -> BucketEntry {
+    fn make_bucket(key_value: u32, syn: u32, ack: u32, handshake_ack: u32, packets: u32, bytes: u64) -> BucketEntry {
         BucketEntry {
             key_type: KeyType::SrcIp,
             key_value,
             syn,
             ack,
+            handshake_ack,
             rst: 0,
             packets,
             bytes,
@@ -101,15 +104,15 @@ mod tests {
 
     #[test]
     fn test_aggregate_single_snapshot_empty() {
-        let s = make_snapshot(1000, 8080, vec![]);
+        let s = make_snapshot(1000, &[8080], vec![]);
         let result = aggregate_snapshots(&[&s], 10);
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_aggregate_single_snapshot_one_bucket() {
-        let s = make_snapshot(1000, 8080, vec![
-            make_bucket(0x0A000001, 100, 50, 150, 15000),
+        let s = make_snapshot(1000, &[8080], vec![
+            make_bucket(0x0A000001, 100, 50, 50, 150, 15000),
         ]);
 
         let result = aggregate_snapshots(&[&s], 10);
@@ -126,9 +129,9 @@ mod tests {
 
     #[test]
     fn test_aggregate_single_snapshot_multiple_buckets() {
-        let s = make_snapshot(1000, 8080, vec![
-            make_bucket(0x0A000001, 100, 50, 150, 15000),
-            make_bucket(0x0A000002, 200, 100, 300, 30000),
+        let s = make_snapshot(1000, &[8080], vec![
+            make_bucket(0x0A000001, 100, 50, 50, 150, 15000),
+            make_bucket(0x0A000002, 200, 100, 100, 300, 30000),
         ]);
 
         let result = aggregate_snapshots(&[&s], 10);
@@ -148,11 +151,11 @@ mod tests {
 
     #[test]
     fn test_aggregate_multiple_snapshots_sums() {
-        let s1 = make_snapshot(1000, 8080, vec![
-            make_bucket(0x0A000001, 100, 50, 150, 15000),
+        let s1 = make_snapshot(1000, &[8080], vec![
+            make_bucket(0x0A000001, 100, 50, 50, 150, 15000),
         ]);
-        let s2 = make_snapshot(1001, 8080, vec![
-            make_bucket(0x0A000001, 200, 100, 300, 30000),
+        let s2 = make_snapshot(1001, &[8080], vec![
+            make_bucket(0x0A000001, 200, 100, 100, 300, 30000),
         ]);
 
         let result = aggregate_snapshots(&[&s1, &s2], 10);
@@ -169,11 +172,11 @@ mod tests {
 
     #[test]
     fn test_aggregate_multiple_snapshots_different_keys() {
-        let s1 = make_snapshot(1000, 8080, vec![
-            make_bucket(0x0A000001, 100, 50, 150, 15000),
+        let s1 = make_snapshot(1000, &[8080], vec![
+            make_bucket(0x0A000001, 100, 50, 50, 150, 15000),
         ]);
-        let s2 = make_snapshot(1001, 8080, vec![
-            make_bucket(0x0A000002, 200, 100, 300, 30000),
+        let s2 = make_snapshot(1001, &[8080], vec![
+            make_bucket(0x0A000002, 200, 100, 100, 300, 30000),
         ]);
 
         let result = aggregate_snapshots(&[&s1, &s2], 10);
@@ -184,9 +187,9 @@ mod tests {
 
     #[test]
     fn test_aggregate_three_snapshots() {
-        let s1 = make_snapshot(1000, 8080, vec![make_bucket(1, 10, 5, 15, 1500)]);
-        let s2 = make_snapshot(1001, 8080, vec![make_bucket(1, 20, 10, 30, 3000)]);
-        let s3 = make_snapshot(1002, 8080, vec![make_bucket(1, 30, 15, 45, 4500)]);
+        let s1 = make_snapshot(1000, &[8080], vec![make_bucket(1, 10, 5, 5, 15, 1500)]);
+        let s2 = make_snapshot(1001, &[8080], vec![make_bucket(1, 20, 10, 10, 30, 3000)]);
+        let s3 = make_snapshot(1002, &[8080], vec![make_bucket(1, 30, 15, 15, 45, 4500)]);
 
         let result = aggregate_snapshots(&[&s1, &s2, &s3], 10);
 
@@ -205,8 +208,8 @@ mod tests {
 
     #[test]
     fn test_syn_rate_calculation() {
-        let s = make_snapshot(1000, 8080, vec![
-            make_bucket(0x0A000001, 100, 50, 150, 15000),
+        let s = make_snapshot(1000, &[8080], vec![
+            make_bucket(0x0A000001, 100, 50, 50, 150, 15000),
         ]);
 
         // 100 SYNs over 10 seconds = 10 SYNs/sec
@@ -220,8 +223,8 @@ mod tests {
 
     #[test]
     fn test_syn_rate_different_window() {
-        let s = make_snapshot(1000, 8080, vec![
-            make_bucket(0x0A000001, 100, 50, 150, 15000),
+        let s = make_snapshot(1000, &[8080], vec![
+            make_bucket(0x0A000001, 100, 50, 50, 150, 15000),
         ]);
 
         // 100 SYNs over 5 seconds = 20 SYNs/sec
@@ -235,8 +238,8 @@ mod tests {
 
     #[test]
     fn test_syn_rate_zero_window() {
-        let s = make_snapshot(1000, 8080, vec![
-            make_bucket(0x0A000001, 100, 50, 150, 15000),
+        let s = make_snapshot(1000, &[8080], vec![
+            make_bucket(0x0A000001, 100, 50, 50, 150, 15000),
         ]);
 
         // Zero window should give 0 rate (avoid div/0)
@@ -249,16 +252,17 @@ mod tests {
     }
 
     // -------------------------------------------
-    // success_ratio calculation
+    // success_ratio calculation (uses handshake_ack)
     // -------------------------------------------
 
     #[test]
     fn test_success_ratio_calculation() {
-        let s = make_snapshot(1000, 8080, vec![
-            make_bucket(0x0A000001, 100, 50, 150, 15000),
+        // success_ratio = handshake_ack / syn
+        let s = make_snapshot(1000, &[8080], vec![
+            make_bucket(0x0A000001, 100, 80, 50, 150, 15000),
         ]);
 
-        // 50 ACKs / 100 SYNs = 0.5
+        // 50 handshake_ack / 100 SYNs = 0.5
         let result = aggregate_snapshots(&[&s], 10);
 
         let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
@@ -269,11 +273,11 @@ mod tests {
 
     #[test]
     fn test_success_ratio_perfect() {
-        let s = make_snapshot(1000, 8080, vec![
-            make_bucket(0x0A000001, 100, 100, 200, 20000),
+        let s = make_snapshot(1000, &[8080], vec![
+            make_bucket(0x0A000001, 100, 150, 100, 250, 25000),
         ]);
 
-        // 100 ACKs / 100 SYNs = 1.0
+        // 100 handshake_ack / 100 SYNs = 1.0
         let result = aggregate_snapshots(&[&s], 10);
 
         let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
@@ -284,12 +288,13 @@ mod tests {
 
     #[test]
     fn test_success_ratio_zero_syn() {
-        let s = make_snapshot(1000, 8080, vec![
+        let s = make_snapshot(1000, &[8080], vec![
             BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000001,
                 syn: 0,
                 ack: 50,
+                handshake_ack: 30,
                 rst: 0,
                 packets: 50,
                 bytes: 5000,
@@ -307,11 +312,12 @@ mod tests {
 
     #[test]
     fn test_success_ratio_low() {
-        let s = make_snapshot(1000, 8080, vec![
-            make_bucket(0x0A000001, 1000, 10, 1010, 101000),
+        // SYN flood scenario: many SYNs, few handshake completions
+        let s = make_snapshot(1000, &[8080], vec![
+            make_bucket(0x0A000001, 1000, 500, 10, 1510, 151000),
         ]);
 
-        // 10 ACKs / 1000 SYNs = 0.01
+        // 10 handshake_ack / 1000 SYNs = 0.01
         let result = aggregate_snapshots(&[&s], 10);
 
         let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
@@ -320,19 +326,46 @@ mod tests {
         assert!((stats.success_ratio - 0.01).abs() < 0.001);
     }
 
+    #[test]
+    fn test_success_ratio_uses_handshake_ack_not_total_ack() {
+        // Established connection: many ACKs (with payload), but only some are handshake completions
+        let s = make_snapshot(1000, &[8080], vec![
+            BucketEntry {
+                key_type: KeyType::SrcIp,
+                key_value: 0x0A000001,
+                syn: 100,
+                ack: 5000,        // Total ACKs (includes data ACKs from established connections)
+                handshake_ack: 95, // Only handshake completion ACKs (no payload)
+                rst: 5,
+                packets: 5100,
+                bytes: 500000,
+            },
+        ]);
+
+        // success_ratio should use handshake_ack (95), not total ack (5000)
+        // 95 / 100 = 0.95
+        let result = aggregate_snapshots(&[&s], 10);
+
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
+        let stats = result.get(&key).unwrap();
+
+        assert!((stats.success_ratio - 0.95).abs() < 0.001);
+        assert_eq!(stats.total_ack, 5000); // total_ack still tracks all ACKs
+    }
+
     // -------------------------------------------
     // Deterministic aggregation
     // -------------------------------------------
 
     #[test]
     fn test_aggregate_deterministic() {
-        let s1 = make_snapshot(1000, 8080, vec![
-            make_bucket(2, 200, 100, 300, 30000),
-            make_bucket(1, 100, 50, 150, 15000),
+        let s1 = make_snapshot(1000, &[8080], vec![
+            make_bucket(2, 200, 100, 100, 300, 30000),
+            make_bucket(1, 100, 50, 50, 150, 15000),
         ]);
-        let s2 = make_snapshot(1001, 8080, vec![
-            make_bucket(1, 50, 25, 75, 7500),
-            make_bucket(2, 100, 50, 150, 15000),
+        let s2 = make_snapshot(1001, &[8080], vec![
+            make_bucket(1, 50, 25, 25, 75, 7500),
+            make_bucket(2, 100, 50, 50, 150, 15000),
         ]);
 
         let result1 = aggregate_snapshots(&[&s1, &s2], 10);
@@ -347,10 +380,10 @@ mod tests {
 
     #[test]
     fn test_sorted_aggregated_deterministic_order() {
-        let s = make_snapshot(1000, 8080, vec![
-            make_bucket(3, 300, 150, 450, 45000),
-            make_bucket(1, 100, 50, 150, 15000),
-            make_bucket(2, 200, 100, 300, 30000),
+        let s = make_snapshot(1000, &[8080], vec![
+            make_bucket(3, 300, 150, 150, 450, 45000),
+            make_bucket(1, 100, 50, 50, 150, 15000),
+            make_bucket(2, 200, 100, 100, 300, 30000),
         ]);
 
         let result = aggregate_snapshots(&[&s], 10);
@@ -379,12 +412,13 @@ mod tests {
 
     #[test]
     fn test_aggregate_cidr_key_type() {
-        let s = make_snapshot(1000, 8080, vec![
+        let s = make_snapshot(1000, &[8080], vec![
             BucketEntry {
                 key_type: KeyType::SrcCidr24,
                 key_value: 0x0A000000,
                 syn: 100,
                 ack: 50,
+                handshake_ack: 50,
                 rst: 0,
                 packets: 150,
                 bytes: 15000,
@@ -399,12 +433,13 @@ mod tests {
 
     #[test]
     fn test_aggregate_mixed_key_types() {
-        let s = make_snapshot(1000, 8080, vec![
+        let s = make_snapshot(1000, &[8080], vec![
             BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000001,
                 syn: 100,
                 ack: 50,
+                handshake_ack: 50,
                 rst: 0,
                 packets: 150,
                 bytes: 15000,
@@ -414,6 +449,7 @@ mod tests {
                 key_value: 0x0A000000,
                 syn: 200,
                 ack: 100,
+                handshake_ack: 100,
                 rst: 0,
                 packets: 300,
                 bytes: 30000,

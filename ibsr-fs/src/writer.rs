@@ -119,6 +119,7 @@ impl Filesystem for RealFilesystem {
 #[derive(Debug, Clone, Default)]
 pub struct MockFilesystem {
     files: std::sync::Arc<std::sync::RwLock<HashMap<PathBuf, Vec<u8>>>>,
+    dirs: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<PathBuf>>>,
 }
 
 impl MockFilesystem {
@@ -189,10 +190,11 @@ impl Filesystem for MockFilesystem {
 
     fn exists(&self, path: &Path) -> bool {
         self.files.read().unwrap().contains_key(path)
+            || self.dirs.read().unwrap().contains(path)
     }
 
-    fn create_dir_all(&self, _path: &Path) -> Result<(), FsError> {
-        // Mock doesn't need to create directories
+    fn create_dir_all(&self, path: &Path) -> Result<(), FsError> {
+        self.dirs.write().unwrap().insert(path.to_path_buf());
         Ok(())
     }
 }
@@ -497,7 +499,7 @@ mod tests {
         let fs = MockFilesystem::new();
         let writer = StandardSnapshotWriter::new(fs, PathBuf::from("/tmp/snapshots"));
 
-        let snapshot = Snapshot::new(1234567890, 8899, vec![]);
+        let snapshot = Snapshot::new(1234567890, &[8899], vec![]);
         let path = writer.write(&snapshot).expect("write");
 
         assert_eq!(path, PathBuf::from("/tmp/snapshots/snapshot_1234567890.jsonl"));
@@ -513,11 +515,12 @@ mod tests {
             key_value: 0x0A000001,
             syn: 100,
             ack: 200,
+            handshake_ack: 95,
             rst: 5,
             packets: 305,
             bytes: 45000,
         };
-        let snapshot = Snapshot::new(1234567890, 8899, vec![bucket]);
+        let snapshot = Snapshot::new(1234567890, &[8899], vec![bucket]);
         writer.write(&snapshot).expect("write");
 
         // Access the underlying filesystem to check content
@@ -544,9 +547,9 @@ mod tests {
         let fs = MockFilesystem::new();
         let writer = StandardSnapshotWriter::new(fs, PathBuf::from("/tmp/snapshots"));
 
-        let snapshot1 = Snapshot::new(1000, 8899, vec![]);
-        let snapshot2 = Snapshot::new(2000, 8899, vec![]);
-        let snapshot3 = Snapshot::new(3000, 8899, vec![]);
+        let snapshot1 = Snapshot::new(1000, &[8899], vec![]);
+        let snapshot2 = Snapshot::new(2000, &[8899], vec![]);
+        let snapshot3 = Snapshot::new(3000, &[8899], vec![]);
 
         writer.write(&snapshot1).expect("write 1");
         writer.write(&snapshot2).expect("write 2");
@@ -762,11 +765,12 @@ mod tests {
             key_value: 0x0A000001,
             syn: 100,
             ack: 200,
+            handshake_ack: 95,
             rst: 5,
             packets: 305,
             bytes: 45000,
         };
-        let snapshot = Snapshot::new(1234567890, 8899, vec![bucket]);
+        let snapshot = Snapshot::new(1234567890, &[8899], vec![bucket]);
         let path = writer.write(&snapshot).expect("write");
 
         assert!(path.exists());
@@ -784,7 +788,7 @@ mod tests {
 
         assert!(!output_dir.exists());
 
-        let snapshot = Snapshot::new(1234567890, 8899, vec![]);
+        let snapshot = Snapshot::new(1234567890, &[8899], vec![]);
         writer.write(&snapshot).expect("write");
 
         assert!(output_dir.exists());

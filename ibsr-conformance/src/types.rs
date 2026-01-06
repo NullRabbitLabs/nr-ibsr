@@ -16,7 +16,7 @@ pub struct ScenarioMeta {
 /// Fixture configuration (serializable subset of ReporterConfig).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixtureConfig {
-    pub dst_port: u16,
+    pub dst_ports: Vec<u16>,
     pub window_sec: u64,
     pub syn_rate_threshold: f64,
     pub success_ratio_threshold: f64,
@@ -28,7 +28,7 @@ pub struct FixtureConfig {
 impl FixtureConfig {
     /// Convert to ReporterConfig.
     pub fn to_reporter_config(&self) -> ReporterConfig {
-        ReporterConfig::new(self.dst_port)
+        ReporterConfig::new(self.dst_ports.clone())
             .with_window_sec(self.window_sec)
             .with_syn_rate_threshold(self.syn_rate_threshold)
             .with_success_ratio_threshold(self.success_ratio_threshold)
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn test_fixture_config_deserialize() {
         let json = r#"{
-            "dst_port": 8080,
+            "dst_ports": [8080],
             "window_sec": 10,
             "syn_rate_threshold": 100.0,
             "success_ratio_threshold": 0.1,
@@ -173,14 +173,14 @@ mod tests {
             "min_samples_for_fp": 10
         }"#;
         let config: FixtureConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.dst_port, 8080);
+        assert_eq!(config.dst_ports, vec![8080]);
         assert_eq!(config.window_sec, 10);
     }
 
     #[test]
     fn test_fixture_config_to_reporter_config() {
         let config = FixtureConfig {
-            dst_port: 8080,
+            dst_ports: vec![8080],
             window_sec: 10,
             syn_rate_threshold: 100.0,
             success_ratio_threshold: 0.1,
@@ -189,7 +189,7 @@ mod tests {
             min_samples_for_fp: 10,
         };
         let reporter_config = config.to_reporter_config();
-        assert_eq!(reporter_config.dst_port, 8080);
+        assert_eq!(reporter_config.dst_ports, vec![8080]);
         assert_eq!(reporter_config.window_sec, 10);
         assert_eq!(reporter_config.syn_rate_threshold, 100.0);
     }

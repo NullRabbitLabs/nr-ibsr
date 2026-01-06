@@ -3,7 +3,9 @@
   "generated_at": 1005,
   "match_criteria": {
     "proto": "tcp",
-    "dst_port": 8080
+    "dst_ports": [
+      8080
+    ]
   },
   "triggers": [
     {

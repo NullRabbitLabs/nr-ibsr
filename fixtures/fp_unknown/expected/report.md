@@ -5,7 +5,7 @@
 - **Time window start**: 1000
 - **Time window end**: 1000
 - **Duration**: 0 seconds
-- **Destination port**: 8080
+- **Destination ports**: 8080
 - **Window size**: 10 seconds
 - **SYN rate threshold**: 100.0 SYN/sec
 - **Success ratio threshold**: 0.10
@@ -20,7 +20,7 @@ Detected 1 source(s) matching abuse pattern (TCP SYN churn).
 
 | Source | SYN Rate | Success Ratio | Would Block Packets | Would Block SYN |
 |--------|----------|---------------|---------------------|------------------|
-| 10.0.0.1 | 500.0/sec | 0.01 | 5050 | 5000 |
+| 10.0.0.1 | 500.0/sec | 0.00 | 5050 | 5000 |
 
 ## 3. Counterfactual Enforcement Impact
 
@@ -48,7 +48,9 @@ Detected 1 source(s) matching abuse pattern (TCP SYN churn).
   "generated_at": 1000,
   "match_criteria": {
     "proto": "tcp",
-    "dst_port": 8080
+    "dst_ports": [
+      8080
+    ]
   },
   "triggers": [
     {

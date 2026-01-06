@@ -21,7 +21,7 @@ pub struct EnforcementRules {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchCriteria {
     pub proto: String,
-    pub dst_port: u16,
+    pub dst_ports: Vec<u16>,
 }
 
 /// A single trigger rule.
@@ -60,7 +60,7 @@ pub fn generate(
 ) -> EnforcementRules {
     let match_criteria = MatchCriteria {
         proto: "tcp".to_string(),
-        dst_port: config.dst_port,
+        dst_ports: config.dst_ports.clone(),
     };
 
     // Generate trigger rules from offenders, sorted for determinism
@@ -137,8 +137,11 @@ fn key_to_string(key: &AggregatedKey) -> String {
 
 impl EnforcementRules {
     /// Serialize to JSON string (pretty-printed for readability).
+    /// Output always ends with a newline for proper file termination.
     pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(self).expect("Rules serialization cannot fail")
+        let mut json = serde_json::to_string_pretty(self).expect("Rules serialization cannot fail");
+        json.push('\n');
+        json
     }
 
     /// Serialize to compact JSON string (for embedding in report).
@@ -163,7 +166,7 @@ mod tests {
     // ===========================================
 
     fn make_config() -> ReporterConfig {
-        ReporterConfig::new(8080)
+        ReporterConfig::new(vec![8080])
             .with_window_sec(10)
             .with_syn_rate_threshold(100.0)
             .with_success_ratio_threshold(0.1)
@@ -262,7 +265,7 @@ mod tests {
         let parsed = EnforcementRules::from_json(&json).unwrap();
 
         assert_eq!(parsed.triggers.len(), 2);
-        assert_eq!(parsed.match_criteria.dst_port, 8080);
+        assert_eq!(parsed.match_criteria.dst_ports, vec![8080]);
     }
 
     // -------------------------------------------
@@ -279,7 +282,7 @@ mod tests {
         assert_eq!(rules.version, RULES_VERSION);
         assert_eq!(rules.generated_at, 1234567890);
         assert_eq!(rules.match_criteria.proto, "tcp");
-        assert_eq!(rules.match_criteria.dst_port, 8080);
+        assert_eq!(rules.match_criteria.dst_ports, vec![8080]);
     }
 
     #[test]
@@ -376,7 +379,7 @@ mod tests {
         let rules = generate(&[], &config, 1000);
 
         assert!(rules.triggers.is_empty());
-        assert_eq!(rules.match_criteria.dst_port, 8080);
+        assert_eq!(rules.match_criteria.dst_ports, vec![8080]);
     }
 
     // -------------------------------------------
@@ -405,5 +408,86 @@ mod tests {
 
         // Pretty should have newlines
         assert!(pretty.contains('\n'));
+    }
+
+    // -------------------------------------------
+    // Issue #2: rules.json must end with newline
+    // -------------------------------------------
+
+    #[test]
+    fn test_rules_json_ends_with_newline() {
+        let config = make_config();
+        let offenders = vec![make_offender(0x0A000001, 150.0, KeyType::SrcIp)];
+
+        let rules = generate(&offenders, &config, 1000);
+        let json = rules.to_json();
+
+        assert!(
+            json.ends_with('\n'),
+            "JSON must end with newline, got last char: {:?}",
+            json.chars().last()
+        );
+    }
+
+    #[test]
+    fn test_rules_json_empty_triggers_ends_with_newline() {
+        let config = make_config();
+        let rules = generate(&[], &config, 1000);
+        let json = rules.to_json();
+
+        assert!(
+            json.ends_with('\n'),
+            "JSON with empty triggers must end with newline"
+        );
+    }
+
+    #[test]
+    fn test_rules_json_parses_strict() {
+        let config = make_config();
+        let offenders = vec![make_offender(0x0A000001, 150.0, KeyType::SrcIp)];
+
+        let rules = generate(&offenders, &config, 1000);
+        let json = rules.to_json();
+
+        // Parse with serde_json strict mode (default)
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("JSON must be strictly valid");
+
+        // Verify structure
+        assert!(parsed.get("version").is_some(), "Missing 'version' field");
+        assert!(parsed.get("triggers").is_some(), "Missing 'triggers' field");
+        assert!(
+            parsed.get("match_criteria").is_some(),
+            "Missing 'match_criteria' field"
+        );
+    }
+
+    #[test]
+    fn test_rules_json_is_complete() {
+        let config = make_config();
+        let offenders = vec![
+            make_offender(0x0A000001, 150.0, KeyType::SrcIp),
+            make_offender(0x0A000002, 200.0, KeyType::SrcIp),
+        ];
+
+        let rules = generate(&offenders, &config, 1000);
+        let json = rules.to_json();
+
+        // Count opening and closing braces to ensure completeness
+        let open_braces = json.chars().filter(|&c| c == '{').count();
+        let close_braces = json.chars().filter(|&c| c == '}').count();
+        assert_eq!(
+            open_braces, close_braces,
+            "Mismatched braces: {} open, {} close",
+            open_braces, close_braces
+        );
+
+        let open_brackets = json.chars().filter(|&c| c == '[').count();
+        let close_brackets = json.chars().filter(|&c| c == ']').count();
+        assert_eq!(
+            open_brackets, close_brackets,
+            "Mismatched brackets: {} open, {} close",
+            open_brackets, close_brackets
+        );
     }
 }

@@ -1,5 +1,5 @@
 {
-  "dst_port": 8080,
+  "dst_ports": [8080],
   "window_sec": 10,
   "syn_rate_threshold": 100.0,
   "success_ratio_threshold": 0.1,

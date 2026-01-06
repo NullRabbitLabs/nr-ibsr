@@ -110,7 +110,7 @@ fn build_config<F: Filesystem>(args: &ReportArgs, fs: &F) -> CommandResult<Repor
     };
 
     // Build config with defaults, applying overrides
-    let mut config = ReporterConfig::new(0) // dst_port will be extracted from snapshots
+    let mut config = ReporterConfig::new(vec![]) // dst_ports will be extracted from snapshots
         .with_window_sec(args.window_sec)
         .with_allowlist(allowlist);
 
@@ -137,16 +137,16 @@ fn run_pipeline<C: Clock>(
     // Get time window from snapshots
     let bounds = snapshots.bounds();
 
-    // Extract dst_port from first snapshot
-    let dst_port = snapshots
+    // Extract dst_ports from first snapshot
+    let dst_ports = snapshots
         .snapshots()
         .first()
-        .map(|s| s.dst_port)
-        .unwrap_or(0);
+        .map(|s| s.dst_ports.clone())
+        .unwrap_or_default();
 
-    // Create config with correct dst_port
+    // Create config with correct dst_ports
     let mut config = config.clone();
-    config.dst_port = dst_port;
+    config.dst_ports = dst_ports;
 
     // Aggregate statistics
     let snapshot_refs: Vec<_> = snapshots.snapshots().iter().collect();
@@ -179,8 +179,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    fn create_test_snapshot(ts: u64, dst_port: u16, entries: Vec<BucketEntry>) -> Snapshot {
-        Snapshot::new(ts, dst_port, entries)
+    fn create_test_snapshot(ts: u64, dst_ports: &[u16], entries: Vec<BucketEntry>) -> Snapshot {
+        Snapshot::new(ts, dst_ports, entries)
     }
 
     fn write_snapshot(fs: &MockFilesystem, dir: &Path, snapshot: &Snapshot) {
@@ -223,12 +223,13 @@ mod tests {
         // Create a snapshot with some data
         let snapshot = create_test_snapshot(
             1000,
-            8899,
+            &[8899],
             vec![BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000001, // 10.0.0.1
                 syn: 100,
                 ack: 50,
+                handshake_ack: 50,
                 rst: 5,
                 packets: 200,
                 bytes: 30000,
@@ -264,12 +265,13 @@ mod tests {
         // Create snapshot with high SYN rate, low success ratio (offender)
         let snapshot = create_test_snapshot(
             1000,
-            8899,
+            &[8899],
             vec![BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000001,
                 syn: 10000,  // High SYN
                 ack: 10,     // Low ACK (low success ratio)
+                handshake_ack: 10,
                 rst: 100,
                 packets: 10110,
                 bytes: 1500000,
@@ -307,12 +309,13 @@ mod tests {
         // Create snapshot with offending IP
         let snapshot = create_test_snapshot(
             1000,
-            8899,
+            &[8899],
             vec![BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000001, // 10.0.0.1
                 syn: 10000,
                 ack: 10,
+                handshake_ack: 10,
                 rst: 100,
                 packets: 10110,
                 bytes: 1500000,
@@ -347,12 +350,13 @@ mod tests {
         for ts in [1000, 2000, 3000] {
             let snapshot = create_test_snapshot(
                 ts,
-                8899,
+                &[8899],
                 vec![BucketEntry {
                     key_type: KeyType::SrcIp,
                     key_value: 0x0A000001,
                     syn: 100,
                     ack: 50,
+                    handshake_ack: 50,
                     rst: 5,
                     packets: 200,
                     bytes: 30000,
@@ -402,7 +406,7 @@ mod tests {
         let input_dir = PathBuf::from("/tmp/snapshots");
 
         // Create a snapshot so we get past the empty check
-        let snapshot = create_test_snapshot(1000, 8899, vec![]);
+        let snapshot = create_test_snapshot(1000, &[8899], vec![]);
         write_snapshot(&fs, &input_dir, &snapshot);
 
         let args = ReportArgs {

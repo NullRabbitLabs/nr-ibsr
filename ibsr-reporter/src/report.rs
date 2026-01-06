@@ -87,7 +87,8 @@ fn build_report(
     report.push_str(&format!("- **Time window start**: {}\n", bounds.start_ts));
     report.push_str(&format!("- **Time window end**: {}\n", bounds.end_ts));
     report.push_str(&format!("- **Duration**: {} seconds\n", bounds.duration_sec()));
-    report.push_str(&format!("- **Destination port**: {}\n", config.dst_port));
+    let ports_str = config.dst_ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+    report.push_str(&format!("- **Destination ports**: {}\n", ports_str));
     report.push_str(&format!("- **Window size**: {} seconds\n", config.window_sec));
     report.push_str(&format!("- **SYN rate threshold**: {:.1} SYN/sec\n", config.syn_rate_threshold));
     report.push_str(&format!("- **Success ratio threshold**: {:.2}\n", config.success_ratio_threshold));
@@ -175,7 +176,7 @@ fn build_report(
     report.push_str("## 4. Candidate Enforcement Rules\n\n");
     report.push_str("```json\n");
     report.push_str(&rules.to_json());
-    report.push_str("\n```\n\n");
+    report.push_str("```\n\n");
 
     // Section 5: Readiness Judgment
     report.push_str("## 5. Readiness Judgment\n\n");
@@ -225,7 +226,7 @@ mod tests {
     // ===========================================
 
     fn make_config() -> ReporterConfig {
-        ReporterConfig::new(8080)
+        ReporterConfig::new(vec![8080])
             .with_window_sec(10)
             .with_syn_rate_threshold(100.0)
             .with_success_ratio_threshold(0.1)
@@ -308,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn test_report_section_1_contains_dst_port() {
+    fn test_report_section_1_contains_dst_ports() {
         let config = make_config();
         let bounds = make_bounds();
         let cf = make_counterfactual_with_offenders();
@@ -316,7 +317,7 @@ mod tests {
 
         let report = generate(&bounds, &config, &cf, &rules);
 
-        assert!(report.contains("Destination port"));
+        assert!(report.contains("Destination ports"));
         assert!(report.contains("8080"));
     }
 

@@ -166,7 +166,7 @@ mod tests {
     // ===========================================
 
     fn make_config() -> ReporterConfig {
-        ReporterConfig::new(8080)
+        ReporterConfig::new(vec![8080])
             .with_syn_rate_threshold(100.0)
             .with_success_ratio_threshold(0.1)
     }

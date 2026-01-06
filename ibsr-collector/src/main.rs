@@ -39,9 +39,11 @@ fn run_collect(
     args: ibsr_collector::CollectArgs,
     shutdown: &ShutdownFlag,
 ) -> Result<(), CommandError> {
+    let ports = args.get_all_ports();
+    // TODO: Multi-port BPF support - for now use first port
     let map_reader = ibsr_bpf::BpfMapReader::new(
         args.iface.as_deref().unwrap_or("eth0"),
-        args.dst_port,
+        ports[0],
         args.map_size,
     )?;
 
@@ -84,9 +86,11 @@ fn run_run(
     args: ibsr_collector::RunArgs,
     shutdown: &ShutdownFlag,
 ) -> Result<(), CommandError> {
+    let ports = args.get_all_ports();
+    // TODO: Multi-port BPF support - for now use first port
     let map_reader = ibsr_bpf::BpfMapReader::new(
         args.iface.as_deref().unwrap_or("eth0"),
-        args.dst_port,
+        ports[0],
         args.map_size,
     )?;
 
@@ -96,6 +100,8 @@ fn run_run(
 
     let result = execute_run(&args, &map_reader, &clock, &fs, &sleeper, shutdown)?;
 
+    println!("Run directory: {}", result.run_dir.display());
+    println!();
     println!("Collection phase:");
     println!(
         "  Collected {} IPs in {} cycles",

@@ -9,7 +9,8 @@ services:
     # All business logic is 100% covered; derive macros generate untestable code.
     # Phase 3 CLI adds ReportArgs, RunArgs with extensive derive macros that increase overhead.
     # main.rs is excluded as it's a binary entry point that cannot be unit tested.
-    command: ["cargo", "llvm-cov", "--workspace", "--fail-under-lines", "97", "--fail-under-functions", "94", "--ignore-filename-regex", "main\\.rs|build\\.rs"]
+    # bpf_reader.rs is excluded as it contains real BPF code requiring kernel capabilities.
+    command: ["cargo", "llvm-cov", "--workspace", "--fail-under-lines", "97", "--fail-under-functions", "94", "--ignore-filename-regex", "main\\.rs|build\\.rs|bpf_reader\\.rs"]
 
   build:
     build:

@@ -122,20 +122,22 @@ impl MapReader for BpfMapReader {
                 .lookup(&key_clone, libbpf_rs::MapFlags::ANY)
                 .map_err(|e| MapReaderError::ReadError(e.to_string()))?
             {
-                if value.len() >= 24 {
+                if value.len() >= 28 {
                     // Parse counter values from raw bytes
-                    // Layout: syn(4) + ack(4) + rst(4) + packets(4) + bytes(8) = 24 bytes
+                    // Layout: syn(4) + ack(4) + handshake_ack(4) + rst(4) + packets(4) + bytes(8) = 28 bytes
                     let syn = u32::from_ne_bytes(value[0..4].try_into().unwrap());
                     let ack = u32::from_ne_bytes(value[4..8].try_into().unwrap());
-                    let rst = u32::from_ne_bytes(value[8..12].try_into().unwrap());
-                    let packets = u32::from_ne_bytes(value[12..16].try_into().unwrap());
-                    let bytes = u64::from_ne_bytes(value[16..24].try_into().unwrap());
+                    let handshake_ack = u32::from_ne_bytes(value[8..12].try_into().unwrap());
+                    let rst = u32::from_ne_bytes(value[12..16].try_into().unwrap());
+                    let packets = u32::from_ne_bytes(value[16..20].try_into().unwrap());
+                    let bytes = u64::from_ne_bytes(value[20..28].try_into().unwrap());
 
                     result.insert(
                         src_ip,
                         Counters {
                             syn,
                             ack,
+                            handshake_ack,
                             rst,
                             packets,
                             bytes,

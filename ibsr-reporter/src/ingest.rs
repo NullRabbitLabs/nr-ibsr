@@ -196,8 +196,8 @@ mod tests {
     // Category A — Snapshot Ingestion Tests
     // ===========================================
 
-    fn make_snapshot(ts: u64, dst_port: u16, buckets: Vec<BucketEntry>) -> Snapshot {
-        Snapshot::new(ts, dst_port, buckets)
+    fn make_snapshot(ts: u64, dst_ports: &[u16], buckets: Vec<BucketEntry>) -> Snapshot {
+        Snapshot::new(ts, dst_ports, buckets)
     }
 
     fn make_bucket(key_value: u32, syn: u32, ack: u32) -> BucketEntry {
@@ -206,6 +206,7 @@ mod tests {
             key_value,
             syn,
             ack,
+            handshake_ack: ack, // Default to ack for legitimate traffic
             rst: 0,
             packets: syn + ack,
             bytes: (syn + ack) as u64 * 100,
@@ -218,20 +219,21 @@ mod tests {
 
     #[test]
     fn test_parse_snapshot_valid_json() {
-        let json = r#"{"version":0,"ts_unix_sec":1000,"dst_port":8080,"buckets":[]}"#;
+        let json = r#"{"version":2,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
         let snapshot = parse_snapshot(json).unwrap();
         assert_eq!(snapshot.ts_unix_sec, 1000);
-        assert_eq!(snapshot.dst_port, 8080);
+        assert_eq!(snapshot.dst_ports, vec![8080]);
         assert!(snapshot.buckets.is_empty());
     }
 
     #[test]
     fn test_parse_snapshot_with_buckets() {
-        let json = r#"{"version":0,"ts_unix_sec":1000,"dst_port":8080,"buckets":[{"key_type":"src_ip","key_value":167772161,"syn":100,"ack":50,"rst":5,"packets":155,"bytes":15500}]}"#;
+        let json = r#"{"version":2,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[{"key_type":"src_ip","key_value":167772161,"syn":100,"ack":50,"handshake_ack":50,"rst":5,"packets":155,"bytes":15500}]}"#;
         let snapshot = parse_snapshot(json).unwrap();
         assert_eq!(snapshot.buckets.len(), 1);
         assert_eq!(snapshot.buckets[0].syn, 100);
         assert_eq!(snapshot.buckets[0].ack, 50);
+        assert_eq!(snapshot.buckets[0].handshake_ack, 50);
     }
 
     #[test]
@@ -243,14 +245,14 @@ mod tests {
 
     #[test]
     fn test_parse_snapshot_wrong_version() {
-        let json = r#"{"version":999,"ts_unix_sec":1000,"dst_port":8080,"buckets":[]}"#;
+        let json = r#"{"version":999,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
         let result = parse_snapshot(json);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_snapshot_missing_field() {
-        let json = r#"{"version":0,"ts_unix_sec":1000}"#;
+        let json = r#"{"version":2,"ts_unix_sec":1000}"#;
         let result = parse_snapshot(json);
         assert!(result.is_err());
     }
@@ -261,9 +263,9 @@ mod tests {
 
     #[test]
     fn test_snapshot_stream_ordered() {
-        let s1 = make_snapshot(1000, 8080, vec![]);
-        let s2 = make_snapshot(1001, 8080, vec![]);
-        let s3 = make_snapshot(1002, 8080, vec![]);
+        let s1 = make_snapshot(1000, &[8080], vec![]);
+        let s2 = make_snapshot(1001, &[8080], vec![]);
+        let s3 = make_snapshot(1002, &[8080], vec![]);
 
         let stream = SnapshotStream::from_ordered(vec![s1, s2, s3]).unwrap();
 
@@ -274,9 +276,9 @@ mod tests {
 
     #[test]
     fn test_snapshot_stream_unordered_sorts() {
-        let s1 = make_snapshot(1002, 8080, vec![]);
-        let s2 = make_snapshot(1000, 8080, vec![]);
-        let s3 = make_snapshot(1001, 8080, vec![]);
+        let s1 = make_snapshot(1002, &[8080], vec![]);
+        let s2 = make_snapshot(1000, &[8080], vec![]);
+        let s3 = make_snapshot(1001, &[8080], vec![]);
 
         let stream = SnapshotStream::from_unordered(vec![s1, s2, s3]).unwrap();
 
@@ -289,8 +291,8 @@ mod tests {
     #[test]
     fn test_snapshot_stream_ordering_stable() {
         // Same timestamps should maintain stable order (by insertion)
-        let s1 = make_snapshot(1000, 8080, vec![make_bucket(1, 10, 5)]);
-        let s2 = make_snapshot(1000, 8080, vec![make_bucket(2, 20, 10)]);
+        let s1 = make_snapshot(1000, &[8080], vec![make_bucket(1, 10, 5)]);
+        let s2 = make_snapshot(1000, &[8080], vec![make_bucket(2, 20, 10)]);
 
         let stream = SnapshotStream::from_ordered(vec![s1.clone(), s2.clone()]).unwrap();
 
@@ -322,9 +324,9 @@ mod tests {
     #[test]
     fn test_parse_snapshots_lenient_skips_malformed() {
         let files = vec![
-            ("snap_1000.jsonl".to_string(), r#"{"version":0,"ts_unix_sec":1000,"dst_port":8080,"buckets":[]}"#.to_string()),
+            ("snap_1000.jsonl".to_string(), r#"{"version":2,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#.to_string()),
             ("snap_1001.jsonl".to_string(), "invalid json".to_string()),
-            ("snap_1002.jsonl".to_string(), r#"{"version":0,"ts_unix_sec":1002,"dst_port":8080,"buckets":[]}"#.to_string()),
+            ("snap_1002.jsonl".to_string(), r#"{"version":2,"ts_unix_sec":1002,"dst_ports":[8080],"buckets":[]}"#.to_string()),
         ];
 
         let mut warnings = Vec::new();
@@ -343,7 +345,7 @@ mod tests {
     fn test_parse_snapshots_lenient_no_warn_fn() {
         let files = vec![
             ("snap_1000.jsonl".to_string(), "invalid".to_string()),
-            ("snap_1001.jsonl".to_string(), r#"{"version":0,"ts_unix_sec":1001,"dst_port":8080,"buckets":[]}"#.to_string()),
+            ("snap_1001.jsonl".to_string(), r#"{"version":2,"ts_unix_sec":1001,"dst_ports":[8080],"buckets":[]}"#.to_string()),
         ];
 
         let snapshots = parse_snapshots_lenient::<fn(&str, &str)>(files, None);
@@ -367,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_derive_window_bounds_single() {
-        let s = make_snapshot(1500, 8080, vec![]);
+        let s = make_snapshot(1500, &[8080], vec![]);
         let bounds = derive_window_bounds(&[s]).unwrap();
 
         assert_eq!(bounds.start_ts, 1500);
@@ -377,9 +379,9 @@ mod tests {
 
     #[test]
     fn test_derive_window_bounds_multiple() {
-        let s1 = make_snapshot(1000, 8080, vec![]);
-        let s2 = make_snapshot(1005, 8080, vec![]);
-        let s3 = make_snapshot(1010, 8080, vec![]);
+        let s1 = make_snapshot(1000, &[8080], vec![]);
+        let s2 = make_snapshot(1005, &[8080], vec![]);
+        let s3 = make_snapshot(1010, &[8080], vec![]);
 
         let bounds = derive_window_bounds(&[s1, s2, s3]).unwrap();
 
@@ -391,9 +393,9 @@ mod tests {
     #[test]
     fn test_derive_window_bounds_unordered_input() {
         // derive_window_bounds should handle unordered input
-        let s1 = make_snapshot(1010, 8080, vec![]);
-        let s2 = make_snapshot(1000, 8080, vec![]);
-        let s3 = make_snapshot(1005, 8080, vec![]);
+        let s1 = make_snapshot(1010, &[8080], vec![]);
+        let s2 = make_snapshot(1000, &[8080], vec![]);
+        let s3 = make_snapshot(1005, &[8080], vec![]);
 
         let bounds = derive_window_bounds(&[s1, s2, s3]).unwrap();
 
@@ -413,8 +415,8 @@ mod tests {
 
     #[test]
     fn test_snapshot_stream_bounds() {
-        let s1 = make_snapshot(1000, 8080, vec![]);
-        let s2 = make_snapshot(1010, 8080, vec![]);
+        let s1 = make_snapshot(1000, &[8080], vec![]);
+        let s2 = make_snapshot(1010, &[8080], vec![]);
 
         let stream = SnapshotStream::from_ordered(vec![s1, s2]).unwrap();
         let bounds = stream.bounds();
@@ -425,10 +427,10 @@ mod tests {
 
     #[test]
     fn test_snapshot_stream_filter_window() {
-        let s1 = make_snapshot(1000, 8080, vec![]);
-        let s2 = make_snapshot(1005, 8080, vec![]);
-        let s3 = make_snapshot(1010, 8080, vec![]);
-        let s4 = make_snapshot(1015, 8080, vec![]);
+        let s1 = make_snapshot(1000, &[8080], vec![]);
+        let s2 = make_snapshot(1005, &[8080], vec![]);
+        let s3 = make_snapshot(1010, &[8080], vec![]);
+        let s4 = make_snapshot(1015, &[8080], vec![]);
 
         let stream = SnapshotStream::from_ordered(vec![s1, s2, s3, s4]).unwrap();
 
@@ -441,8 +443,8 @@ mod tests {
 
     #[test]
     fn test_snapshot_stream_filter_window_none_match() {
-        let s1 = make_snapshot(1000, 8080, vec![]);
-        let s2 = make_snapshot(1010, 8080, vec![]);
+        let s1 = make_snapshot(1000, &[8080], vec![]);
+        let s2 = make_snapshot(1010, &[8080], vec![]);
 
         let stream = SnapshotStream::from_ordered(vec![s1, s2]).unwrap();
 
@@ -458,9 +460,9 @@ mod tests {
     fn test_snapshot_stream_deterministic_from_same_input() {
         let make_snapshots = || {
             vec![
-                make_snapshot(1002, 8080, vec![]),
-                make_snapshot(1000, 8080, vec![]),
-                make_snapshot(1001, 8080, vec![]),
+                make_snapshot(1002, &[8080], vec![]),
+                make_snapshot(1000, &[8080], vec![]),
+                make_snapshot(1001, &[8080], vec![]),
             ]
         };
 
@@ -475,8 +477,8 @@ mod tests {
 
     #[test]
     fn test_snapshot_stream_iter() {
-        let s1 = make_snapshot(1000, 8080, vec![]);
-        let s2 = make_snapshot(1001, 8080, vec![]);
+        let s1 = make_snapshot(1000, &[8080], vec![]);
+        let s2 = make_snapshot(1001, &[8080], vec![]);
 
         let stream = SnapshotStream::from_ordered(vec![s1, s2]).unwrap();
 
@@ -486,7 +488,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_stream_is_empty() {
-        let s1 = make_snapshot(1000, 8080, vec![]);
+        let s1 = make_snapshot(1000, &[8080], vec![]);
         let stream = SnapshotStream::from_ordered(vec![s1]).unwrap();
         assert!(!stream.is_empty());
     }
@@ -516,11 +518,11 @@ mod tests {
         // Create test files
         std::fs::write(
             dir.path().join("snapshot_1000.jsonl"),
-            r#"{"version":0,"ts_unix_sec":1000,"dst_port":8080,"buckets":[]}"#,
+            r#"{"version":2,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
         std::fs::write(
             dir.path().join("snapshot_1001.jsonl"),
-            r#"{"version":0,"ts_unix_sec":1001,"dst_port":8080,"buckets":[]}"#,
+            r#"{"version":2,"ts_unix_sec":1001,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
         // Non-jsonl file should be ignored
         std::fs::write(dir.path().join("readme.txt"), "ignored").unwrap();
@@ -536,11 +538,11 @@ mod tests {
 
         std::fs::write(
             dir.path().join("snapshot_1000.jsonl"),
-            r#"{"version":0,"ts_unix_sec":1000,"dst_port":8080,"buckets":[]}"#,
+            r#"{"version":2,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
         std::fs::write(
             dir.path().join("snapshot_1002.jsonl"),
-            r#"{"version":0,"ts_unix_sec":1002,"dst_port":8080,"buckets":[]}"#,
+            r#"{"version":2,"ts_unix_sec":1002,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
 
         let stream = load_snapshots_from_dir::<fn(&str, &str)>(dir.path(), None).unwrap();
@@ -566,7 +568,7 @@ mod tests {
 
         std::fs::write(
             dir.path().join("snapshot_1000.jsonl"),
-            r#"{"version":0,"ts_unix_sec":1000,"dst_port":8080,"buckets":[]}"#,
+            r#"{"version":2,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
         std::fs::write(
             dir.path().join("snapshot_1001.jsonl"),

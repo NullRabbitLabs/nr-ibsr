@@ -23,11 +23,23 @@ pub const DEFAULT_MAP_SIZE: u32 = 100_000;
 /// Default window size for report analysis in seconds.
 pub const DEFAULT_WINDOW_SEC: u64 = 10;
 
+/// Maximum number of destination ports that can be monitored.
+pub const MAX_DST_PORTS: usize = 8;
+
 /// Errors from CLI argument validation.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CliError {
     #[error("dst-port must be between 1 and 65535, got {0}")]
     InvalidPort(u32),
+
+    #[error("at least one destination port is required")]
+    NoPortsSpecified,
+
+    #[error("too many destination ports specified: {0} (max {MAX_DST_PORTS})")]
+    TooManyPorts(usize),
+
+    #[error("duplicate destination port: {0}")]
+    DuplicatePort(u16),
 
     #[error("max-files must be at least 1, got {0}")]
     InvalidMaxFiles(usize),
@@ -65,13 +77,21 @@ pub enum Command {
     Run(RunArgs),
 }
 
+/// Default report interval in seconds.
+pub const DEFAULT_REPORT_INTERVAL_SEC: u64 = 60;
+
 /// Arguments for the collect command.
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
 pub struct CollectArgs {
-    /// Destination TCP port to monitor (required).
-    /// This should be the port your Solana validator uses (e.g., 8899 for RPC).
-    #[arg(short = 'p', long = "dst-port")]
-    pub dst_port: u16,
+    /// Destination TCP port(s) to monitor (repeatable, e.g., -p 8899 -p 8900).
+    /// Maximum 8 ports. At least one port is required.
+    #[arg(short = 'p', long = "dst-port", action = clap::ArgAction::Append)]
+    pub dst_port: Vec<u16>,
+
+    /// Destination TCP ports as comma-separated list (e.g., --dst-ports 8899,8900).
+    /// Can be combined with -p flags. Maximum 8 ports total.
+    #[arg(long = "dst-ports", value_delimiter = ',')]
+    pub dst_ports: Option<Vec<u16>>,
 
     /// Duration to collect in seconds. If not specified, runs until SIGINT.
     #[arg(long)]
@@ -97,14 +117,67 @@ pub struct CollectArgs {
     /// Size of the BPF LRU map for tracking source IPs.
     #[arg(long, default_value_t = DEFAULT_MAP_SIZE)]
     pub map_size: u32,
+
+    /// Increase verbosity (-v for verbose, -vv for debug).
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Interval for status reports in seconds.
+    #[arg(long, default_value_t = DEFAULT_REPORT_INTERVAL_SEC)]
+    pub report_interval_sec: u64,
 }
 
 impl CollectArgs {
+    /// Get all destination ports, merging -p and --dst-ports arguments.
+    ///
+    /// Returns a deduplicated, sorted list of ports.
+    pub fn get_all_ports(&self) -> Vec<u16> {
+        let mut ports: Vec<u16> = self.dst_port.clone();
+        if let Some(ref extra) = self.dst_ports {
+            ports.extend(extra.iter().copied());
+        }
+        // Deduplicate and sort
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
+
     /// Validate the arguments.
     pub fn validate(&self) -> Result<(), CliError> {
-        if self.dst_port == 0 {
-            return Err(CliError::InvalidPort(self.dst_port as u32));
+        let ports = self.get_all_ports();
+
+        // Check at least one port is specified
+        if ports.is_empty() {
+            return Err(CliError::NoPortsSpecified);
         }
+
+        // Check not too many ports
+        if ports.len() > MAX_DST_PORTS {
+            return Err(CliError::TooManyPorts(ports.len()));
+        }
+
+        // Check all ports are valid (non-zero)
+        for &port in &ports {
+            if port == 0 {
+                return Err(CliError::InvalidPort(0));
+            }
+        }
+
+        // Check for duplicates (before dedup, to report the actual duplicate)
+        let mut seen = std::collections::HashSet::new();
+        for &port in &self.dst_port {
+            if !seen.insert(port) {
+                return Err(CliError::DuplicatePort(port));
+            }
+        }
+        if let Some(ref extra) = self.dst_ports {
+            for &port in extra {
+                if !seen.insert(port) {
+                    return Err(CliError::DuplicatePort(port));
+                }
+            }
+        }
+
         if self.max_files == 0 {
             return Err(CliError::InvalidMaxFiles(self.max_files));
         }
@@ -163,9 +236,15 @@ impl ReportArgs {
 /// Arguments for the run command (collect then report).
 #[derive(Parser, Debug, Clone, PartialEq)]
 pub struct RunArgs {
-    /// Destination TCP port to monitor (required).
-    #[arg(short = 'p', long = "dst-port")]
-    pub dst_port: u16,
+    /// Destination TCP port(s) to monitor (repeatable, e.g., -p 8899 -p 8900).
+    /// Maximum 8 ports. At least one port is required.
+    #[arg(short = 'p', long = "dst-port", action = clap::ArgAction::Append)]
+    pub dst_port: Vec<u16>,
+
+    /// Destination TCP ports as comma-separated list (e.g., --dst-ports 8899,8900).
+    /// Can be combined with -p flags. Maximum 8 ports total.
+    #[arg(long = "dst-ports", value_delimiter = ',')]
+    pub dst_ports: Option<Vec<u16>>,
 
     /// Duration to collect in seconds (required for run).
     #[arg(long)]
@@ -214,14 +293,67 @@ pub struct RunArgs {
     /// Override block duration in seconds.
     #[arg(long)]
     pub block_duration_sec: Option<u64>,
+
+    /// Increase verbosity (-v for verbose, -vv for debug).
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Interval for status reports in seconds.
+    #[arg(long, default_value_t = DEFAULT_REPORT_INTERVAL_SEC)]
+    pub report_interval_sec: u64,
 }
 
 impl RunArgs {
+    /// Get all destination ports, merging -p and --dst-ports arguments.
+    ///
+    /// Returns a deduplicated, sorted list of ports.
+    pub fn get_all_ports(&self) -> Vec<u16> {
+        let mut ports: Vec<u16> = self.dst_port.clone();
+        if let Some(ref extra) = self.dst_ports {
+            ports.extend(extra.iter().copied());
+        }
+        // Deduplicate and sort
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
+
     /// Validate the arguments.
     pub fn validate(&self) -> Result<(), CliError> {
-        if self.dst_port == 0 {
-            return Err(CliError::InvalidPort(self.dst_port as u32));
+        let ports = self.get_all_ports();
+
+        // Check at least one port is specified
+        if ports.is_empty() {
+            return Err(CliError::NoPortsSpecified);
         }
+
+        // Check not too many ports
+        if ports.len() > MAX_DST_PORTS {
+            return Err(CliError::TooManyPorts(ports.len()));
+        }
+
+        // Check all ports are valid (non-zero)
+        for &port in &ports {
+            if port == 0 {
+                return Err(CliError::InvalidPort(0));
+            }
+        }
+
+        // Check for duplicates (before dedup, to report the actual duplicate)
+        let mut seen = std::collections::HashSet::new();
+        for &port in &self.dst_port {
+            if !seen.insert(port) {
+                return Err(CliError::DuplicatePort(port));
+            }
+        }
+        if let Some(ref extra) = self.dst_ports {
+            for &port in extra {
+                if !seen.insert(port) {
+                    return Err(CliError::DuplicatePort(port));
+                }
+            }
+        }
+
         if self.duration_sec == 0 {
             return Err(CliError::InvalidDurationSec(self.duration_sec));
         }
@@ -243,13 +375,16 @@ impl RunArgs {
     /// Convert to CollectArgs for the collect phase.
     pub fn to_collect_args(&self) -> CollectArgs {
         CollectArgs {
-            dst_port: self.dst_port,
+            dst_port: self.dst_port.clone(),
+            dst_ports: self.dst_ports.clone(),
             duration_sec: Some(self.duration_sec),
             iface: self.iface.clone(),
             out_dir: self.snapshot_dir.clone(),
             max_files: self.max_files,
             max_age: self.max_age,
             map_size: self.map_size,
+            verbose: self.verbose,
+            report_interval_sec: self.report_interval_sec,
         }
     }
 
@@ -319,10 +454,14 @@ mod tests {
 
     #[test]
     fn test_collect_requires_dst_port() {
-        let result = parse_from(["ibsr", "collect"]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("--dst-port"));
+        let cli = parse_from(["ibsr", "collect"]).expect("parse");
+        match cli.command {
+            Command::Collect(args) => {
+                let result = args.validate();
+                assert!(matches!(result, Err(CliError::NoPortsSpecified)));
+            }
+            _ => panic!("expected Collect"),
+        }
     }
 
     #[test]
@@ -330,7 +469,7 @@ mod tests {
         let cli = parse_from(["ibsr", "collect", "-p", "8899"]).expect("parse");
         match cli.command {
             Command::Collect(args) => {
-                assert_eq!(args.dst_port, 8899);
+                assert_eq!(args.dst_port, vec![8899]);
             }
             _ => panic!("expected Collect"),
         }
@@ -341,7 +480,7 @@ mod tests {
         let cli = parse_from(["ibsr", "collect", "--dst-port", "8899"]).expect("parse");
         match cli.command {
             Command::Collect(args) => {
-                assert_eq!(args.dst_port, 8899);
+                assert_eq!(args.dst_port, vec![8899]);
             }
             _ => panic!("expected Collect"),
         }
@@ -352,7 +491,7 @@ mod tests {
         let cli = parse_from(["ibsr", "collect", "--dst-port", "65535"]).expect("parse");
         match cli.command {
             Command::Collect(args) => {
-                assert_eq!(args.dst_port, 65535);
+                assert_eq!(args.dst_port, vec![65535]);
             }
             _ => panic!("expected Collect"),
         }
@@ -363,7 +502,7 @@ mod tests {
         let cli = parse_from(["ibsr", "collect", "--dst-port", "1"]).expect("parse");
         match cli.command {
             Command::Collect(args) => {
-                assert_eq!(args.dst_port, 1);
+                assert_eq!(args.dst_port, vec![1]);
             }
             _ => panic!("expected Collect"),
         }
@@ -633,7 +772,7 @@ mod tests {
 
         match cli.command {
             Command::Collect(args) => {
-                assert_eq!(args.dst_port, 8899);
+                assert_eq!(args.dst_port, vec![8899]);
                 assert_eq!(args.iface, Some("eth0".to_string()));
                 assert_eq!(args.out_dir, PathBuf::from("/data/snapshots"));
                 assert_eq!(args.max_files, 1000);
@@ -1024,12 +1163,16 @@ eth0 00000000 0102A8C0";
 
     #[test]
     fn test_run_requires_dst_port() {
-        let result = parse_from([
+        let cli = parse_from([
             "ibsr", "run", "--duration-sec", "60", "--out-dir", "/tmp/output",
-        ]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("--dst-port"));
+        ]).expect("parse");
+        match cli.command {
+            Command::Run(args) => {
+                let result = args.validate();
+                assert!(matches!(result, Err(CliError::NoPortsSpecified)));
+            }
+            _ => panic!("expected Run"),
+        }
     }
 
     #[test]
@@ -1061,7 +1204,7 @@ eth0 00000000 0102A8C0";
         .expect("parse");
         match cli.command {
             Command::Run(args) => {
-                assert_eq!(args.dst_port, 8899);
+                assert_eq!(args.dst_port, vec![8899]);
                 assert_eq!(args.duration_sec, 60);
                 assert_eq!(args.out_dir, PathBuf::from("/tmp/output"));
             }
@@ -1077,7 +1220,7 @@ eth0 00000000 0102A8C0";
         .expect("parse");
         match cli.command {
             Command::Run(args) => {
-                assert_eq!(args.dst_port, 8899);
+                assert_eq!(args.dst_port, vec![8899]);
             }
             _ => panic!("expected Run"),
         }
@@ -1125,7 +1268,7 @@ eth0 00000000 0102A8C0";
         .expect("parse");
         match cli.command {
             Command::Run(args) => {
-                assert_eq!(args.dst_port, 8899);
+                assert_eq!(args.dst_port, vec![8899]);
                 assert_eq!(args.duration_sec, 60);
                 assert_eq!(args.iface, Some("eth0".to_string()));
                 assert_eq!(args.snapshot_dir, PathBuf::from("/data/snapshots"));
@@ -1209,7 +1352,7 @@ eth0 00000000 0102A8C0";
         match cli.command {
             Command::Run(args) => {
                 let collect_args = args.to_collect_args();
-                assert_eq!(collect_args.dst_port, 8899);
+                assert_eq!(collect_args.dst_port, vec![8899]);
                 assert_eq!(collect_args.duration_sec, Some(60));
                 assert_eq!(collect_args.iface, Some("eth0".to_string()));
                 assert_eq!(collect_args.out_dir, PathBuf::from("/data/snapshots"));
@@ -1644,5 +1787,318 @@ eth0 00000000 0102A8C0";
         let err = CliError::InvalidPort(0);
         let debug_str = format!("{:?}", err);
         assert!(debug_str.contains("InvalidPort"));
+    }
+
+    // ===========================================
+    // Test Category H — Verbose and Report Interval Flags
+    // ===========================================
+
+    #[test]
+    fn test_collect_verbose_flag_none() {
+        let cli = parse_from(["ibsr", "collect", "-p", "8899"]).expect("parse");
+        match cli.command {
+            Command::Collect(args) => {
+                assert_eq!(args.verbose, 0);
+            }
+            _ => panic!("expected Collect"),
+        }
+    }
+
+    #[test]
+    fn test_collect_verbose_flag_single() {
+        let cli = parse_from(["ibsr", "collect", "-p", "8899", "-v"]).expect("parse");
+        match cli.command {
+            Command::Collect(args) => {
+                assert_eq!(args.verbose, 1);
+            }
+            _ => panic!("expected Collect"),
+        }
+    }
+
+    #[test]
+    fn test_collect_verbose_flag_double() {
+        let cli = parse_from(["ibsr", "collect", "-p", "8899", "-vv"]).expect("parse");
+        match cli.command {
+            Command::Collect(args) => {
+                assert_eq!(args.verbose, 2);
+            }
+            _ => panic!("expected Collect"),
+        }
+    }
+
+    #[test]
+    fn test_collect_verbose_flag_separate() {
+        let cli = parse_from(["ibsr", "collect", "-p", "8899", "-v", "-v"]).expect("parse");
+        match cli.command {
+            Command::Collect(args) => {
+                assert_eq!(args.verbose, 2);
+            }
+            _ => panic!("expected Collect"),
+        }
+    }
+
+    #[test]
+    fn test_collect_report_interval_default() {
+        let cli = parse_from(["ibsr", "collect", "-p", "8899"]).expect("parse");
+        match cli.command {
+            Command::Collect(args) => {
+                assert_eq!(args.report_interval_sec, 60);
+            }
+            _ => panic!("expected Collect"),
+        }
+    }
+
+    #[test]
+    fn test_collect_report_interval_custom() {
+        let cli = parse_from(["ibsr", "collect", "-p", "8899", "--report-interval-sec", "30"])
+            .expect("parse");
+        match cli.command {
+            Command::Collect(args) => {
+                assert_eq!(args.report_interval_sec, 30);
+            }
+            _ => panic!("expected Collect"),
+        }
+    }
+
+    #[test]
+    fn test_run_verbose_flag_single() {
+        let cli = parse_from([
+            "ibsr", "run", "-p", "8899", "--duration-sec", "60",
+            "--out-dir", "/tmp/output", "-v",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Run(args) => {
+                assert_eq!(args.verbose, 1);
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn test_run_verbose_flag_double() {
+        let cli = parse_from([
+            "ibsr", "run", "-p", "8899", "--duration-sec", "60",
+            "--out-dir", "/tmp/output", "-vv",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Run(args) => {
+                assert_eq!(args.verbose, 2);
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn test_run_report_interval_default() {
+        let cli = parse_from([
+            "ibsr", "run", "-p", "8899", "--duration-sec", "60",
+            "--out-dir", "/tmp/output",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Run(args) => {
+                assert_eq!(args.report_interval_sec, 60);
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn test_run_report_interval_custom() {
+        let cli = parse_from([
+            "ibsr", "run", "-p", "8899", "--duration-sec", "60",
+            "--out-dir", "/tmp/output", "--report-interval-sec", "10",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Run(args) => {
+                assert_eq!(args.report_interval_sec, 10);
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    // -------------------------------------------
+    // Stage 4: Multi-Port Validation Tests
+    // -------------------------------------------
+
+    #[test]
+    fn test_collect_too_many_ports() {
+        // MAX_DST_PORTS is 8, so try 9 ports
+        let cli = parse_from([
+            "ibsr", "collect",
+            "-p", "8001", "-p", "8002", "-p", "8003", "-p", "8004",
+            "-p", "8005", "-p", "8006", "-p", "8007", "-p", "8008",
+            "-p", "8009", // 9th port - exceeds MAX_DST_PORTS
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Collect(args) => {
+                let result = args.validate();
+                assert!(result.is_err());
+                assert!(matches!(result.unwrap_err(), CliError::TooManyPorts(9)));
+            }
+            _ => panic!("expected Collect"),
+        }
+    }
+
+    #[test]
+    fn test_collect_exactly_max_ports_allowed() {
+        // MAX_DST_PORTS is 8, verify exactly 8 ports works
+        let cli = parse_from([
+            "ibsr", "collect",
+            "-p", "8001", "-p", "8002", "-p", "8003", "-p", "8004",
+            "-p", "8005", "-p", "8006", "-p", "8007", "-p", "8008",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Collect(args) => {
+                let result = args.validate();
+                assert!(result.is_ok()); // Should succeed with exactly 8 ports
+            }
+            _ => panic!("expected Collect"),
+        }
+    }
+
+    #[test]
+    fn test_collect_duplicate_port_in_dst_port() {
+        let cli = parse_from([
+            "ibsr", "collect",
+            "-p", "8899",
+            "-p", "8899", // duplicate
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Collect(args) => {
+                let result = args.validate();
+                assert!(result.is_err());
+                assert!(matches!(result.unwrap_err(), CliError::DuplicatePort(8899)));
+            }
+            _ => panic!("expected Collect"),
+        }
+    }
+
+    #[test]
+    fn test_collect_duplicate_port_in_dst_ports() {
+        let cli = parse_from([
+            "ibsr", "collect",
+            "--dst-ports", "8899,9000,8899", // duplicate 8899
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Collect(args) => {
+                let result = args.validate();
+                assert!(result.is_err());
+                assert!(matches!(result.unwrap_err(), CliError::DuplicatePort(8899)));
+            }
+            _ => panic!("expected Collect"),
+        }
+    }
+
+    #[test]
+    fn test_collect_duplicate_port_across_flags() {
+        let cli = parse_from([
+            "ibsr", "collect",
+            "-p", "8899",
+            "--dst-ports", "9000,8899", // 8899 duplicates -p flag
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Collect(args) => {
+                let result = args.validate();
+                assert!(result.is_err());
+                assert!(matches!(result.unwrap_err(), CliError::DuplicatePort(8899)));
+            }
+            _ => panic!("expected Collect"),
+        }
+    }
+
+    #[test]
+    fn test_collect_get_all_ports_merges_both_flags() {
+        let cli = parse_from([
+            "ibsr", "collect",
+            "-p", "8899",
+            "-p", "8900",
+            "--dst-ports", "9000,9001",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Collect(args) => {
+                let ports = args.get_all_ports();
+                assert_eq!(ports.len(), 4);
+                assert!(ports.contains(&8899));
+                assert!(ports.contains(&8900));
+                assert!(ports.contains(&9000));
+                assert!(ports.contains(&9001));
+            }
+            _ => panic!("expected Collect"),
+        }
+    }
+
+    #[test]
+    fn test_run_too_many_ports() {
+        let cli = parse_from([
+            "ibsr", "run",
+            "-p", "8001", "-p", "8002", "-p", "8003", "-p", "8004",
+            "-p", "8005", "-p", "8006", "-p", "8007", "-p", "8008",
+            "-p", "8009", // 9th port
+            "--duration-sec", "60",
+            "--out-dir", "/tmp/output",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Run(args) => {
+                let result = args.validate();
+                assert!(result.is_err());
+                assert!(matches!(result.unwrap_err(), CliError::TooManyPorts(9)));
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn test_run_duplicate_port() {
+        let cli = parse_from([
+            "ibsr", "run",
+            "-p", "8899",
+            "-p", "8899", // duplicate
+            "--duration-sec", "60",
+            "--out-dir", "/tmp/output",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Run(args) => {
+                let result = args.validate();
+                assert!(result.is_err());
+                assert!(matches!(result.unwrap_err(), CliError::DuplicatePort(8899)));
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn test_error_display_no_ports_specified() {
+        let err = CliError::NoPortsSpecified;
+        assert_eq!(err.to_string(), "at least one destination port is required");
+    }
+
+    #[test]
+    fn test_error_display_too_many_ports() {
+        let err = CliError::TooManyPorts(10);
+        assert_eq!(err.to_string(), "too many destination ports specified: 10 (max 8)");
+    }
+
+    #[test]
+    fn test_error_display_duplicate_port() {
+        let err = CliError::DuplicatePort(8899);
+        assert_eq!(err.to_string(), "duplicate destination port: 8899");
+    }
+
+    #[test]
+    fn test_error_display_zero_port() {
+        let err = CliError::InvalidPort(0);
+        assert_eq!(err.to_string(), "dst-port must be between 1 and 65535, got 0");
     }
 }

@@ -133,16 +133,16 @@ fn execute_pipeline(
 ) -> (Report, EnforcementRules, Vec<KeyDecision>) {
     let bounds = snapshots.bounds();
 
-    // Extract dst_port from first snapshot
-    let dst_port = snapshots
+    // Extract dst_ports from first snapshot
+    let dst_ports = snapshots
         .snapshots()
         .first()
-        .map(|s| s.dst_port)
-        .unwrap_or(config.dst_port);
+        .map(|s| s.dst_ports.clone())
+        .unwrap_or_else(|| config.dst_ports.clone());
 
-    // Create config with correct dst_port
+    // Create config with correct dst_ports
     let mut config = config.clone();
-    config.dst_port = dst_port;
+    config.dst_ports = dst_ports;
 
     // Aggregate statistics
     let snapshot_refs: Vec<_> = snapshots.snapshots().iter().collect();
@@ -226,7 +226,9 @@ fn generate_evidence_csv(decisions: &[KeyDecision]) -> String {
         ));
     }
 
-    lines.join("\n")
+    let mut result = lines.join("\n");
+    result.push('\n');
+    result
 }
 
 #[cfg(test)]
@@ -241,7 +243,7 @@ mod tests {
 
     fn make_fixture_config() -> FixtureConfig {
         FixtureConfig {
-            dst_port: 8080,
+            dst_ports: vec![8080],
             window_sec: 10,
             syn_rate_threshold: 100.0,
             success_ratio_threshold: 0.1,
@@ -254,12 +256,13 @@ mod tests {
     fn make_snapshot_attacker() -> Snapshot {
         Snapshot::new(
             1000,
-            8080,
+            &[8080],
             vec![BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000001, // 10.0.0.1
                 syn: 5000,
                 ack: 50,
+                handshake_ack: 10,
                 rst: 0,
                 packets: 5050,
                 bytes: 505000,
@@ -270,12 +273,13 @@ mod tests {
     fn make_snapshot_legitimate() -> Snapshot {
         Snapshot::new(
             1000,
-            8080,
+            &[8080],
             vec![BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000002, // 10.0.0.2
                 syn: 100,
                 ack: 90,
+                handshake_ack: 90,
                 rst: 5,
                 packets: 200,
                 bytes: 20000,
@@ -399,7 +403,7 @@ mod tests {
     #[test]
     fn test_generate_evidence_csv_empty() {
         let csv = generate_evidence_csv(&[]);
-        assert_eq!(csv, "source,syn_rate,success_ratio,decision,packets,bytes,syn");
+        assert_eq!(csv, "source,syn_rate,success_ratio,decision,packets,bytes,syn\n");
     }
 
     #[test]

@@ -53,7 +53,7 @@ where
 
     // Build collector config
     let config = CollectorConfig {
-        dst_port: args.dst_port,
+        dst_ports: args.get_all_ports(),
         rotation: RotationConfig::new(args.max_files, args.max_age),
     };
 
@@ -121,12 +121,8 @@ where
         snapshots_written += 1;
         files_rotated += result.rotated_count;
 
-        // If no duration specified, run single cycle (for testing)
-        if duration_sec.is_none() {
-            break;
-        }
-
         // Check if duration has expired (after completing cycle)
+        // If duration_sec is None, we run continuously until shutdown
         if let Some(end) = end_ts {
             if clock.now_unix_sec() >= end {
                 break;
@@ -172,13 +168,16 @@ mod tests {
         let sleeper = MockSleeper::new();
         let shutdown = NeverShutdown::new();
         let args = CollectArgs {
-            dst_port: 8899,
+            dst_port: vec![8899],
+            dst_ports: None,
             duration_sec: Some(10),
             iface: None,
             out_dir: PathBuf::from("/tmp/snapshots"),
             max_files: 100,
             max_age: 86400,
             map_size: 100000,
+            verbose: 0,
+            report_interval_sec: 60,
         };
 
         let result =
@@ -197,6 +196,7 @@ mod tests {
             Counters {
                 syn: 100,
                 ack: 50,
+                handshake_ack: 50,
                 rst: 5,
                 packets: 200,
                 bytes: 30000,
@@ -207,6 +207,7 @@ mod tests {
             Counters {
                 syn: 50,
                 ack: 25,
+                handshake_ack: 25,
                 rst: 2,
                 packets: 100,
                 bytes: 15000,
@@ -218,13 +219,16 @@ mod tests {
         let sleeper = MockSleeper::new();
         let shutdown = NeverShutdown::new();
         let args = CollectArgs {
-            dst_port: 8899,
+            dst_port: vec![8899],
+            dst_ports: None,
             duration_sec: Some(10),
             iface: None,
             out_dir: PathBuf::from("/tmp/snapshots"),
             max_files: 100,
             max_age: 86400,
             map_size: 100000,
+            verbose: 0,
+            report_interval_sec: 60,
         };
 
         let result =
@@ -236,25 +240,33 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_collect_single_cycle_no_duration() {
+    fn test_execute_collect_no_duration_runs_until_shutdown() {
+        use crate::signal::CountingShutdown;
+
         let map_reader = MockMapReader::new();
-        let clock = MockClock::new(1000);
+        let clock = AdvancingClock::new(1000, 1);
         let fs = MockFilesystem::new();
         let sleeper = MockSleeper::new();
-        let shutdown = NeverShutdown::new();
+        // Allow exactly 1 cycle before shutdown
+        let shutdown = CountingShutdown::new(1);
         let args = CollectArgs {
-            dst_port: 8899,
-            duration_sec: None, // No duration, single cycle
+            dst_port: vec![8899],
+            dst_ports: None,
+            duration_sec: None, // No duration = continuous until shutdown
             iface: None,
             out_dir: PathBuf::from("/tmp/snapshots"),
             max_files: 100,
             max_age: 86400,
             map_size: 100000,
+            verbose: 0,
+            report_interval_sec: 60,
         };
 
         let result =
             execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown).expect("execute");
 
+        // With CountingShutdown(1), first check returns false, we run 1 cycle,
+        // then second check returns true and we exit
         assert_eq!(result.cycles, 1);
     }
 
@@ -267,13 +279,16 @@ mod tests {
         let sleeper = MockSleeper::new();
         let shutdown = NeverShutdown::new();
         let args = CollectArgs {
-            dst_port: 0, // Invalid
+            dst_port: vec![], // No ports specified - Invalid
+            dst_ports: None,
             duration_sec: Some(10),
             iface: None,
             out_dir: PathBuf::from("/tmp/snapshots"),
             max_files: 100,
             max_age: 86400,
             map_size: 100000,
+            verbose: 0,
+            report_interval_sec: 60,
         };
 
         let result = execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown);
@@ -290,13 +305,16 @@ mod tests {
         let sleeper = MockSleeper::new();
         let shutdown = NeverShutdown::new();
         let args = CollectArgs {
-            dst_port: 8899,
+            dst_port: vec![8899],
+            dst_ports: None,
             duration_sec: Some(10),
             iface: None,
             out_dir: PathBuf::from("/tmp/snapshots"),
             max_files: 0, // Invalid
             max_age: 86400,
             map_size: 100000,
+            verbose: 0,
+            report_interval_sec: 60,
         };
 
         let result = execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown);
@@ -319,13 +337,16 @@ mod tests {
         fs.add_file(out_dir.join("snapshot_3000.jsonl"), vec![]);
 
         let args = CollectArgs {
-            dst_port: 8899,
+            dst_port: vec![8899],
+            dst_ports: None,
             duration_sec: Some(10),
             iface: None,
             out_dir,
             max_files: 2, // Only keep 2 files
             max_age: 86400,
             map_size: 100000,
+            verbose: 0,
+            report_interval_sec: 60,
         };
 
         let result =
@@ -359,13 +380,16 @@ mod tests {
         let out_dir = PathBuf::from("/tmp/snapshots");
 
         let args = CollectArgs {
-            dst_port: 8899,
+            dst_port: vec![8899],
+            dst_ports: None,
             duration_sec: Some(10),
             iface: None,
             out_dir: out_dir.clone(),
             max_files: 100,
             max_age: 86400,
             map_size: 100000,
+            verbose: 0,
+            report_interval_sec: 60,
         };
 
         execute_collect(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown).expect("execute");
@@ -375,5 +399,40 @@ mod tests {
         assert_eq!(files.len(), 1);
         // Timestamp is from the second clock call (1005) since first is for start_ts
         assert_eq!(files[0].timestamp, 1005);
+    }
+
+    // ===========================================
+    // Test Category I — Continuous Collection Mode
+    // ===========================================
+
+    #[test]
+    fn test_execute_collect_continuous_until_shutdown() {
+        use crate::signal::CountingShutdown;
+
+        let map_reader = MockMapReader::new();
+        let clock = AdvancingClock::new(1000, 1);
+        let fs = MockFilesystem::new();
+        let sleeper = MockSleeper::new();
+        // Signal shutdown after 5 cycles
+        let shutdown = CountingShutdown::new(5);
+
+        let args = CollectArgs {
+            dst_port: vec![8899],
+            dst_ports: None,
+            duration_sec: None, // Continuous mode
+            iface: None,
+            out_dir: PathBuf::from("/tmp/snapshots"),
+            max_files: 100,
+            max_age: 86400,
+            map_size: 100000,
+            verbose: 0,
+            report_interval_sec: 60,
+        };
+
+        let result =
+            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown).expect("execute");
+
+        // Should have run 5 cycles before shutdown
+        assert_eq!(result.cycles, 5);
     }
 }

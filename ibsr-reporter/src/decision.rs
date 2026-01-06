@@ -95,7 +95,7 @@ mod tests {
     // ===========================================
 
     fn make_config() -> ReporterConfig {
-        ReporterConfig::new(8080)
+        ReporterConfig::new(vec![8080])
             .with_syn_rate_threshold(100.0)
             .with_success_ratio_threshold(0.1)
             .with_block_duration_sec(300)
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn test_block_duration_different_config() {
-        let config = ReporterConfig::new(8080)
+        let config = ReporterConfig::new(vec![8080])
             .with_syn_rate_threshold(100.0)
             .with_success_ratio_threshold(0.1)
             .with_block_duration_sec(600);
@@ -266,7 +266,7 @@ mod tests {
         let mut allowlist = Allowlist::empty();
         allowlist.add_ip(0x0A000001);
 
-        let config = ReporterConfig::new(8080)
+        let config = ReporterConfig::new(vec![8080])
             .with_syn_rate_threshold(100.0)
             .with_success_ratio_threshold(0.1)
             .with_allowlist(allowlist);
@@ -286,7 +286,7 @@ mod tests {
         let mut allowlist = Allowlist::empty();
         allowlist.add_ip(0x0A000001);
 
-        let config = ReporterConfig::new(8080)
+        let config = ReporterConfig::new(vec![8080])
             .with_syn_rate_threshold(100.0)
             .with_success_ratio_threshold(0.1)
             .with_allowlist(allowlist);
@@ -310,7 +310,7 @@ mod tests {
         let mut allowlist = Allowlist::empty();
         allowlist.add_cidr(0x0A000000, 24); // 10.0.0.0/24
 
-        let config = ReporterConfig::new(8080)
+        let config = ReporterConfig::new(vec![8080])
             .with_syn_rate_threshold(100.0)
             .with_success_ratio_threshold(0.1)
             .with_allowlist(allowlist);
@@ -330,7 +330,7 @@ mod tests {
         let mut allowlist = Allowlist::empty();
         allowlist.add_cidr(0x0A000000, 24); // 10.0.0.0/24
 
-        let config = ReporterConfig::new(8080)
+        let config = ReporterConfig::new(vec![8080])
             .with_syn_rate_threshold(100.0)
             .with_success_ratio_threshold(0.1)
             .with_allowlist(allowlist);
@@ -354,7 +354,7 @@ mod tests {
         let mut allowlist = Allowlist::empty();
         allowlist.add_ip(0x0A000001);
 
-        let config = ReporterConfig::new(8080)
+        let config = ReporterConfig::new(vec![8080])
             .with_syn_rate_threshold(100.0)
             .with_success_ratio_threshold(0.1)
             .with_allowlist(allowlist);

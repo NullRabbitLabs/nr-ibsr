@@ -27,7 +27,7 @@ pub const DEFAULT_TOP_OFFENDERS_COUNT: usize = 10;
 /// Reporter configuration.
 #[derive(Debug, Clone)]
 pub struct ReporterConfig {
-    pub dst_port: u16,
+    pub dst_ports: Vec<u16>,
     pub window_sec: u64,
     pub syn_rate_threshold: f64,
     pub success_ratio_threshold: f64,
@@ -39,10 +39,10 @@ pub struct ReporterConfig {
 }
 
 impl ReporterConfig {
-    /// Create a new config with defaults and required dst_port.
-    pub fn new(dst_port: u16) -> Self {
+    /// Create a new config with defaults and required dst_ports.
+    pub fn new(dst_ports: Vec<u16>) -> Self {
         Self {
-            dst_port,
+            dst_ports,
             window_sec: DEFAULT_WINDOW_SEC,
             syn_rate_threshold: DEFAULT_SYN_RATE_THRESHOLD,
             success_ratio_threshold: DEFAULT_SUCCESS_RATIO_THRESHOLD,
@@ -221,8 +221,8 @@ mod tests {
 
     #[test]
     fn test_config_new_defaults() {
-        let config = ReporterConfig::new(8080);
-        assert_eq!(config.dst_port, 8080);
+        let config = ReporterConfig::new(vec![8080]);
+        assert_eq!(config.dst_ports, vec![8080]);
         assert_eq!(config.window_sec, DEFAULT_WINDOW_SEC);
         assert_eq!(config.syn_rate_threshold, DEFAULT_SYN_RATE_THRESHOLD);
         assert_eq!(config.success_ratio_threshold, DEFAULT_SUCCESS_RATIO_THRESHOLD);
@@ -232,31 +232,31 @@ mod tests {
 
     #[test]
     fn test_config_builder_window_sec() {
-        let config = ReporterConfig::new(8080).with_window_sec(60);
+        let config = ReporterConfig::new(vec![8080]).with_window_sec(60);
         assert_eq!(config.window_sec, 60);
     }
 
     #[test]
     fn test_config_builder_syn_rate() {
-        let config = ReporterConfig::new(8080).with_syn_rate_threshold(50.0);
+        let config = ReporterConfig::new(vec![8080]).with_syn_rate_threshold(50.0);
         assert_eq!(config.syn_rate_threshold, 50.0);
     }
 
     #[test]
     fn test_config_builder_success_ratio() {
-        let config = ReporterConfig::new(8080).with_success_ratio_threshold(0.2);
+        let config = ReporterConfig::new(vec![8080]).with_success_ratio_threshold(0.2);
         assert_eq!(config.success_ratio_threshold, 0.2);
     }
 
     #[test]
     fn test_config_builder_chain() {
-        let config = ReporterConfig::new(443)
+        let config = ReporterConfig::new(vec![443])
             .with_window_sec(30)
             .with_syn_rate_threshold(200.0)
             .with_success_ratio_threshold(0.05)
             .with_block_duration_sec(600);
 
-        assert_eq!(config.dst_port, 443);
+        assert_eq!(config.dst_ports, vec![443]);
         assert_eq!(config.window_sec, 30);
         assert_eq!(config.syn_rate_threshold, 200.0);
         assert_eq!(config.success_ratio_threshold, 0.05);

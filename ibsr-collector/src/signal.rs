@@ -109,6 +109,38 @@ impl ShutdownCheck for AlwaysShutdown {
     }
 }
 
+/// Mock shutdown checker that signals shutdown after N calls.
+///
+/// Useful for testing continuous collection mode where we want to
+/// run a specific number of cycles before stopping.
+#[derive(Debug)]
+pub struct CountingShutdown {
+    count: std::sync::atomic::AtomicUsize,
+    max_calls: usize,
+}
+
+impl CountingShutdown {
+    /// Create a new counting shutdown that signals stop after `max_calls` checks.
+    pub fn new(max_calls: usize) -> Self {
+        Self {
+            count: std::sync::atomic::AtomicUsize::new(0),
+            max_calls,
+        }
+    }
+
+    /// Get the current call count.
+    pub fn call_count(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
+}
+
+impl ShutdownCheck for CountingShutdown {
+    fn should_stop(&self) -> bool {
+        let current = self.count.fetch_add(1, Ordering::SeqCst);
+        current >= self.max_calls
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +242,37 @@ mod tests {
         // Should not panic even if ctrlc handler fails
         let flag = ShutdownFlag::new();
         assert!(!flag.should_stop());
+    }
+
+    #[test]
+    fn test_counting_shutdown_stops_after_max() {
+        let checker = CountingShutdown::new(3);
+        assert!(!checker.should_stop()); // Call 1
+        assert!(!checker.should_stop()); // Call 2
+        assert!(!checker.should_stop()); // Call 3
+        assert!(checker.should_stop());  // Call 4 - should stop now
+    }
+
+    #[test]
+    fn test_counting_shutdown_call_count() {
+        let checker = CountingShutdown::new(5);
+        assert_eq!(checker.call_count(), 0);
+        checker.should_stop();
+        assert_eq!(checker.call_count(), 1);
+        checker.should_stop();
+        assert_eq!(checker.call_count(), 2);
+    }
+
+    #[test]
+    fn test_counting_shutdown_zero_max() {
+        let checker = CountingShutdown::new(0);
+        assert!(checker.should_stop()); // Immediately signals stop
+    }
+
+    #[test]
+    fn test_counting_shutdown_debug() {
+        let checker = CountingShutdown::new(5);
+        let debug = format!("{:?}", checker);
+        assert!(debug.contains("CountingShutdown"));
     }
 }

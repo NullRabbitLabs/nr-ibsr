@@ -206,7 +206,6 @@ fn read_file(path: &Path) -> Result<String, LoadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ibsr_schema::{BucketEntry, KeyType};
     use std::fs;
     use tempfile::TempDir;
 
@@ -271,7 +270,7 @@ mod tests {
         let fixture_dir = temp.path();
         fs::create_dir_all(fixture_dir.join("snapshots")).unwrap();
 
-        let snapshot = Snapshot::new(1000, 8080, vec![]);
+        let snapshot = Snapshot::new(1000, &[8080], vec![]);
         fs::write(
             fixture_dir.join("snapshots/1000.jsonl"),
             snapshot.to_json(),
@@ -291,7 +290,7 @@ mod tests {
 
         // Write in reverse order
         for ts in [1002, 1001, 1000] {
-            let snapshot = Snapshot::new(ts, 8080, vec![]);
+            let snapshot = Snapshot::new(ts, &[8080], vec![]);
             fs::write(
                 fixture_dir.join(format!("snapshots/{}.jsonl", ts)),
                 snapshot.to_json(),
@@ -330,7 +329,7 @@ mod tests {
         fs::create_dir_all(fixture_dir.join("snapshots")).unwrap();
 
         // Write a valid snapshot
-        let snapshot = Snapshot::new(1000, 8080, vec![]);
+        let snapshot = Snapshot::new(1000, &[8080], vec![]);
         fs::write(
             fixture_dir.join("snapshots/1000.jsonl"),
             snapshot.to_json(),
@@ -425,7 +424,7 @@ mod tests {
         match result {
             Ok(fixture) => {
                 assert_eq!(fixture.meta.name, "syn_churn_attacker");
-                assert_eq!(fixture.config.dst_port, 8080);
+                assert_eq!(fixture.config.dst_ports, vec![8080]);
                 assert!(!fixture.snapshots.is_empty());
             }
             Err(LoadError::NotFound(_)) => {

@@ -53,6 +53,8 @@ fi
 
 echo "Deploying IBSR ($ARCH) to $TARGET..."
 
-scp "$BINARY" "$TARGET:/usr/local/bin/ibsr"
+# Copy to temp location, then use sudo to install
+scp "$BINARY" "$TARGET:/tmp/ibsr"
+ssh -t "$TARGET" "sudo mv /tmp/ibsr /usr/local/bin/ibsr && sudo chmod +x /usr/local/bin/ibsr"
 
 echo "Done. Binary installed at /usr/local/bin/ibsr"

@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(docker compose run:*)"
+      "Bash(docker compose run:*)",
+      "Bash(docker compose build:*)",
+      "Bash(echo:*)",
+      "Bash(./build.sh:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo run:*)",
+      "Bash(wc:*)"
     ]
   }
 }

@@ -39,8 +39,8 @@ pub struct CollectResult {
 /// Collector configuration.
 #[derive(Debug, Clone)]
 pub struct CollectorConfig {
-    /// Destination port being monitored.
-    pub dst_port: u16,
+    /// Destination ports being monitored (1-8 ports).
+    pub dst_ports: Vec<u16>,
 
     /// Rotation settings.
     pub rotation: RotationConfig,
@@ -71,7 +71,7 @@ where
     let counters = map_reader.read_counters()?;
 
     // Convert to snapshot
-    let snapshot = counters_to_snapshot(&counters, clock, config.dst_port);
+    let snapshot = counters_to_snapshot(&counters, clock, &config.dst_ports);
     let timestamp = snapshot.ts_unix_sec;
     let bucket_count = snapshot.buckets.len();
 
@@ -109,7 +109,7 @@ mod tests {
         let output_dir = PathBuf::from("/tmp/snapshots");
         let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
         let config = CollectorConfig {
-            dst_port: 8899,
+            dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 86400),
         };
 
@@ -134,6 +134,7 @@ mod tests {
             Counters {
                 syn: 100,
                 ack: 200,
+                handshake_ack: 95,
                 rst: 5,
                 packets: 305,
                 bytes: 45000,
@@ -144,6 +145,7 @@ mod tests {
             Counters {
                 syn: 50,
                 ack: 100,
+                handshake_ack: 48,
                 rst: 2,
                 packets: 152,
                 bytes: 20000,
@@ -155,7 +157,7 @@ mod tests {
         let output_dir = PathBuf::from("/tmp/snapshots");
         let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
         let config = CollectorConfig {
-            dst_port: 8899,
+            dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 86400),
         };
 
@@ -180,7 +182,7 @@ mod tests {
 
         let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
         let config = CollectorConfig {
-            dst_port: 8899,
+            dst_ports: vec![8899],
             rotation: RotationConfig::new(2, 86400), // Max 2 files
         };
 
@@ -208,7 +210,7 @@ mod tests {
 
         let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
         let config = CollectorConfig {
-            dst_port: 8899,
+            dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 5000), // Max age 5000 sec
         };
 
@@ -229,7 +231,7 @@ mod tests {
         let fs = Arc::new(MockFilesystem::new());
         let output_dir = PathBuf::from("/tmp/snapshots");
         let config = CollectorConfig {
-            dst_port: 8899,
+            dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 86400),
         };
 
@@ -237,7 +239,7 @@ mod tests {
         let clock1 = MockClock::new(1000);
         let writer1 = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
         map_reader.add_counter(0x0A000001, Counters {
-            syn: 10, ack: 20, rst: 0, packets: 30, bytes: 1000,
+            syn: 10, ack: 20, handshake_ack: 10, rst: 0, packets: 30, bytes: 1000,
         });
         collect_once(&map_reader, &clock1, &writer1, &*fs, &output_dir, &config).expect("cycle 1");
 
@@ -245,7 +247,7 @@ mod tests {
         let clock2 = MockClock::new(2000);
         let writer2 = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
         map_reader.add_counter(0x0A000002, Counters {
-            syn: 5, ack: 10, rst: 1, packets: 16, bytes: 500,
+            syn: 5, ack: 10, handshake_ack: 5, rst: 1, packets: 16, bytes: 500,
         });
         collect_once(&map_reader, &clock2, &writer2, &*fs, &output_dir, &config).expect("cycle 2");
 
@@ -263,26 +265,26 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_preserves_dst_port() {
+    fn test_collect_preserves_dst_ports() {
         let map_reader = MockMapReader::new();
         let clock = MockClock::new(1000);
         let fs = Arc::new(MockFilesystem::new());
         let output_dir = PathBuf::from("/tmp/snapshots");
         let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
         let config = CollectorConfig {
-            dst_port: 9000, // Different port
+            dst_ports: vec![9000, 8080], // Multiple ports
             rotation: RotationConfig::new(100, 86400),
         };
 
         collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config).expect("collect");
 
-        // Read the snapshot and verify dst_port
+        // Read the snapshot and verify dst_ports (sorted)
         let path = output_dir.join("snapshot_1000.jsonl");
         let content = fs.get_file(&path).expect("file exists");
         let json = String::from_utf8(content).expect("valid utf8");
 
         let snapshot = ibsr_schema::Snapshot::from_json(&json).expect("parse");
-        assert_eq!(snapshot.dst_port, 9000);
+        assert_eq!(snapshot.dst_ports, vec![8080, 9000]); // Sorted
     }
 
     #[test]
@@ -301,11 +303,11 @@ mod tests {
     #[test]
     fn test_collector_config_clone() {
         let config = CollectorConfig {
-            dst_port: 8899,
+            dst_ports: vec![8899, 8080],
             rotation: RotationConfig::new(100, 3600),
         };
         let cloned = config.clone();
-        assert_eq!(cloned.dst_port, 8899);
+        assert_eq!(cloned.dst_ports, vec![8899, 8080]);
     }
 
     #[test]
@@ -323,11 +325,12 @@ mod tests {
     #[test]
     fn test_collector_config_debug() {
         let config = CollectorConfig {
-            dst_port: 8899,
+            dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 3600),
         };
         let debug = format!("{:?}", config);
-        assert!(debug.contains("dst_port: 8899"));
+        assert!(debug.contains("dst_ports"));
+        assert!(debug.contains("8899"));
         assert!(debug.contains("rotation"));
     }
 
@@ -339,7 +342,7 @@ mod tests {
         let output_dir = PathBuf::from("/tmp/snapshots");
         let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
         let config = CollectorConfig {
-            dst_port: 8899,
+            dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 86400),
         };
 
@@ -356,7 +359,7 @@ mod tests {
         let output_dir = PathBuf::from("/tmp/snapshots");
         let writer = FailingSnapshotWriter;
         let config = CollectorConfig {
-            dst_port: 8899,
+            dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 86400),
         };
 
@@ -373,7 +376,7 @@ mod tests {
         let output_dir = PathBuf::from("/tmp/snapshots");
         let writer = NoOpSnapshotWriter;
         let config = CollectorConfig {
-            dst_port: 8899,
+            dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 86400),
         };
 

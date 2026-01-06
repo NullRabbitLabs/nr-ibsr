@@ -9,13 +9,15 @@ pub mod collector;
 pub mod commands;
 pub mod exit;
 pub mod io;
+pub mod logger;
 pub mod signal;
 pub mod sleeper;
 
 pub use cli::{
     default_interface, parse_from, parse_route_table, resolve_interface, Cli, CliError,
     CollectArgs, Command, ReportArgs, RunArgs, DEFAULT_MAP_SIZE, DEFAULT_MAX_AGE_SECS,
-    DEFAULT_MAX_FILES, DEFAULT_OUTPUT_DIR, DEFAULT_WINDOW_SEC,
+    DEFAULT_MAX_FILES, DEFAULT_OUTPUT_DIR, DEFAULT_REPORT_INTERVAL_SEC, DEFAULT_WINDOW_SEC,
+    MAX_DST_PORTS,
 };
 
 pub use collector::{collect_once, CollectorConfig, CollectorError};
@@ -29,5 +31,6 @@ pub use io::{
     OutputWriter, OutputWriterError,
 };
 
-pub use signal::{AlwaysShutdown, NeverShutdown, ShutdownCheck, ShutdownFlag};
+pub use logger::{Logger, LogEntry, MockLogger, NullLogger, StderrLogger, Verbosity};
+pub use signal::{AlwaysShutdown, CountingShutdown, NeverShutdown, ShutdownCheck, ShutdownFlag};
 pub use sleeper::{MockSleeper, RealSleeper, Sleeper};
