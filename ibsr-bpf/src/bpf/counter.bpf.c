@@ -20,20 +20,21 @@
 #include <bpf/bpf_endian.h>
 
 // Counter structure - must match Rust Counters struct exactly
-// Layout: syn(4) + ack(4) + rst(4) + packets(4) + bytes(8) = 24 bytes
+// Layout: syn(4) + ack(4) + handshake_ack(4) + rst(4) + packets(4) + bytes(8) = 28 bytes
 struct counters {
     __u32 syn;
     __u32 ack;
+    __u32 handshake_ack;  // ACKs with no SYN, no RST, and zero payload (handshake completion)
     __u32 rst;
     __u32 packets;
     __u64 bytes;
 };
 
-// Configuration map - holds the destination port to monitor
-// Index 0 = dst_port (network byte order)
+// Configuration map - holds destination ports to monitor (up to 8)
+// Index 0-7 = dst_ports (network byte order, 0 = unused slot)
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
+    __uint(max_entries, 8);
     __type(key, __u32);
     __type(value, __u16);
 } config_map SEC(".maps");
@@ -82,21 +83,35 @@ int xdp_counter(struct xdp_md *ctx)
     if ((void *)(tcp + 1) > data_end)
         return XDP_PASS;
 
-    // Get configured destination port
-    __u32 cfg_key = 0;
-    __u16 *dst_port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
-    if (!dst_port_cfg)
-        return XDP_PASS;
-
-    // Check if packet matches our destination port
-    if (tcp->dest != *dst_port_cfg)
+    // Check if packet matches any configured destination port
+    int port_matched = 0;
+    #pragma unroll
+    for (__u32 i = 0; i < 8; i++) {
+        __u16 *port_cfg = bpf_map_lookup_elem(&config_map, &i);
+        if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) {
+            port_matched = 1;
+            break;
+        }
+    }
+    if (!port_matched)
         return XDP_PASS;
 
     // Extract source IP (convert to host byte order for consistent key)
     __u32 src_ip = bpf_ntohl(ip->saddr);
 
-    // Calculate packet size
+    // Calculate packet size (total Ethernet frame)
     __u64 pkt_len = data_end - data;
+
+    // Calculate TCP header length and payload length for handshake ACK detection
+    __u32 tcp_hdr_len = tcp->doff * 4;
+    __u32 ip_total_len = bpf_ntohs(ip->tot_len);
+    // Bounds check to prevent underflow
+    __u32 tcp_payload_len = 0;
+    if (ip_total_len > ip_hdr_len + tcp_hdr_len)
+        tcp_payload_len = ip_total_len - ip_hdr_len - tcp_hdr_len;
+
+    // Handshake ACK: ACK set, SYN not set, RST not set, no payload
+    int is_handshake_ack = tcp->ack && !tcp->syn && !tcp->rst && (tcp_payload_len == 0);
 
     // Look up or initialize counters for this source IP
     struct counters *ctr = bpf_map_lookup_elem(&counter_map, &src_ip);
@@ -110,6 +125,8 @@ int xdp_counter(struct xdp_md *ctx)
             __sync_fetch_and_add(&ctr->syn, 1);
         if (tcp->ack)
             __sync_fetch_and_add(&ctr->ack, 1);
+        if (is_handshake_ack)
+            __sync_fetch_and_add(&ctr->handshake_ack, 1);
         if (tcp->rst)
             __sync_fetch_and_add(&ctr->rst, 1);
     } else {
@@ -117,6 +134,7 @@ int xdp_counter(struct xdp_md *ctx)
         struct counters new_ctr = {
             .syn = tcp->syn ? 1 : 0,
             .ack = tcp->ack ? 1 : 0,
+            .handshake_ack = is_handshake_ack ? 1 : 0,
             .rst = tcp->rst ? 1 : 0,
             .packets = 1,
             .bytes = pkt_len,

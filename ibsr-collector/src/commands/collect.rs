@@ -2,8 +2,9 @@
 //!
 //! Runs the XDP collector to gather traffic metrics.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use chrono::{TimeZone, Utc};
 use ibsr_bpf::MapReader;
 use ibsr_clock::Clock;
 use ibsr_fs::{Filesystem, RotationConfig, SnapshotWriter, StandardSnapshotWriter};
@@ -11,10 +12,20 @@ use ibsr_fs::{Filesystem, RotationConfig, SnapshotWriter, StandardSnapshotWriter
 use crate::cli::CollectArgs;
 use crate::collector::{collect_once, CollectorConfig};
 use crate::io::{StatusLine, StatusWriter};
+use crate::logger::Logger;
 use crate::signal::ShutdownCheck;
 use crate::sleeper::Sleeper;
 
 use super::{CommandError, CommandResult};
+
+/// Format run directory name from Unix timestamp.
+/// Format: ibsr-YYYYMMDD-HHMMSSZ
+fn format_run_dir_name(ts_unix: u64) -> String {
+    Utc.timestamp_opt(ts_unix as i64, 0)
+        .single()
+        .map(|dt| dt.format("ibsr-%Y%m%d-%H%M%SZ").to_string())
+        .unwrap_or_else(|| format!("ibsr-{}", ts_unix))
+}
 
 /// Result of collect command execution.
 #[derive(Debug)]
@@ -34,13 +45,14 @@ pub struct CollectResult {
 /// This is the main entry point for the collect subcommand.
 /// For actual BPF operation, the map_reader should be a real BPF map reader.
 /// For testing, it can be a mock.
-pub fn execute_collect<M, C, F, S, H>(
+pub fn execute_collect<M, C, F, S, H, L>(
     args: &CollectArgs,
     map_reader: &M,
     clock: &C,
     fs: &F,
     sleeper: &S,
     shutdown: &H,
+    logger: &L,
 ) -> CommandResult<CollectResult>
 where
     M: MapReader,
@@ -48,9 +60,26 @@ where
     F: Filesystem + Clone,
     S: Sleeper,
     H: ShutdownCheck,
+    L: Logger,
 {
     // Validate arguments
     args.validate()?;
+
+    // Create timestamped run directory inside out_dir
+    let run_ts = clock.now_unix_sec();
+    let run_dir_name = format_run_dir_name(run_ts);
+    let run_dir = args.out_dir.join(&run_dir_name);
+    fs.create_dir_all(&run_dir)
+        .map_err(|e| CommandError::IoError(e.to_string()))?;
+
+    // Log startup configuration at verbose level
+    let ports = args.get_all_ports();
+    logger.verbose(&format!(
+        "Starting collector: ports={:?}, out_dir={}, report_interval={}s",
+        ports,
+        run_dir.display(),
+        args.report_interval_sec
+    ));
 
     // Build collector config
     let config = CollectorConfig {
@@ -58,11 +87,11 @@ where
         rotation: RotationConfig::new(args.max_files, args.max_age),
     };
 
-    // Create snapshot writer
-    let writer = StandardSnapshotWriter::new(fs.clone(), args.out_dir.clone());
+    // Create snapshot writer pointing to run directory
+    let writer = StandardSnapshotWriter::new(fs.clone(), run_dir.clone());
 
-    // Create status writer for heartbeat output
-    let status_path = args.out_dir.join("status.jsonl");
+    // Create status writer for heartbeat output in run directory
+    let status_path = run_dir.join("status.jsonl");
     let status_writer = StatusWriter::new(fs.clone(), status_path);
 
     // Run collection cycles
@@ -72,11 +101,13 @@ where
         &writer,
         &status_writer,
         fs,
-        &args.out_dir,
+        &run_dir,
         &config,
         args.duration_sec,
+        args.report_interval_sec,
         sleeper,
         shutdown,
+        logger,
     )?;
 
     Ok(result)
@@ -86,7 +117,7 @@ where
 ///
 /// If duration_sec is Some, runs for that duration.
 /// If duration_sec is None, runs a single cycle (for testing) or until interrupted.
-fn run_collection_loop<M, C, F, W, S, H>(
+fn run_collection_loop<M, C, F, W, S, H, L>(
     map_reader: &M,
     clock: &C,
     writer: &W,
@@ -95,8 +126,10 @@ fn run_collection_loop<M, C, F, W, S, H>(
     output_dir: &Path,
     config: &CollectorConfig,
     duration_sec: Option<u64>,
+    report_interval_sec: u64,
     sleeper: &S,
     shutdown: &H,
+    logger: &L,
 ) -> CommandResult<CollectResult>
 where
     M: MapReader,
@@ -105,6 +138,7 @@ where
     W: SnapshotWriter,
     S: Sleeper,
     H: ShutdownCheck,
+    L: Logger,
 {
     let mut cycles: u64 = 0;
     let mut total_ips: usize = 0;
@@ -113,6 +147,7 @@ where
 
     let start_ts = clock.now_unix_sec();
     let end_ts = duration_sec.map(|d| start_ts + d);
+    let mut last_report_ts = start_ts;
 
     loop {
         // Check if shutdown was requested
@@ -129,14 +164,24 @@ where
         files_rotated += result.rotated_count;
 
         // Write status line after each cycle
+        let current_ts = clock.now_unix_sec();
         let status = StatusLine::new(
-            clock.now_unix_sec(),
+            current_ts,
             cycles,
             result.bucket_count as u64,
             snapshots_written,
         );
         // Ignore status write errors - don't fail collection if status write fails
         let _ = status_writer.append(&status);
+
+        // Log periodic status to stdout based on report_interval_sec
+        if current_ts >= last_report_ts + report_interval_sec {
+            logger.info(&format!(
+                "cycle={} ips={} snapshots={} rotated={}",
+                cycles, result.bucket_count, snapshots_written, files_rotated
+            ));
+            last_report_ts = current_ts;
+        }
 
         // Check if duration has expired (after completing cycle)
         // If duration_sec is None, we run continuously until shutdown

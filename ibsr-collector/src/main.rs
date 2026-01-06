@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use ibsr_clock::SystemClock;
 use ibsr_collector::exit::{codes, exit_code};
+use ibsr_collector::logger::{StderrLogger, Verbosity};
 use ibsr_collector::{execute_collect, Cli, Command, CommandError, RealSleeper, ShutdownFlag};
 use ibsr_fs::RealFilesystem;
 
@@ -35,18 +36,22 @@ fn run_collect(
     shutdown: &ShutdownFlag,
 ) -> Result<(), CommandError> {
     let ports = args.get_all_ports();
-    // TODO: Multi-port BPF support - for now use first port
-    let map_reader = ibsr_bpf::BpfMapReader::new(
-        args.iface.as_deref().unwrap_or("eth0"),
-        ports[0],
-        args.map_size,
-    )?;
+    let interface = args.iface.as_deref().unwrap_or("eth0");
+    let logger = StderrLogger::new(Verbosity::from_count(args.verbose));
+
+    let map_reader = ibsr_bpf::BpfMapReader::new(interface, &ports, args.map_size)?;
+
+    // Log successful XDP attachment
+    logger.info(&format!(
+        "XDP program attached to interface '{}'",
+        map_reader.interface()
+    ));
 
     let clock = SystemClock;
     let fs = RealFilesystem;
     let sleeper = RealSleeper::new();
 
-    let result = execute_collect(&args, &map_reader, &clock, &fs, &sleeper, shutdown)?;
+    let result = execute_collect(&args, &map_reader, &clock, &fs, &sleeper, shutdown, &logger)?;
 
     println!(
         "Collected {} IPs in {} cycles, wrote {} snapshots",

@@ -38,7 +38,7 @@ impl BpfMapReader {
     ///
     /// # Arguments
     /// * `interface` - Network interface name (e.g., "eth0")
-    /// * `dst_port` - TCP destination port to monitor (network byte order will be handled)
+    /// * `dst_ports` - TCP destination ports to monitor (up to 8, network byte order will be handled)
     /// * `map_size` - Maximum entries in the LRU counter map
     ///
     /// # Errors
@@ -47,7 +47,7 @@ impl BpfMapReader {
     /// - Interface not found
     /// - Insufficient permissions
     /// - XDP attachment fails
-    pub fn new(interface: &str, dst_port: u16, _map_size: u32) -> Result<Self, BpfError> {
+    pub fn new(interface: &str, dst_ports: &[u16], _map_size: u32) -> Result<Self, BpfError> {
         // Get interface index
         let ifindex = nix::net::if_::if_nametoindex(interface)
             .map_err(|_| BpfError::InterfaceNotFound(interface.to_string()))?;
@@ -67,13 +67,16 @@ impl BpfMapReader {
             .load()
             .map_err(|e| BpfError::Load(e.to_string()))?;
 
-        // Configure dst_port in the config map (convert to network byte order)
-        let dst_port_ne = dst_port.to_be();
-        let key: u32 = 0;
-        skel.maps
-            .config_map
-            .update(&key.to_ne_bytes(), &dst_port_ne.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
-            .map_err(|e| BpfError::MapError(e.to_string()))?;
+        // Configure dst_ports in the config map (convert to network byte order)
+        // Up to 8 ports supported; unused slots remain 0
+        for (i, &port) in dst_ports.iter().take(8).enumerate() {
+            let port_ne = port.to_be();
+            let key: u32 = i as u32;
+            skel.maps
+                .config_map
+                .update(&key.to_ne_bytes(), &port_ne.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
+                .map_err(|e| BpfError::MapError(e.to_string()))?;
+        }
 
         // Attach XDP program to interface
         let link = skel
