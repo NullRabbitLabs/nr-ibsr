@@ -1,14 +1,13 @@
 //! Real BPF Map Reader implementation.
 //!
 //! This module provides `BpfMapReader` which loads and manages the XDP program
-//! and reads counters from the BPF map. Only available when the `bpf` feature is enabled.
-
-#![cfg(feature = "bpf")]
+//! and reads counters from the BPF map.
 
 use std::collections::HashMap;
+use std::mem::MaybeUninit;
 
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
-use libbpf_rs::MapCore;
+use libbpf_rs::{MapCore, OpenObject};
 
 use crate::map_reader::{BpfError, Counters, MapReader, MapReaderError};
 
@@ -23,13 +22,18 @@ use counter_skel::*;
 ///
 /// This struct owns the BPF skeleton and XDP link. When dropped, it automatically
 /// detaches the XDP program from the interface.
-pub struct BpfMapReader<'a> {
-    skel: CounterSkel<'a>,
+pub struct BpfMapReader {
+    skel: CounterSkel<'static>,
     _link: libbpf_rs::Link,
     interface: String,
 }
 
-impl<'a> BpfMapReader<'a> {
+// SAFETY: BpfMapReader is only used from a single thread in practice.
+// The skeleton and link are not shared across threads.
+unsafe impl Send for BpfMapReader {}
+unsafe impl Sync for BpfMapReader {}
+
+impl BpfMapReader {
     /// Create a new BpfMapReader and attach XDP program to the specified interface.
     ///
     /// # Arguments
@@ -49,12 +53,17 @@ impl<'a> BpfMapReader<'a> {
             .map_err(|_| BpfError::InterfaceNotFound(interface.to_string()))?;
 
         // Open and load the BPF skeleton
+        // Leak the OpenObject to give it 'static lifetime (required by skeleton API)
+        // This is intentional - the BpfMapReader lives for the duration of the program
+        let open_object: &'static mut MaybeUninit<OpenObject> =
+            Box::leak(Box::new(MaybeUninit::<OpenObject>::uninit()));
+
         let skel_builder = CounterSkelBuilder::default();
         let open_skel = skel_builder
-            .open()
+            .open(open_object)
             .map_err(|e| BpfError::Load(e.to_string()))?;
 
-        let mut skel = open_skel
+        let skel = open_skel
             .load()
             .map_err(|e| BpfError::Load(e.to_string()))?;
 
@@ -95,7 +104,7 @@ impl<'a> BpfMapReader<'a> {
     }
 }
 
-impl MapReader for BpfMapReader<'_> {
+impl MapReader for BpfMapReader {
     fn read_counters(&self) -> Result<HashMap<u32, Counters>, MapReaderError> {
         let mut result = HashMap::new();
 
@@ -103,13 +112,14 @@ impl MapReader for BpfMapReader<'_> {
         let map = &self.skel.maps.counter_map;
 
         for key in map.keys() {
+            let key_clone = key.clone();
             let key_bytes: [u8; 4] = key
                 .try_into()
                 .map_err(|_| MapReaderError::ReadError("invalid key size".to_string()))?;
             let src_ip = u32::from_ne_bytes(key_bytes);
 
             if let Some(value) = map
-                .lookup(&key, libbpf_rs::MapFlags::ANY)
+                .lookup(&key_clone, libbpf_rs::MapFlags::ANY)
                 .map_err(|e| MapReaderError::ReadError(e.to_string()))?
             {
                 if value.len() >= 24 {

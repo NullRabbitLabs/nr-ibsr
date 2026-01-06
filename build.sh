@@ -46,15 +46,19 @@ esac
 
 echo "Building IBSR for $ARCH ($PLATFORM)..."
 
+# Build the image with all source files
 docker build --platform "$PLATFORM" -t ibsr-build .
 
-docker run --rm --platform "$PLATFORM" \
-    -v "$PWD:/app" \
-    ibsr-build \
-    cargo build --release
+# Run cargo build inside container (no volume mount to avoid target dir conflicts)
+CONTAINER_ID=$(docker create --platform "$PLATFORM" ibsr-build cargo build --release)
+docker start -a "$CONTAINER_ID"
 
+# Extract the binary from the container
 mkdir -p dist
-cp ./target/release/ibsr "./dist/ibsr-$ARCH"
+docker cp "$CONTAINER_ID:/app/target/release/ibsr" "./dist/ibsr-$ARCH"
+
+# Clean up the container
+docker rm "$CONTAINER_ID" > /dev/null
 
 echo ""
 echo "Build complete: ./dist/ibsr-$ARCH"

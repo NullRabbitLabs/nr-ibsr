@@ -12,5 +12,9 @@ regex = "1.10"
 ibsr-schema = { path = "../ibsr-schema" }
 ibsr-clock = { path = "../ibsr-clock" }
 libbpf-rs.workspace = true
+nix = { version = "0.30", features = ["net"] }
+
+[build-dependencies]
+libbpf-cargo = "0.24"
 
 [dev-dependencies]

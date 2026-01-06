@@ -22,6 +22,8 @@ pub mod codes {
     pub const ALLOWLIST_ERROR: i32 = 6;
     /// No network interface found.
     pub const NO_INTERFACE: i32 = 7;
+    /// BPF error (load, attach, map operations).
+    pub const BPF_ERROR: i32 = 8;
     /// Interrupted by signal (128 + signal number).
     pub const SIGINT: i32 = 130;
 }
@@ -37,6 +39,7 @@ pub fn exit_code(error: &CommandError) -> i32 {
         CommandError::Output(_) => codes::IO_ERROR,
         CommandError::NoSnapshots(_) => codes::NO_SNAPSHOTS,
         CommandError::NoInterface => codes::NO_INTERFACE,
+        CommandError::Bpf(_) => codes::BPF_ERROR,
     }
 }
 

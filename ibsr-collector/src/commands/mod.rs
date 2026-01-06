@@ -16,6 +16,7 @@ pub use run::execute_run;
 use crate::cli::CliError;
 use crate::io::{AllowlistLoadError, OutputWriterError};
 use crate::CollectorError;
+use ibsr_bpf::BpfError;
 use ibsr_fs::FsError;
 use ibsr_reporter::ingest::IngestError;
 use thiserror::Error;
@@ -40,6 +41,9 @@ pub enum CommandError {
 
     #[error("output error: {0}")]
     Output(#[from] OutputWriterError),
+
+    #[error("BPF error: {0}")]
+    Bpf(#[from] BpfError),
 
     #[error("no snapshots found in {0}")]
     NoSnapshots(String),

@@ -27,3 +27,7 @@ coverage/
 
 # Docker
 .docker/
+
+# Deployment
+deploy.sh
+dist/

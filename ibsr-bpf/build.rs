@@ -1,13 +1,23 @@
 //! Build script for ibsr-bpf
 //!
-//! Compiles the XDP BPF program when the `bpf` feature is enabled.
-//! Without the feature, compilation is skipped (for unit tests).
+//! Compiles the XDP BPF program and generates the Rust skeleton.
+
+use std::env;
+use std::path::PathBuf;
+
+use libbpf_cargo::SkeletonBuilder;
+
+const BPF_SOURCE: &str = "src/bpf/counter.bpf.c";
 
 fn main() {
-    // Always rerun if the BPF source changes
-    println!("cargo:rerun-if-changed=src/bpf/counter.bpf.c");
+    println!("cargo:rerun-if-changed={}", BPF_SOURCE);
     println!("cargo:rerun-if-changed=build.rs");
 
-    // BPF compilation is only attempted when the bpf feature is enabled
-    // Without the feature, only safety analysis via include_str! is available
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let skel_path = out_dir.join("counter.skel.rs");
+
+    SkeletonBuilder::new()
+        .source(BPF_SOURCE)
+        .build_and_generate(&skel_path)
+        .expect("Failed to build and generate BPF skeleton");
 }
