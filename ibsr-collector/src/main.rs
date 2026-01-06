@@ -39,10 +39,16 @@ fn run_collect(
     args: ibsr_collector::CollectArgs,
     shutdown: &ShutdownFlag,
 ) -> Result<(), CommandError> {
-    // Note: When the `bpf` feature is enabled, this would use a real BPF map reader.
-    // For now, we use a mock that returns empty data for non-privileged testing.
-    // To use with real BPF, build with `--features bpf` in a privileged container.
+    #[cfg(feature = "bpf")]
+    let map_reader = ibsr_bpf::BpfMapReader::new(
+        args.iface.as_deref().unwrap_or("eth0"),
+        args.dst_port,
+        args.map_size,
+    )?;
+
+    #[cfg(not(feature = "bpf"))]
     let map_reader = ibsr_bpf::MockMapReader::new();
+
     let clock = SystemClock;
     let fs = RealFilesystem;
     let sleeper = RealSleeper::new();
@@ -82,8 +88,16 @@ fn run_run(
     args: ibsr_collector::RunArgs,
     shutdown: &ShutdownFlag,
 ) -> Result<(), CommandError> {
-    // Note: When the `bpf` feature is enabled, this would use a real BPF map reader.
+    #[cfg(feature = "bpf")]
+    let map_reader = ibsr_bpf::BpfMapReader::new(
+        args.iface.as_deref().unwrap_or("eth0"),
+        args.dst_port,
+        args.map_size,
+    )?;
+
+    #[cfg(not(feature = "bpf"))]
     let map_reader = ibsr_bpf::MockMapReader::new();
+
     let clock = SystemClock;
     let fs = RealFilesystem;
     let sleeper = RealSleeper::new();
