@@ -10,6 +10,8 @@ use ibsr_fs::{Filesystem, RotationConfig, SnapshotWriter, StandardSnapshotWriter
 
 use crate::cli::CollectArgs;
 use crate::collector::{collect_once, CollectorConfig};
+use crate::signal::ShutdownCheck;
+use crate::sleeper::Sleeper;
 
 use super::{CommandError, CommandResult};
 
@@ -31,16 +33,20 @@ pub struct CollectResult {
 /// This is the main entry point for the collect subcommand.
 /// For actual BPF operation, the map_reader should be a real BPF map reader.
 /// For testing, it can be a mock.
-pub fn execute_collect<M, C, F>(
+pub fn execute_collect<M, C, F, S, H>(
     args: &CollectArgs,
     map_reader: &M,
     clock: &C,
     fs: &F,
+    sleeper: &S,
+    shutdown: &H,
 ) -> CommandResult<CollectResult>
 where
     M: MapReader,
     C: Clock,
     F: Filesystem + Clone,
+    S: Sleeper,
+    H: ShutdownCheck,
 {
     // Validate arguments
     args.validate()?;
@@ -63,6 +69,8 @@ where
         &args.out_dir,
         &config,
         args.duration_sec,
+        sleeper,
+        shutdown,
     )?;
 
     Ok(result)
@@ -72,7 +80,7 @@ where
 ///
 /// If duration_sec is Some, runs for that duration.
 /// If duration_sec is None, runs a single cycle (for testing) or until interrupted.
-fn run_collection_loop<M, C, F, W>(
+fn run_collection_loop<M, C, F, W, S, H>(
     map_reader: &M,
     clock: &C,
     writer: &W,
@@ -80,29 +88,29 @@ fn run_collection_loop<M, C, F, W>(
     output_dir: &Path,
     config: &CollectorConfig,
     duration_sec: Option<u64>,
+    sleeper: &S,
+    shutdown: &H,
 ) -> CommandResult<CollectResult>
 where
     M: MapReader,
     C: Clock,
     F: Filesystem,
     W: SnapshotWriter,
+    S: Sleeper,
+    H: ShutdownCheck,
 {
     let mut cycles = 0;
     let mut total_ips = 0;
     let mut snapshots_written = 0;
     let mut files_rotated = 0;
 
-    // For testing/mock scenarios, run limited cycles
-    // In real operation, this would loop until duration expires or SIGINT
     let start_ts = clock.now_unix_sec();
     let end_ts = duration_sec.map(|d| start_ts + d);
 
     loop {
-        // Check if we should stop
-        if let Some(end) = end_ts {
-            if clock.now_unix_sec() >= end {
-                break;
-            }
+        // Check if shutdown was requested
+        if shutdown.should_stop() {
+            break;
         }
 
         // Run one collection cycle
@@ -113,17 +121,20 @@ where
         snapshots_written += 1;
         files_rotated += result.rotated_count;
 
-        // For bounded duration, we simulate by breaking after first cycle in tests
-        // Real implementation would sleep and loop
-        if duration_sec.is_some() {
-            // In a real implementation, we'd sleep here
-            // For testing with mock clock, we break after one cycle
-            // unless the mock clock advances automatically
-            break;
-        } else {
-            // No duration means single cycle (for testing)
+        // If no duration specified, run single cycle (for testing)
+        if duration_sec.is_none() {
             break;
         }
+
+        // Check if duration has expired (after completing cycle)
+        if let Some(end) = end_ts {
+            if clock.now_unix_sec() >= end {
+                break;
+            }
+        }
+
+        // Sleep for 1 second between cycles
+        sleeper.sleep_sec(1);
     }
 
     Ok(CollectResult {
@@ -137,8 +148,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signal::NeverShutdown;
+    use crate::sleeper::MockSleeper;
     use ibsr_bpf::{Counters, MockMapReader};
-    use ibsr_clock::MockClock;
+    use ibsr_clock::{AdvancingClock, MockClock};
     use ibsr_fs::MockFilesystem;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -150,8 +163,14 @@ mod tests {
     #[test]
     fn test_execute_collect_empty_map() {
         let map_reader = MockMapReader::new();
-        let clock = MockClock::new(1000);
+        // AdvancingClock: starts at 1000, increments by 5 each call
+        // - Call 1 (start_ts): 1000, end_ts = 1010
+        // - Call 2 (collect_once): 1005
+        // - Call 3 (end check): 1010 >= 1010, exit
+        let clock = AdvancingClock::new(1000, 5);
         let fs = MockFilesystem::new();
+        let sleeper = MockSleeper::new();
+        let shutdown = NeverShutdown::new();
         let args = CollectArgs {
             dst_port: 8899,
             duration_sec: Some(10),
@@ -162,7 +181,8 @@ mod tests {
             map_size: 100000,
         };
 
-        let result = execute_collect(&args, &map_reader, &clock, &fs).expect("execute");
+        let result =
+            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown).expect("execute");
 
         assert_eq!(result.cycles, 1);
         assert_eq!(result.total_ips, 0);
@@ -193,8 +213,10 @@ mod tests {
             },
         );
 
-        let clock = MockClock::new(1000);
+        let clock = AdvancingClock::new(1000, 5);
         let fs = MockFilesystem::new();
+        let sleeper = MockSleeper::new();
+        let shutdown = NeverShutdown::new();
         let args = CollectArgs {
             dst_port: 8899,
             duration_sec: Some(10),
@@ -205,7 +227,8 @@ mod tests {
             map_size: 100000,
         };
 
-        let result = execute_collect(&args, &map_reader, &clock, &fs).expect("execute");
+        let result =
+            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown).expect("execute");
 
         assert_eq!(result.cycles, 1);
         assert_eq!(result.total_ips, 2);
@@ -217,6 +240,8 @@ mod tests {
         let map_reader = MockMapReader::new();
         let clock = MockClock::new(1000);
         let fs = MockFilesystem::new();
+        let sleeper = MockSleeper::new();
+        let shutdown = NeverShutdown::new();
         let args = CollectArgs {
             dst_port: 8899,
             duration_sec: None, // No duration, single cycle
@@ -227,7 +252,8 @@ mod tests {
             map_size: 100000,
         };
 
-        let result = execute_collect(&args, &map_reader, &clock, &fs).expect("execute");
+        let result =
+            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown).expect("execute");
 
         assert_eq!(result.cycles, 1);
     }
@@ -235,8 +261,11 @@ mod tests {
     #[test]
     fn test_execute_collect_invalid_port() {
         let map_reader = MockMapReader::new();
+        // MockClock is fine here since we error before the loop runs
         let clock = MockClock::new(1000);
         let fs = MockFilesystem::new();
+        let sleeper = MockSleeper::new();
+        let shutdown = NeverShutdown::new();
         let args = CollectArgs {
             dst_port: 0, // Invalid
             duration_sec: Some(10),
@@ -247,7 +276,7 @@ mod tests {
             map_size: 100000,
         };
 
-        let result = execute_collect(&args, &map_reader, &clock, &fs);
+        let result = execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown);
         assert!(result.is_err());
         assert!(matches!(result, Err(CommandError::InvalidArgument(_))));
     }
@@ -255,8 +284,11 @@ mod tests {
     #[test]
     fn test_execute_collect_invalid_max_files() {
         let map_reader = MockMapReader::new();
+        // MockClock is fine here since we error before the loop runs
         let clock = MockClock::new(1000);
         let fs = MockFilesystem::new();
+        let sleeper = MockSleeper::new();
+        let shutdown = NeverShutdown::new();
         let args = CollectArgs {
             dst_port: 8899,
             duration_sec: Some(10),
@@ -267,7 +299,7 @@ mod tests {
             map_size: 100000,
         };
 
-        let result = execute_collect(&args, &map_reader, &clock, &fs);
+        let result = execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown);
         assert!(result.is_err());
         assert!(matches!(result, Err(CommandError::InvalidArgument(_))));
     }
@@ -275,8 +307,10 @@ mod tests {
     #[test]
     fn test_execute_collect_triggers_rotation() {
         let map_reader = MockMapReader::new();
-        let clock = MockClock::new(5000);
+        let clock = AdvancingClock::new(5000, 5);
         let fs = MockFilesystem::new();
+        let sleeper = MockSleeper::new();
+        let shutdown = NeverShutdown::new();
         let out_dir = PathBuf::from("/tmp/snapshots");
 
         // Pre-populate with old snapshots
@@ -294,7 +328,8 @@ mod tests {
             map_size: 100000,
         };
 
-        let result = execute_collect(&args, &map_reader, &clock, &fs).expect("execute");
+        let result =
+            execute_collect(&args, &map_reader, &clock, &fs, &sleeper, &shutdown).expect("execute");
 
         // Should have rotated some files
         assert!(result.files_rotated > 0);
@@ -316,8 +351,11 @@ mod tests {
     #[test]
     fn test_execute_collect_writes_snapshot() {
         let map_reader = MockMapReader::new();
-        let clock = MockClock::new(1000);
+        // AdvancingClock starts at 1000, so snapshot timestamp is 1005 (second call)
+        let clock = AdvancingClock::new(1000, 5);
         let fs = Arc::new(MockFilesystem::new());
+        let sleeper = MockSleeper::new();
+        let shutdown = NeverShutdown::new();
         let out_dir = PathBuf::from("/tmp/snapshots");
 
         let args = CollectArgs {
@@ -330,11 +368,12 @@ mod tests {
             map_size: 100000,
         };
 
-        execute_collect(&args, &map_reader, &clock, &*fs).expect("execute");
+        execute_collect(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown).expect("execute");
 
         // Verify snapshot was written
         let files = fs.list_snapshots(&out_dir).expect("list");
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].timestamp, 1000);
+        // Timestamp is from the second clock call (1005) since first is for start_ts
+        assert_eq!(files[0].timestamp, 1005);
     }
 }

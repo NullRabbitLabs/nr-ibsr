@@ -8,17 +8,21 @@ use clap::Parser;
 use ibsr_clock::SystemClock;
 use ibsr_collector::exit::{codes, exit_code};
 use ibsr_collector::{
-    execute_collect, execute_report, execute_run, Cli, Command, CommandError,
+    execute_collect, execute_report, execute_run, Cli, Command, CommandError, RealSleeper,
+    ShutdownFlag,
 };
 use ibsr_fs::RealFilesystem;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
+    // Set up shutdown handler for graceful termination on Ctrl+C
+    let shutdown = ShutdownFlag::new();
+
     let result = match cli.command {
-        Command::Collect(args) => run_collect(args),
+        Command::Collect(args) => run_collect(args, &shutdown),
         Command::Report(args) => run_report(args),
-        Command::Run(args) => run_run(args),
+        Command::Run(args) => run_run(args, &shutdown),
     };
 
     match result {
@@ -31,15 +35,19 @@ fn main() -> ExitCode {
 }
 
 /// Run the collect command.
-fn run_collect(args: ibsr_collector::CollectArgs) -> Result<(), CommandError> {
-    // Note: In a real implementation, this would use a real BPF map reader.
-    // For now, we use a stub that returns empty data.
-    // The actual BPF integration will be implemented in Phase 4.
+fn run_collect(
+    args: ibsr_collector::CollectArgs,
+    shutdown: &ShutdownFlag,
+) -> Result<(), CommandError> {
+    // Note: When the `bpf` feature is enabled, this would use a real BPF map reader.
+    // For now, we use a mock that returns empty data for non-privileged testing.
+    // To use with real BPF, build with `--features bpf` in a privileged container.
     let map_reader = ibsr_bpf::MockMapReader::new();
     let clock = SystemClock;
     let fs = RealFilesystem;
+    let sleeper = RealSleeper::new();
 
-    let result = execute_collect(&args, &map_reader, &clock, &fs)?;
+    let result = execute_collect(&args, &map_reader, &clock, &fs, &sleeper, shutdown)?;
 
     println!(
         "Collected {} IPs in {} cycles, wrote {} snapshots",
@@ -70,13 +78,17 @@ fn run_report(args: ibsr_collector::ReportArgs) -> Result<(), CommandError> {
 }
 
 /// Run the run command (collect + report).
-fn run_run(args: ibsr_collector::RunArgs) -> Result<(), CommandError> {
-    // Note: In a real implementation, this would use a real BPF map reader.
+fn run_run(
+    args: ibsr_collector::RunArgs,
+    shutdown: &ShutdownFlag,
+) -> Result<(), CommandError> {
+    // Note: When the `bpf` feature is enabled, this would use a real BPF map reader.
     let map_reader = ibsr_bpf::MockMapReader::new();
     let clock = SystemClock;
     let fs = RealFilesystem;
+    let sleeper = RealSleeper::new();
 
-    let result = execute_run(&args, &map_reader, &clock, &fs)?;
+    let result = execute_run(&args, &map_reader, &clock, &fs, &sleeper, shutdown)?;
 
     println!("Collection phase:");
     println!(

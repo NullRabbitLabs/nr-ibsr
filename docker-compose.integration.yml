@@ -1,0 +1,20 @@
+# Integration tests require privileged container for BPF operations.
+#
+# Usage:
+#   docker compose -f docker-compose.integration.yml run --rm integration-test
+#
+# These tests are marked with #[ignore] and require:
+# - CAP_BPF capability
+# - CAP_NET_ADMIN capability
+# - Privileged mode for XDP attachment
+services:
+  integration-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+      - BPF
+    command: cargo test --features bpf -- --ignored

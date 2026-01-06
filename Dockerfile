@@ -3,10 +3,14 @@
 
 FROM rust:1.87-bookworm
 
-# Install dependencies for coverage and BPF toolchain (for later stages)
+# Install dependencies for coverage and BPF toolchain
+# Note: kernel headers not needed for CO-RE BPF programs using BTF
 RUN apt-get update && apt-get install -y \
     llvm \
     clang \
+    libbpf-dev \
+    libelf-dev \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 # Install llvm-tools-preview for coverage (required by cargo-llvm-cov)

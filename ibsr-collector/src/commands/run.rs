@@ -7,6 +7,8 @@ use ibsr_clock::Clock;
 use ibsr_fs::Filesystem;
 
 use crate::cli::RunArgs;
+use crate::signal::ShutdownCheck;
+use crate::sleeper::Sleeper;
 
 use super::collect::{execute_collect, CollectResult};
 use super::report::{execute_report, ReportResult};
@@ -25,23 +27,27 @@ pub struct RunResult {
 ///
 /// This runs the collect phase for the specified duration,
 /// then runs the report phase to generate artifacts.
-pub fn execute_run<M, C, F>(
+pub fn execute_run<M, C, F, S, H>(
     args: &RunArgs,
     map_reader: &M,
     clock: &C,
     fs: &F,
+    sleeper: &S,
+    shutdown: &H,
 ) -> CommandResult<RunResult>
 where
     M: MapReader,
     C: Clock,
     F: Filesystem + Clone,
+    S: Sleeper,
+    H: ShutdownCheck,
 {
     // Validate arguments
     args.validate()?;
 
     // Convert to collect args and run collect phase
     let collect_args = args.to_collect_args();
-    let collect_result = execute_collect(&collect_args, map_reader, clock, fs)?;
+    let collect_result = execute_collect(&collect_args, map_reader, clock, fs, sleeper, shutdown)?;
 
     // Convert to report args and run report phase
     let report_args = args.to_report_args();
@@ -56,8 +62,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signal::NeverShutdown;
+    use crate::sleeper::MockSleeper;
     use ibsr_bpf::{Counters, MockMapReader};
-    use ibsr_clock::MockClock;
+    use ibsr_clock::{AdvancingClock, MockClock};
     use ibsr_fs::MockFilesystem;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -69,8 +77,11 @@ mod tests {
     #[test]
     fn test_execute_run_empty_collection() {
         let map_reader = MockMapReader::new();
-        let clock = MockClock::new(1000);
+        // AdvancingClock with increment 30 for 60-second duration (expires after 2 cycles)
+        let clock = AdvancingClock::new(1000, 30);
         let fs = Arc::new(MockFilesystem::new());
+        let sleeper = MockSleeper::new();
+        let shutdown = NeverShutdown::new();
 
         let args = RunArgs {
             dst_port: 8899,
@@ -88,7 +99,8 @@ mod tests {
             block_duration_sec: None,
         };
 
-        let result = execute_run(&args, &map_reader, &clock, &*fs).expect("execute");
+        let result =
+            execute_run(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown).expect("execute");
 
         assert_eq!(result.collect.cycles, 1);
         assert_eq!(result.collect.snapshots_written, 1);
@@ -109,8 +121,10 @@ mod tests {
             },
         );
 
-        let clock = MockClock::new(1000);
+        let clock = AdvancingClock::new(1000, 30);
         let fs = Arc::new(MockFilesystem::new());
+        let sleeper = MockSleeper::new();
+        let shutdown = NeverShutdown::new();
 
         let args = RunArgs {
             dst_port: 8899,
@@ -128,7 +142,8 @@ mod tests {
             block_duration_sec: None,
         };
 
-        let result = execute_run(&args, &map_reader, &clock, &*fs).expect("execute");
+        let result =
+            execute_run(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown).expect("execute");
 
         assert_eq!(result.collect.total_ips, 1);
         assert!(fs.exists(&result.report.report_path));
@@ -151,8 +166,10 @@ mod tests {
             },
         );
 
-        let clock = MockClock::new(1000);
+        let clock = AdvancingClock::new(1000, 30);
         let fs = Arc::new(MockFilesystem::new());
+        let sleeper = MockSleeper::new();
+        let shutdown = NeverShutdown::new();
 
         let args = RunArgs {
             dst_port: 8899,
@@ -170,7 +187,8 @@ mod tests {
             block_duration_sec: None,
         };
 
-        let result = execute_run(&args, &map_reader, &clock, &*fs).expect("execute");
+        let result =
+            execute_run(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown).expect("execute");
 
         assert!(result.report.offender_count > 0);
     }
@@ -178,8 +196,11 @@ mod tests {
     #[test]
     fn test_execute_run_invalid_port() {
         let map_reader = MockMapReader::new();
+        // MockClock is fine since we error before loop
         let clock = MockClock::new(1000);
         let fs = Arc::new(MockFilesystem::new());
+        let sleeper = MockSleeper::new();
+        let shutdown = NeverShutdown::new();
 
         let args = RunArgs {
             dst_port: 0, // Invalid
@@ -197,7 +218,7 @@ mod tests {
             block_duration_sec: None,
         };
 
-        let result = execute_run(&args, &map_reader, &clock, &*fs);
+        let result = execute_run(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown);
         assert!(result.is_err());
         assert!(matches!(result, Err(CommandError::InvalidArgument(_))));
     }
@@ -205,8 +226,11 @@ mod tests {
     #[test]
     fn test_execute_run_invalid_duration() {
         let map_reader = MockMapReader::new();
+        // MockClock is fine since we error before loop
         let clock = MockClock::new(1000);
         let fs = Arc::new(MockFilesystem::new());
+        let sleeper = MockSleeper::new();
+        let shutdown = NeverShutdown::new();
 
         let args = RunArgs {
             dst_port: 8899,
@@ -224,7 +248,7 @@ mod tests {
             block_duration_sec: None,
         };
 
-        let result = execute_run(&args, &map_reader, &clock, &*fs);
+        let result = execute_run(&args, &map_reader, &clock, &*fs, &sleeper, &shutdown);
         assert!(result.is_err());
         assert!(matches!(result, Err(CommandError::InvalidArgument(_))));
     }

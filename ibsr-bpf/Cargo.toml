@@ -5,11 +5,20 @@ edition.workspace = true
 license.workspace = true
 description = "XDP/BPF loader for IBSR"
 
+[features]
+default = []
+# Enable real BPF loading - requires privileged environment
+bpf = ["libbpf-rs"]
+
 [dependencies]
 thiserror.workspace = true
 object = { version = "0.36", features = ["write"] }
 regex = "1.10"
 ibsr-schema = { path = "../ibsr-schema" }
 ibsr-clock = { path = "../ibsr-clock" }
+libbpf-rs = { workspace = true, optional = true }
+
+[build-dependencies]
+# libbpf-cargo used when bpf feature enabled (handled in build.rs)
 
 [dev-dependencies]

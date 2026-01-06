@@ -955,4 +955,33 @@ mod tests {
         // Should succeed - the .maps section with bad data is just skipped
         assert!(result.is_ok());
     }
+
+    // --- Actual XDP Source Verification ---
+
+    #[test]
+    fn test_actual_xdp_source_passes_safety() {
+        let source = include_str!("bpf/counter.bpf.c");
+        let report = analyze_source(source);
+        assert!(
+            report.is_safe,
+            "XDP source failed safety verification: {:?}",
+            report
+        );
+        assert!(report.has_lru_map, "XDP source must use LRU hash map");
+        assert!(
+            report.forbidden_actions.is_empty(),
+            "XDP source contains forbidden actions: {:?}",
+            report.forbidden_actions
+        );
+        assert!(
+            report.forbidden_helpers.is_empty(),
+            "XDP source contains forbidden helpers: {:?}",
+            report.forbidden_helpers
+        );
+        assert!(
+            report.forbidden_map_types.is_empty(),
+            "XDP source contains forbidden map types: {:?}",
+            report.forbidden_map_types
+        );
+    }
 }

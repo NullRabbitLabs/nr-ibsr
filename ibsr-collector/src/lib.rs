@@ -9,6 +9,8 @@ pub mod collector;
 pub mod commands;
 pub mod exit;
 pub mod io;
+pub mod signal;
+pub mod sleeper;
 
 pub use cli::{
     default_interface, parse_from, parse_route_table, resolve_interface, Cli, CliError,
@@ -26,3 +28,6 @@ pub use io::{
     load_allowlist, write_evidence_csv, write_report, write_rules, AllowlistLoadError,
     OutputWriter, OutputWriterError,
 };
+
+pub use signal::{AlwaysShutdown, NeverShutdown, ShutdownCheck, ShutdownFlag};
+pub use sleeper::{MockSleeper, RealSleeper, Sleeper};

@@ -29,6 +29,25 @@ pub enum MapReaderError {
     ReadError(String),
 }
 
+/// Errors specific to BPF program operations.
+#[derive(Debug, Error)]
+pub enum BpfError {
+    #[error("failed to load BPF program: {0}")]
+    Load(String),
+
+    #[error("failed to attach XDP program to interface '{interface}': {reason}")]
+    Attach { interface: String, reason: String },
+
+    #[error("network interface not found: {0}")]
+    InterfaceNotFound(String),
+
+    #[error("insufficient permissions (requires CAP_BPF, CAP_NET_ADMIN)")]
+    InsufficientPermissions,
+
+    #[error("BPF map operation failed: {0}")]
+    MapError(String),
+}
+
 /// Trait for reading counters from a BPF map.
 pub trait MapReader: Send + Sync {
     /// Read all counters from the map.
@@ -425,5 +444,57 @@ mod tests {
         let restored = Snapshot::from_json(&json).expect("deserialize");
 
         assert_eq!(snapshot, restored);
+    }
+
+    // --- BpfError tests ---
+
+    #[test]
+    fn test_bpf_error_load_display() {
+        let err = BpfError::Load("failed to open object".to_string());
+        assert_eq!(
+            err.to_string(),
+            "failed to load BPF program: failed to open object"
+        );
+    }
+
+    #[test]
+    fn test_bpf_error_attach_display() {
+        let err = BpfError::Attach {
+            interface: "eth0".to_string(),
+            reason: "device busy".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "failed to attach XDP program to interface 'eth0': device busy"
+        );
+    }
+
+    #[test]
+    fn test_bpf_error_interface_not_found_display() {
+        let err = BpfError::InterfaceNotFound("eth99".to_string());
+        assert_eq!(err.to_string(), "network interface not found: eth99");
+    }
+
+    #[test]
+    fn test_bpf_error_insufficient_permissions_display() {
+        let err = BpfError::InsufficientPermissions;
+        assert_eq!(
+            err.to_string(),
+            "insufficient permissions (requires CAP_BPF, CAP_NET_ADMIN)"
+        );
+    }
+
+    #[test]
+    fn test_bpf_error_map_error_display() {
+        let err = BpfError::MapError("key not found".to_string());
+        assert_eq!(err.to_string(), "BPF map operation failed: key not found");
+    }
+
+    #[test]
+    fn test_bpf_error_debug() {
+        let err = BpfError::Load("test".to_string());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("Load"));
+        assert!(debug.contains("test"));
     }
 }

@@ -43,6 +43,32 @@ impl Clock for MockClock {
     }
 }
 
+/// Mock clock that auto-advances time on each call.
+///
+/// Useful for testing time-sensitive loops where the clock needs to progress.
+#[derive(Debug)]
+pub struct AdvancingClock {
+    timestamp: std::sync::atomic::AtomicU64,
+    increment: u64,
+}
+
+impl AdvancingClock {
+    /// Create an advancing clock starting at `timestamp` and incrementing by `increment` each call.
+    pub fn new(timestamp: u64, increment: u64) -> Self {
+        Self {
+            timestamp: std::sync::atomic::AtomicU64::new(timestamp),
+            increment,
+        }
+    }
+}
+
+impl Clock for AdvancingClock {
+    fn now_unix_sec(&self) -> u64 {
+        self.timestamp
+            .fetch_add(self.increment, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +127,27 @@ mod tests {
     fn test_system_clock_default() {
         let clock = SystemClock::default();
         assert!(clock.now_unix_sec() > 1577836800);
+    }
+
+    #[test]
+    fn test_advancing_clock_increments() {
+        let clock = AdvancingClock::new(1000, 5);
+        assert_eq!(clock.now_unix_sec(), 1000);
+        assert_eq!(clock.now_unix_sec(), 1005);
+        assert_eq!(clock.now_unix_sec(), 1010);
+    }
+
+    #[test]
+    fn test_advancing_clock_zero_increment() {
+        let clock = AdvancingClock::new(1000, 0);
+        assert_eq!(clock.now_unix_sec(), 1000);
+        assert_eq!(clock.now_unix_sec(), 1000);
+    }
+
+    #[test]
+    fn test_advancing_clock_debug() {
+        let clock = AdvancingClock::new(1000, 1);
+        let debug = format!("{:?}", clock);
+        assert!(debug.contains("AdvancingClock"));
     }
 }
