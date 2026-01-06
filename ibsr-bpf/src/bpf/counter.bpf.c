@@ -19,16 +19,18 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-// Counter structure - must match Rust Counters struct exactly
-// Layout: syn(4) + ack(4) + handshake_ack(4) + rst(4) + packets(4) + bytes(8) = 28 bytes
-// IMPORTANT: packed attribute ensures no padding before bytes field (which would
-// otherwise be aligned to 8 bytes, creating 4 bytes of padding after packets).
-struct __attribute__((packed)) counters {
+// Counter structure - must match Rust parsing in bpf_reader.rs exactly
+// Layout with natural alignment (u64 requires 8-byte alignment):
+//   syn(4) + ack(4) + handshake_ack(4) + rst(4) + packets(4) + _pad(4) + bytes(8) = 32 bytes
+// The padding is required because atomic operations on u64 (used by __sync_fetch_and_add)
+// require 8-byte alignment, which the BPF verifier enforces.
+struct counters {
     __u32 syn;
     __u32 ack;
     __u32 handshake_ack;  // ACKs with no SYN, no RST, and zero payload (handshake completion)
     __u32 rst;
     __u32 packets;
+    __u32 _pad;           // Explicit padding for 8-byte alignment of bytes field
     __u64 bytes;
 };
 
@@ -151,13 +153,14 @@ int xdp_counter(struct xdp_md *ctx)
         if (tcp->rst)
             __sync_fetch_and_add(&ctr->rst, 1);
     } else {
-        // Initialize new counter entry
+        // Initialize new counter entry (designated initializer zeros _pad)
         struct counters new_ctr = {
             .syn = tcp->syn ? 1 : 0,
             .ack = tcp->ack ? 1 : 0,
             .handshake_ack = is_handshake_ack ? 1 : 0,
             .rst = tcp->rst ? 1 : 0,
             .packets = 1,
+            ._pad = 0,
             .bytes = pkt_len,
         };
         bpf_map_update_elem(&counter_map, &src_ip, &new_ctr, BPF_ANY);
