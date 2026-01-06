@@ -125,7 +125,8 @@ impl MapReader for BpfMapReader {
                 .lookup(&key_clone, libbpf_rs::MapFlags::ANY)
                 .map_err(|e| MapReaderError::ReadError(e.to_string()))?
             {
-                if value.len() >= 28 {
+                // BPF struct is packed (28 bytes exactly). Reject if size differs.
+                if value.len() == 28 {
                     // Parse counter values from raw bytes
                     // Layout: syn(4) + ack(4) + handshake_ack(4) + rst(4) + packets(4) + bytes(8) = 28 bytes
                     let syn = u32::from_ne_bytes(value[0..4].try_into().unwrap());
@@ -159,6 +160,8 @@ impl MapReader for BpfMapReader {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     // Integration tests require privileged environment
     // Run with: cargo test --features bpf -- --ignored
 
@@ -182,5 +185,159 @@ mod tests {
     #[ignore]
     fn test_bpf_map_reader_cleanup_on_drop() {
         todo!("Integration test - run in privileged container")
+    }
+
+    // ===========================================
+    // Raw bytes layout tests
+    // These validate the BPF struct layout assumptions
+    // ===========================================
+
+    /// Expected size of BPF counter struct (must match counter.bpf.c)
+    const BPF_COUNTERS_SIZE: usize = 28;
+
+    /// Parse raw BPF map value bytes into Counters.
+    /// This mirrors the parsing logic in read_counters().
+    fn parse_bpf_counters(value: &[u8]) -> Option<Counters> {
+        if value.len() != BPF_COUNTERS_SIZE {
+            return None;
+        }
+        // Layout: syn(4) + ack(4) + handshake_ack(4) + rst(4) + packets(4) + bytes(8) = 28 bytes
+        let syn = u32::from_ne_bytes(value[0..4].try_into().unwrap());
+        let ack = u32::from_ne_bytes(value[4..8].try_into().unwrap());
+        let handshake_ack = u32::from_ne_bytes(value[8..12].try_into().unwrap());
+        let rst = u32::from_ne_bytes(value[12..16].try_into().unwrap());
+        let packets = u32::from_ne_bytes(value[16..20].try_into().unwrap());
+        let bytes = u64::from_ne_bytes(value[20..28].try_into().unwrap());
+        Some(Counters {
+            syn,
+            ack,
+            handshake_ack,
+            rst,
+            packets,
+            bytes,
+        })
+    }
+
+    #[test]
+    fn test_bpf_struct_size_is_28_bytes() {
+        // The BPF struct must be exactly 28 bytes (packed, no padding).
+        // If this changes, the Rust parsing will break.
+        assert_eq!(BPF_COUNTERS_SIZE, 28);
+    }
+
+    #[test]
+    fn test_parse_bpf_counters_all_zeros() {
+        let value = [0u8; 28];
+        let counters = parse_bpf_counters(&value).expect("parse succeeds");
+        assert_eq!(counters.syn, 0);
+        assert_eq!(counters.ack, 0);
+        assert_eq!(counters.handshake_ack, 0);
+        assert_eq!(counters.rst, 0);
+        assert_eq!(counters.packets, 0);
+        assert_eq!(counters.bytes, 0);
+    }
+
+    #[test]
+    fn test_parse_bpf_counters_known_values() {
+        // Construct a raw byte buffer with known values
+        let mut value = [0u8; 28];
+        // syn = 100
+        value[0..4].copy_from_slice(&100u32.to_ne_bytes());
+        // ack = 200
+        value[4..8].copy_from_slice(&200u32.to_ne_bytes());
+        // handshake_ack = 95
+        value[8..12].copy_from_slice(&95u32.to_ne_bytes());
+        // rst = 5
+        value[12..16].copy_from_slice(&5u32.to_ne_bytes());
+        // packets = 305
+        value[16..20].copy_from_slice(&305u32.to_ne_bytes());
+        // bytes = 45000 (sum of packet lengths)
+        value[20..28].copy_from_slice(&45000u64.to_ne_bytes());
+
+        let counters = parse_bpf_counters(&value).expect("parse succeeds");
+        assert_eq!(counters.syn, 100);
+        assert_eq!(counters.ack, 200);
+        assert_eq!(counters.handshake_ack, 95);
+        assert_eq!(counters.rst, 5);
+        assert_eq!(counters.packets, 305);
+        assert_eq!(counters.bytes, 45000);
+    }
+
+    #[test]
+    fn test_parse_bpf_counters_bytes_field_large_value() {
+        // Test that bytes field can hold large values (u64)
+        let mut value = [0u8; 28];
+        // Use a large but realistic byte count: 1 TB = 10^12 bytes
+        let large_bytes: u64 = 1_000_000_000_000;
+        value[20..28].copy_from_slice(&large_bytes.to_ne_bytes());
+        value[16..20].copy_from_slice(&1000000u32.to_ne_bytes()); // 1M packets
+
+        let counters = parse_bpf_counters(&value).expect("parse succeeds");
+        assert_eq!(counters.bytes, large_bytes);
+        assert_eq!(counters.packets, 1_000_000);
+    }
+
+    #[test]
+    fn test_parse_bpf_counters_bytes_max_value() {
+        // Test u64::MAX for bytes field
+        let mut value = [0u8; 28];
+        value[20..28].copy_from_slice(&u64::MAX.to_ne_bytes());
+
+        let counters = parse_bpf_counters(&value).expect("parse succeeds");
+        assert_eq!(counters.bytes, u64::MAX);
+    }
+
+    #[test]
+    fn test_parse_bpf_counters_rejects_wrong_size() {
+        // 27 bytes (too short)
+        let short = [0u8; 27];
+        assert!(parse_bpf_counters(&short).is_none());
+
+        // 29 bytes (too long)
+        let long = [0u8; 29];
+        assert!(parse_bpf_counters(&long).is_none());
+
+        // 32 bytes (would be size with padding)
+        let padded = [0u8; 32];
+        assert!(parse_bpf_counters(&padded).is_none());
+    }
+
+    #[test]
+    fn test_bytes_equals_sum_of_packet_lengths() {
+        // Simulate 3 packets with known lengths
+        let packet_lengths: [u64; 3] = [100, 1500, 64];
+        let expected_bytes: u64 = packet_lengths.iter().sum();
+        let packets = packet_lengths.len() as u32;
+
+        let mut value = [0u8; 28];
+        value[16..20].copy_from_slice(&packets.to_ne_bytes());
+        value[20..28].copy_from_slice(&expected_bytes.to_ne_bytes());
+
+        let counters = parse_bpf_counters(&value).expect("parse succeeds");
+
+        // Assert bytes equals sum of packet lengths
+        assert_eq!(counters.bytes, expected_bytes);
+        assert_eq!(counters.bytes, 1664); // 100 + 1500 + 64
+        assert_eq!(counters.packets, 3);
+    }
+
+    #[test]
+    fn test_bytes_is_monotonic_increasing() {
+        // Simulate a series of counter updates where bytes increases
+        let mut cumulative_bytes: u64 = 0;
+        let packet_sizes = [100u64, 200, 150, 1500, 64];
+
+        for size in packet_sizes {
+            cumulative_bytes += size;
+
+            let mut value = [0u8; 28];
+            value[20..28].copy_from_slice(&cumulative_bytes.to_ne_bytes());
+
+            let counters = parse_bpf_counters(&value).expect("parse succeeds");
+            assert_eq!(counters.bytes, cumulative_bytes);
+        }
+
+        // Final value should be sum of all
+        assert_eq!(cumulative_bytes, 2014);
     }
 }

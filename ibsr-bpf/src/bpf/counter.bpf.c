@@ -21,7 +21,9 @@
 
 // Counter structure - must match Rust Counters struct exactly
 // Layout: syn(4) + ack(4) + handshake_ack(4) + rst(4) + packets(4) + bytes(8) = 28 bytes
-struct counters {
+// IMPORTANT: packed attribute ensures no padding before bytes field (which would
+// otherwise be aligned to 8 bytes, creating 4 bytes of padding after packets).
+struct __attribute__((packed)) counters {
     __u32 syn;
     __u32 ack;
     __u32 handshake_ack;  // ACKs with no SYN, no RST, and zero payload (handshake completion)
