@@ -43,10 +43,12 @@ Analysis and report generation happen offline using tools in `offline-tools/`.
 docker compose run --rm test
 
 # Build release binary (in Docker, for deployment)
-docker compose run --rm build
+./build.sh
 ```
 
 Development on macOS; all tests run in Docker (Linux container with BPF toolchain).
+
+**IMPORTANT:** Always run both `test` AND `./build.sh` before considering a task complete. Tests passing does not guarantee the release build succeeds - always verify with `./build.sh` after tests pass.
 
 ## CLI Synopsis
 
