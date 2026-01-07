@@ -20,7 +20,7 @@ Detected 1 source(s) matching abuse pattern (TCP SYN churn).
 
 | Source | SYN Rate | Success Ratio | Would Block Packets | Would Block SYN |
 |--------|----------|---------------|---------------------|------------------|
-| 10.0.0.1 | 500.0/sec | 0.00 | 5050 | 5000 |
+| 10.0.0.1:8080 | 500.0/sec | 0.00 | 5050 | 5000 |
 
 ## 3. Counterfactual Enforcement Impact
 

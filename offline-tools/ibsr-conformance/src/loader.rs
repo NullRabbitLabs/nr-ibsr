@@ -42,9 +42,12 @@ pub fn fixtures_dir() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let path = Path::new(&manifest_dir);
 
-    // If we're in a crate directory, go up one level
+    // If we're in ibsr-conformance crate, go up two levels to workspace root
     if path.ends_with("ibsr-conformance") {
-        path.parent().unwrap_or(path).join("fixtures")
+        path.parent() // offline-tools
+            .and_then(|p| p.parent()) // workspace root
+            .unwrap_or(path)
+            .join("fixtures")
     } else {
         path.join("fixtures")
     }

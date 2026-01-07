@@ -102,7 +102,7 @@ mod tests {
     }
 
     fn make_key(ip: u32) -> AggregatedKey {
-        AggregatedKey::new(KeyType::SrcIp, ip)
+        AggregatedKey::new(KeyType::SrcIp, ip, Some(8080))
     }
 
     fn make_stats(syn_rate: f64, success_ratio: f64) -> AggregatedStats {

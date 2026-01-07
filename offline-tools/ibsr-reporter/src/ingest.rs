@@ -204,6 +204,7 @@ mod tests {
         BucketEntry {
             key_type: KeyType::SrcIp,
             key_value,
+            dst_port: Some(8080),
             syn,
             ack,
             handshake_ack: ack, // Default to ack for legitimate traffic
@@ -219,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_parse_snapshot_valid_json() {
-        let json = r#"{"version":2,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
+        let json = r#"{"version":3,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
         let snapshot = parse_snapshot(json).unwrap();
         assert_eq!(snapshot.ts_unix_sec, 1000);
         assert_eq!(snapshot.dst_ports, vec![8080]);
@@ -228,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_parse_snapshot_with_buckets() {
-        let json = r#"{"version":2,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[{"key_type":"src_ip","key_value":167772161,"syn":100,"ack":50,"handshake_ack":50,"rst":5,"packets":155,"bytes":15500}]}"#;
+        let json = r#"{"version":3,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[{"key_type":"src_ip","key_value":167772161,"dst_port":8080,"syn":100,"ack":50,"handshake_ack":50,"rst":5,"packets":155,"bytes":15500}]}"#;
         let snapshot = parse_snapshot(json).unwrap();
         assert_eq!(snapshot.buckets.len(), 1);
         assert_eq!(snapshot.buckets[0].syn, 100);
@@ -252,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_parse_snapshot_missing_field() {
-        let json = r#"{"version":2,"ts_unix_sec":1000}"#;
+        let json = r#"{"version":3,"ts_unix_sec":1000}"#;
         let result = parse_snapshot(json);
         assert!(result.is_err());
     }
@@ -324,9 +325,9 @@ mod tests {
     #[test]
     fn test_parse_snapshots_lenient_skips_malformed() {
         let files = vec![
-            ("snap_1000.jsonl".to_string(), r#"{"version":2,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#.to_string()),
+            ("snap_1000.jsonl".to_string(), r#"{"version":3,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#.to_string()),
             ("snap_1001.jsonl".to_string(), "invalid json".to_string()),
-            ("snap_1002.jsonl".to_string(), r#"{"version":2,"ts_unix_sec":1002,"dst_ports":[8080],"buckets":[]}"#.to_string()),
+            ("snap_1002.jsonl".to_string(), r#"{"version":3,"ts_unix_sec":1002,"dst_ports":[8080],"buckets":[]}"#.to_string()),
         ];
 
         let mut warnings = Vec::new();
@@ -345,7 +346,7 @@ mod tests {
     fn test_parse_snapshots_lenient_no_warn_fn() {
         let files = vec![
             ("snap_1000.jsonl".to_string(), "invalid".to_string()),
-            ("snap_1001.jsonl".to_string(), r#"{"version":2,"ts_unix_sec":1001,"dst_ports":[8080],"buckets":[]}"#.to_string()),
+            ("snap_1001.jsonl".to_string(), r#"{"version":3,"ts_unix_sec":1001,"dst_ports":[8080],"buckets":[]}"#.to_string()),
         ];
 
         let snapshots = parse_snapshots_lenient::<fn(&str, &str)>(files, None);
@@ -518,11 +519,11 @@ mod tests {
         // Create test files
         std::fs::write(
             dir.path().join("snapshot_1000.jsonl"),
-            r#"{"version":2,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
+            r#"{"version":3,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
         std::fs::write(
             dir.path().join("snapshot_1001.jsonl"),
-            r#"{"version":2,"ts_unix_sec":1001,"dst_ports":[8080],"buckets":[]}"#,
+            r#"{"version":3,"ts_unix_sec":1001,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
         // Non-jsonl file should be ignored
         std::fs::write(dir.path().join("readme.txt"), "ignored").unwrap();
@@ -538,11 +539,11 @@ mod tests {
 
         std::fs::write(
             dir.path().join("snapshot_1000.jsonl"),
-            r#"{"version":2,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
+            r#"{"version":3,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
         std::fs::write(
             dir.path().join("snapshot_1002.jsonl"),
-            r#"{"version":2,"ts_unix_sec":1002,"dst_ports":[8080],"buckets":[]}"#,
+            r#"{"version":3,"ts_unix_sec":1002,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
 
         let stream = load_snapshots_from_dir::<fn(&str, &str)>(dir.path(), None).unwrap();
@@ -568,7 +569,7 @@ mod tests {
 
         std::fs::write(
             dir.path().join("snapshot_1000.jsonl"),
-            r#"{"version":2,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
+            r#"{"version":3,"ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
         std::fs::write(
             dir.path().join("snapshot_1001.jsonl"),

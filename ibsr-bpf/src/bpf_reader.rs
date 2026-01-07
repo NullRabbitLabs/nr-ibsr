@@ -9,7 +9,7 @@ use std::mem::MaybeUninit;
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use libbpf_rs::{MapCore, OpenObject};
 
-use crate::map_reader::{BpfError, Counters, MapReader, MapReaderError};
+use crate::map_reader::{BpfError, Counters, MapKey, MapReader, MapReaderError};
 
 // Include the generated skeleton
 mod counter_skel {
@@ -108,7 +108,7 @@ impl BpfMapReader {
 }
 
 impl MapReader for BpfMapReader {
-    fn read_counters(&self) -> Result<HashMap<u32, Counters>, MapReaderError> {
+    fn read_counters(&self) -> Result<HashMap<MapKey, Counters>, MapReaderError> {
         let mut result = HashMap::new();
 
         // Iterate over all keys in the counter map
@@ -116,10 +116,13 @@ impl MapReader for BpfMapReader {
 
         for key in map.keys() {
             let key_clone = key.clone();
-            let key_bytes: [u8; 4] = key
+            // Key is now 8 bytes: src_ip(4) + dst_port(2) + _pad(2)
+            let key_bytes: [u8; 8] = key
                 .try_into()
                 .map_err(|_| MapReaderError::ReadError("invalid key size".to_string()))?;
-            let src_ip = u32::from_ne_bytes(key_bytes);
+            let src_ip = u32::from_ne_bytes(key_bytes[0..4].try_into().unwrap());
+            let dst_port = u16::from_ne_bytes(key_bytes[4..6].try_into().unwrap());
+            let map_key = MapKey { src_ip, dst_port };
 
             if let Some(value) = map
                 .lookup(&key_clone, libbpf_rs::MapFlags::ANY)
@@ -137,7 +140,7 @@ impl MapReader for BpfMapReader {
                     let bytes = u64::from_ne_bytes(value[24..32].try_into().unwrap());
 
                     result.insert(
-                        src_ip,
+                        map_key,
                         Counters {
                             syn,
                             ack,

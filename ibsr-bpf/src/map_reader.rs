@@ -1,6 +1,7 @@
 //! BPF Map Reader abstraction for IBSR.
 //!
 //! This module provides:
+//! - `MapKey` struct representing the composite map key (src_ip, dst_port)
 //! - `Counters` struct representing raw counter data from BPF map
 //! - `MapReader` trait for reading counters (with mock implementation for testing)
 //! - Conversion from raw counters to `Snapshot`
@@ -10,6 +11,14 @@ use std::collections::HashMap;
 use ibsr_clock::Clock;
 use ibsr_schema::{BucketEntry, KeyType, Snapshot};
 use thiserror::Error;
+
+/// Composite map key for per-IP-per-port tracking.
+/// Matches the BPF struct map_key layout: src_ip(4) + dst_port(2) + _pad(2) = 8 bytes
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct MapKey {
+    pub src_ip: u32,
+    pub dst_port: u16,
+}
 
 /// Raw counter data from BPF map.
 /// This matches the structure stored in the LRU hash map.
@@ -53,14 +62,14 @@ pub enum BpfError {
 /// Trait for reading counters from a BPF map.
 pub trait MapReader: Send + Sync {
     /// Read all counters from the map.
-    /// Returns a map of source IP (as u32) to counters.
-    fn read_counters(&self) -> Result<HashMap<u32, Counters>, MapReaderError>;
+    /// Returns a map of (src_ip, dst_port) to counters.
+    fn read_counters(&self) -> Result<HashMap<MapKey, Counters>, MapReaderError>;
 }
 
 /// Mock map reader for testing.
 #[derive(Debug, Default)]
 pub struct MockMapReader {
-    counters: HashMap<u32, Counters>,
+    counters: HashMap<MapKey, Counters>,
 }
 
 impl MockMapReader {
@@ -70,18 +79,18 @@ impl MockMapReader {
     }
 
     /// Create a mock map reader with predefined counters.
-    pub fn with_counters(counters: HashMap<u32, Counters>) -> Self {
+    pub fn with_counters(counters: HashMap<MapKey, Counters>) -> Self {
         Self { counters }
     }
 
-    /// Add a counter entry.
-    pub fn add_counter(&mut self, src_ip: u32, counters: Counters) {
-        self.counters.insert(src_ip, counters);
+    /// Add a counter entry for a specific (src_ip, dst_port) pair.
+    pub fn add_counter(&mut self, key: MapKey, counters: Counters) {
+        self.counters.insert(key, counters);
     }
 }
 
 impl MapReader for MockMapReader {
-    fn read_counters(&self) -> Result<HashMap<u32, Counters>, MapReaderError> {
+    fn read_counters(&self) -> Result<HashMap<MapKey, Counters>, MapReaderError> {
         Ok(self.counters.clone())
     }
 }
@@ -89,19 +98,20 @@ impl MapReader for MockMapReader {
 /// Convert raw counters to a Snapshot.
 ///
 /// # Arguments
-/// * `counters` - Map of source IP to counter values
+/// * `counters` - Map of (src_ip, dst_port) to counter values
 /// * `clock` - Clock implementation for timestamp
-/// * `dst_ports` - The destination ports being monitored
+/// * `dst_ports` - The destination ports being monitored (for metadata)
 pub fn counters_to_snapshot<C: Clock>(
-    counters: &HashMap<u32, Counters>,
+    counters: &HashMap<MapKey, Counters>,
     clock: &C,
     dst_ports: &[u16],
 ) -> Snapshot {
     let buckets: Vec<BucketEntry> = counters
         .iter()
-        .map(|(&src_ip, c)| BucketEntry {
+        .map(|(key, c)| BucketEntry {
             key_type: KeyType::SrcIp,
-            key_value: src_ip,
+            key_value: key.src_ip,
+            dst_port: Some(key.dst_port),
             syn: c.syn,
             ack: c.ack,
             handshake_ack: c.handshake_ack,
@@ -129,7 +139,7 @@ mod tests {
     fn test_single_counter_to_bucket_entry() {
         let mut counters = HashMap::new();
         counters.insert(
-            0x0A000001, // 10.0.0.1
+            MapKey { src_ip: 0x0A000001, dst_port: 8899 }, // 10.0.0.1:8899
             Counters {
                 syn: 100,
                 ack: 200,
@@ -147,6 +157,7 @@ mod tests {
         let bucket = &snapshot.buckets[0];
         assert_eq!(bucket.key_type, KeyType::SrcIp);
         assert_eq!(bucket.key_value, 0x0A000001);
+        assert_eq!(bucket.dst_port, Some(8899));
         assert_eq!(bucket.syn, 100);
         assert_eq!(bucket.ack, 200);
         assert_eq!(bucket.handshake_ack, 95);
@@ -159,7 +170,7 @@ mod tests {
     fn test_multiple_counters_to_bucket_entries() {
         let mut counters = HashMap::new();
         counters.insert(
-            0x0A000001,
+            MapKey { src_ip: 0x0A000001, dst_port: 8899 },
             Counters {
                 syn: 10,
                 ack: 20,
@@ -170,7 +181,7 @@ mod tests {
             },
         );
         counters.insert(
-            0x0A000002,
+            MapKey { src_ip: 0x0A000002, dst_port: 8899 },
             Counters {
                 syn: 50,
                 ack: 100,
@@ -189,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_empty_counters_produces_empty_snapshot() {
-        let counters: HashMap<u32, Counters> = HashMap::new();
+        let counters: HashMap<MapKey, Counters> = HashMap::new();
         let clock = MockClock::new(1234567890);
 
         let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
@@ -201,7 +212,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_uses_clock_timestamp() {
-        let counters: HashMap<u32, Counters> = HashMap::new();
+        let counters: HashMap<MapKey, Counters> = HashMap::new();
         let clock = MockClock::new(9999999999);
 
         let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
@@ -211,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_timestamp_zero() {
-        let counters: HashMap<u32, Counters> = HashMap::new();
+        let counters: HashMap<MapKey, Counters> = HashMap::new();
         let clock = MockClock::new(0);
 
         let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
@@ -221,7 +232,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_timestamp_max() {
-        let counters: HashMap<u32, Counters> = HashMap::new();
+        let counters: HashMap<MapKey, Counters> = HashMap::new();
         let clock = MockClock::new(u64::MAX);
 
         let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
@@ -233,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_embeds_dst_port() {
-        let counters: HashMap<u32, Counters> = HashMap::new();
+        let counters: HashMap<MapKey, Counters> = HashMap::new();
         let clock = MockClock::new(1234567890);
 
         let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
@@ -243,7 +254,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_embeds_different_dst_port() {
-        let counters: HashMap<u32, Counters> = HashMap::new();
+        let counters: HashMap<MapKey, Counters> = HashMap::new();
         let clock = MockClock::new(1234567890);
 
         let snapshot = counters_to_snapshot(&counters, &clock, &[443]);
@@ -253,7 +264,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_dst_port_max() {
-        let counters: HashMap<u32, Counters> = HashMap::new();
+        let counters: HashMap<MapKey, Counters> = HashMap::new();
         let clock = MockClock::new(1234567890);
 
         let snapshot = counters_to_snapshot(&counters, &clock, &[u16::MAX]);
@@ -264,31 +275,35 @@ mod tests {
     // --- Deterministic ordering ---
 
     #[test]
-    fn test_snapshot_buckets_are_sorted_by_ip() {
+    fn test_snapshot_buckets_are_sorted_by_ip_then_port() {
         let mut counters = HashMap::new();
         // Insert in non-sorted order
-        counters.insert(0x0C000001, Counters::default());
-        counters.insert(0x0A000001, Counters::default());
-        counters.insert(0x0B000001, Counters::default());
+        counters.insert(MapKey { src_ip: 0x0C000001, dst_port: 80 }, Counters::default());
+        counters.insert(MapKey { src_ip: 0x0A000001, dst_port: 443 }, Counters::default());
+        counters.insert(MapKey { src_ip: 0x0A000001, dst_port: 80 }, Counters::default());
+        counters.insert(MapKey { src_ip: 0x0B000001, dst_port: 80 }, Counters::default());
 
         let clock = MockClock::new(1234567890);
-        let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[80, 443]);
 
-        // Should be sorted by key_value (IP address)
+        // Should be sorted by key_value (IP address), then by dst_port
         assert_eq!(snapshot.buckets[0].key_value, 0x0A000001);
-        assert_eq!(snapshot.buckets[1].key_value, 0x0B000001);
-        assert_eq!(snapshot.buckets[2].key_value, 0x0C000001);
+        assert_eq!(snapshot.buckets[0].dst_port, Some(80));
+        assert_eq!(snapshot.buckets[1].key_value, 0x0A000001);
+        assert_eq!(snapshot.buckets[1].dst_port, Some(443));
+        assert_eq!(snapshot.buckets[2].key_value, 0x0B000001);
+        assert_eq!(snapshot.buckets[3].key_value, 0x0C000001);
     }
 
     #[test]
     fn test_snapshot_deterministic_json() {
         let mut counters1 = HashMap::new();
-        counters1.insert(0x0B000001, Counters { syn: 1, ..Default::default() });
-        counters1.insert(0x0A000001, Counters { syn: 2, ..Default::default() });
+        counters1.insert(MapKey { src_ip: 0x0B000001, dst_port: 8899 }, Counters { syn: 1, ..Default::default() });
+        counters1.insert(MapKey { src_ip: 0x0A000001, dst_port: 8899 }, Counters { syn: 2, ..Default::default() });
 
         let mut counters2 = HashMap::new();
-        counters2.insert(0x0A000001, Counters { syn: 2, ..Default::default() });
-        counters2.insert(0x0B000001, Counters { syn: 1, ..Default::default() });
+        counters2.insert(MapKey { src_ip: 0x0A000001, dst_port: 8899 }, Counters { syn: 2, ..Default::default() });
+        counters2.insert(MapKey { src_ip: 0x0B000001, dst_port: 8899 }, Counters { syn: 1, ..Default::default() });
 
         let clock = MockClock::new(1234567890);
         let snapshot1 = counters_to_snapshot(&counters1, &clock, &[8899]);
@@ -311,38 +326,58 @@ mod tests {
     #[test]
     fn test_mock_map_reader_with_counters() {
         let mut initial = HashMap::new();
-        initial.insert(0x0A000001, Counters { syn: 10, ..Default::default() });
+        let key = MapKey { src_ip: 0x0A000001, dst_port: 8899 };
+        initial.insert(key, Counters { syn: 10, ..Default::default() });
 
         let reader = MockMapReader::with_counters(initial);
         let counters = reader.read_counters().expect("read counters");
 
         assert_eq!(counters.len(), 1);
-        assert_eq!(counters.get(&0x0A000001).unwrap().syn, 10);
+        assert_eq!(counters.get(&key).unwrap().syn, 10);
     }
 
     #[test]
     fn test_mock_map_reader_add_counter() {
         let mut reader = MockMapReader::new();
-        reader.add_counter(0x0A000001, Counters { syn: 5, ..Default::default() });
-        reader.add_counter(0x0A000002, Counters { syn: 10, ..Default::default() });
+        let key1 = MapKey { src_ip: 0x0A000001, dst_port: 8899 };
+        let key2 = MapKey { src_ip: 0x0A000002, dst_port: 8899 };
+        reader.add_counter(key1, Counters { syn: 5, ..Default::default() });
+        reader.add_counter(key2, Counters { syn: 10, ..Default::default() });
 
         let counters = reader.read_counters().expect("read counters");
 
         assert_eq!(counters.len(), 2);
-        assert_eq!(counters.get(&0x0A000001).unwrap().syn, 5);
-        assert_eq!(counters.get(&0x0A000002).unwrap().syn, 10);
+        assert_eq!(counters.get(&key1).unwrap().syn, 5);
+        assert_eq!(counters.get(&key2).unwrap().syn, 10);
     }
 
     #[test]
     fn test_mock_map_reader_overwrite_counter() {
         let mut reader = MockMapReader::new();
-        reader.add_counter(0x0A000001, Counters { syn: 5, ..Default::default() });
-        reader.add_counter(0x0A000001, Counters { syn: 10, ..Default::default() });
+        let key = MapKey { src_ip: 0x0A000001, dst_port: 8899 };
+        reader.add_counter(key, Counters { syn: 5, ..Default::default() });
+        reader.add_counter(key, Counters { syn: 10, ..Default::default() });
 
         let counters = reader.read_counters().expect("read counters");
 
         assert_eq!(counters.len(), 1);
-        assert_eq!(counters.get(&0x0A000001).unwrap().syn, 10);
+        assert_eq!(counters.get(&key).unwrap().syn, 10);
+    }
+
+    #[test]
+    fn test_mock_map_reader_same_ip_different_ports() {
+        let mut reader = MockMapReader::new();
+        let key1 = MapKey { src_ip: 0x0A000001, dst_port: 80 };
+        let key2 = MapKey { src_ip: 0x0A000001, dst_port: 443 };
+        reader.add_counter(key1, Counters { syn: 5, ..Default::default() });
+        reader.add_counter(key2, Counters { syn: 10, ..Default::default() });
+
+        let counters = reader.read_counters().expect("read counters");
+
+        // Same IP on different ports should be tracked separately
+        assert_eq!(counters.len(), 2);
+        assert_eq!(counters.get(&key1).unwrap().syn, 5);
+        assert_eq!(counters.get(&key2).unwrap().syn, 10);
     }
 
     #[test]
@@ -359,7 +394,7 @@ mod tests {
     fn test_counter_max_values() {
         let mut counters = HashMap::new();
         counters.insert(
-            u32::MAX,
+            MapKey { src_ip: u32::MAX, dst_port: u16::MAX },
             Counters {
                 syn: u32::MAX,
                 ack: u32::MAX,
@@ -375,6 +410,7 @@ mod tests {
 
         let bucket = &snapshot.buckets[0];
         assert_eq!(bucket.key_value, u32::MAX);
+        assert_eq!(bucket.dst_port, Some(u16::MAX));
         assert_eq!(bucket.syn, u32::MAX);
         assert_eq!(bucket.ack, u32::MAX);
         assert_eq!(bucket.handshake_ack, u32::MAX);
@@ -386,13 +422,14 @@ mod tests {
     #[test]
     fn test_counter_zero_values() {
         let mut counters = HashMap::new();
-        counters.insert(0, Counters::default());
+        counters.insert(MapKey { src_ip: 0, dst_port: 0 }, Counters::default());
 
         let clock = MockClock::new(1234567890);
         let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
 
         let bucket = &snapshot.buckets[0];
         assert_eq!(bucket.key_value, 0);
+        assert_eq!(bucket.dst_port, Some(0));
         assert_eq!(bucket.syn, 0);
         assert_eq!(bucket.ack, 0);
         assert_eq!(bucket.handshake_ack, 0);
@@ -407,7 +444,7 @@ mod tests {
     fn test_read_and_convert_workflow() {
         let mut reader = MockMapReader::new();
         reader.add_counter(
-            0x0A000001,
+            MapKey { src_ip: 0x0A000001, dst_port: 8899 },
             Counters {
                 syn: 100,
                 ack: 200,
@@ -431,13 +468,14 @@ mod tests {
         assert_eq!(snapshot.dst_ports, vec![8899]);
         assert_eq!(snapshot.buckets.len(), 1);
         assert_eq!(snapshot.buckets[0].syn, 100);
+        assert_eq!(snapshot.buckets[0].dst_port, Some(8899));
     }
 
     #[test]
     fn test_snapshot_roundtrip_through_json() {
         let mut counters = HashMap::new();
         counters.insert(
-            0x0A000001,
+            MapKey { src_ip: 0x0A000001, dst_port: 8899 },
             Counters {
                 syn: 100,
                 ack: 200,

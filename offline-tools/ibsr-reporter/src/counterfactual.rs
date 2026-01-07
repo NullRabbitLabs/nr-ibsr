@@ -172,7 +172,7 @@ mod tests {
     }
 
     fn make_key(ip: u32) -> AggregatedKey {
-        AggregatedKey::new(KeyType::SrcIp, ip)
+        AggregatedKey::new(KeyType::SrcIp, ip, Some(8080))
     }
 
     fn make_decision(

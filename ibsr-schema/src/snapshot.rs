@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 /// Current schema version.
 /// Version 1: Added multi-port support (dst_port -> dst_ports)
 /// Version 2: Added handshake_ack field for accurate SYN-flood detection
-pub const SCHEMA_VERSION: u32 = 2;
+/// Version 3: Added per-port granularity (dst_port field in BucketEntry)
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Key type for bucket entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -20,6 +21,9 @@ pub enum KeyType {
 pub struct BucketEntry {
     pub key_type: KeyType,
     pub key_value: u32,
+    /// Destination port this bucket tracks (for per-port granularity).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_port: Option<u16>,
     pub syn: u32,
     pub ack: u32,
     /// ACKs that are part of handshake completion (ACK=1, SYN=0, RST=0, no payload).
@@ -44,11 +48,12 @@ pub struct Snapshot {
 impl Snapshot {
     /// Create a new snapshot with the current schema version.
     pub fn new(ts_unix_sec: u64, dst_ports: &[u16], mut buckets: Vec<BucketEntry>) -> Self {
-        // Sort buckets for deterministic ordering: by key_type, then key_value
+        // Sort buckets for deterministic ordering: by key_type, then key_value, then dst_port
         buckets.sort_by(|a, b| {
             a.key_type
                 .cmp(&b.key_type)
                 .then_with(|| a.key_value.cmp(&b.key_value))
+                .then_with(|| a.dst_port.cmp(&b.dst_port))
         });
 
         // Sort ports for deterministic output
@@ -117,6 +122,7 @@ mod tests {
         let bucket = BucketEntry {
             key_type: KeyType::SrcIp,
             key_value: 0x0A000001, // 10.0.0.1
+            dst_port: Some(8899),
             syn: 100,
             ack: 200,
             handshake_ack: 95,
@@ -138,6 +144,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000001,
+                dst_port: Some(8000),
                 syn: 10,
                 ack: 20,
                 handshake_ack: 10,
@@ -148,6 +155,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000002,
+                dst_port: Some(8000),
                 syn: 50,
                 ack: 100,
                 handshake_ack: 50,
@@ -158,6 +166,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcCidr24,
                 key_value: 0x0A000000,
+                dst_port: None,
                 syn: 60,
                 ack: 120,
                 handshake_ack: 60,
@@ -181,6 +190,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcCidr24,
                 key_value: 0x0A000000,
+                dst_port: None,
                 syn: 1,
                 ack: 1,
                 handshake_ack: 1,
@@ -191,6 +201,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0B000001,
+                dst_port: Some(8899),
                 syn: 2,
                 ack: 2,
                 handshake_ack: 2,
@@ -201,6 +212,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000001,
+                dst_port: Some(8899),
                 syn: 3,
                 ack: 3,
                 handshake_ack: 3,
@@ -228,6 +240,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0B000001,
+                dst_port: Some(8899),
                 syn: 1,
                 ack: 1,
                 handshake_ack: 1,
@@ -238,6 +251,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000001,
+                dst_port: Some(8899),
                 syn: 2,
                 ack: 2,
                 handshake_ack: 2,
@@ -251,6 +265,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000001,
+                dst_port: Some(8899),
                 syn: 2,
                 ack: 2,
                 handshake_ack: 2,
@@ -261,6 +276,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0B000001,
+                dst_port: Some(8899),
                 syn: 1,
                 ack: 1,
                 handshake_ack: 1,
@@ -287,6 +303,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcCidr24,
                 key_value: 0x0C000000, // 12.0.0.0/24
+                dst_port: None,
                 syn: 1,
                 ack: 1,
                 handshake_ack: 1,
@@ -297,6 +314,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcCidr24,
                 key_value: 0x0A000000, // 10.0.0.0/24
+                dst_port: None,
                 syn: 2,
                 ack: 2,
                 handshake_ack: 2,
@@ -307,6 +325,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcCidr24,
                 key_value: 0x0B000000, // 11.0.0.0/24
+                dst_port: None,
                 syn: 3,
                 ack: 3,
                 handshake_ack: 3,
@@ -344,6 +363,7 @@ mod tests {
         let bucket = BucketEntry {
             key_type: KeyType::SrcIp,
             key_value: u32::MAX,
+            dst_port: Some(u16::MAX),
             syn: u32::MAX,
             ack: u32::MAX,
             handshake_ack: u32::MAX,
@@ -359,6 +379,7 @@ mod tests {
         assert_eq!(snapshot, restored);
         assert_eq!(restored.buckets[0].syn, u32::MAX);
         assert_eq!(restored.buckets[0].bytes, u64::MAX);
+        assert_eq!(restored.buckets[0].dst_port, Some(u16::MAX));
         assert_eq!(restored.ts_unix_sec, u64::MAX);
         assert_eq!(restored.dst_ports, vec![u16::MAX]);
     }
@@ -375,7 +396,7 @@ mod tests {
         assert!(matches!(
             err,
             SnapshotError::VersionMismatch {
-                expected: 2,
+                expected: 3,
                 found: 999
             }
         ));
@@ -406,6 +427,7 @@ mod tests {
         let bucket = BucketEntry {
             key_type: KeyType::SrcIp,
             key_value: 0x0A000001,
+            dst_port: Some(8899),
             syn: 100,
             ack: 200,
             handshake_ack: 95,
@@ -426,6 +448,7 @@ mod tests {
         let bucket_ip = BucketEntry {
             key_type: KeyType::SrcIp,
             key_value: 0x0A000001,
+            dst_port: Some(80),
             syn: 1,
             ack: 1,
             handshake_ack: 1,
@@ -436,6 +459,7 @@ mod tests {
         let bucket_cidr = BucketEntry {
             key_type: KeyType::SrcCidr24,
             key_value: 0x0A000000,
+            dst_port: None,
             syn: 1,
             ack: 1,
             handshake_ack: 1,
@@ -448,12 +472,15 @@ mod tests {
         let json_cidr = serde_json::to_string(&bucket_cidr).expect("serialize");
 
         assert!(json_ip.contains("\"src_ip\""));
+        assert!(json_ip.contains("\"dst_port\":80"));
         assert!(json_cidr.contains("\"src_cidr24\""));
+        // dst_port should be skipped when None
+        assert!(!json_cidr.contains("dst_port"));
     }
 
     #[test]
     fn test_schema_version_constant() {
-        assert_eq!(SCHEMA_VERSION, 2);
+        assert_eq!(SCHEMA_VERSION, 3);
     }
 
     #[test]

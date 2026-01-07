@@ -260,6 +260,7 @@ mod tests {
             vec![BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000001, // 10.0.0.1
+                dst_port: Some(8080),
                 syn: 5000,
                 ack: 50,
                 handshake_ack: 10,
@@ -277,6 +278,7 @@ mod tests {
             vec![BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000002, // 10.0.0.2
+                dst_port: Some(8080),
                 syn: 100,
                 ack: 90,
                 handshake_ack: 90,
@@ -411,7 +413,7 @@ mod tests {
         use ibsr_reporter::types::AggregatedKey;
 
         let decisions = vec![KeyDecision {
-            key: AggregatedKey::new(KeyType::SrcIp, 0x0A000001),
+            key: AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080)),
             stats: AggregatedStats {
                 total_syn: 100,
                 total_ack: 10,
@@ -430,7 +432,7 @@ mod tests {
 
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], "source,syn_rate,success_ratio,decision,packets,bytes,syn");
-        assert_eq!(lines[1], "10.0.0.1,20.00,0.1000,block,200,30000,100");
+        assert_eq!(lines[1], "10.0.0.1:8080,20.00,0.1000,block,200,30000,100");
     }
 
     // -------------------------------------------

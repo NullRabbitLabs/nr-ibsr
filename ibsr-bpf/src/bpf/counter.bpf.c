@@ -19,6 +19,15 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
+// Map key structure - 8 bytes total with explicit padding
+// Layout: src_ip(4) + dst_port(2) + _pad(2) = 8 bytes
+// This allows per-IP-per-port traffic tracking
+struct map_key {
+    __u32 src_ip;    // Source IPv4 address (host byte order)
+    __u16 dst_port;  // Destination port (host byte order)
+    __u16 _pad;      // Explicit padding for 8-byte alignment
+};
+
 // Counter structure - must match Rust parsing in bpf_reader.rs exactly
 // Layout with natural alignment (u64 requires 8-byte alignment):
 //   syn(4) + ack(4) + handshake_ack(4) + rst(4) + packets(4) + _pad(4) + bytes(8) = 32 bytes
@@ -44,12 +53,12 @@ struct {
 } config_map SEC(".maps");
 
 // Counter map - LRU hash for bounded memory usage
-// Key: source IPv4 address (host byte order)
+// Key: (source IP, destination port) composite key
 // Value: counter structure
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, 100000);
-    __type(key, __u32);
+    __type(key, struct map_key);
     __type(value, struct counters);
 } counter_map SEC(".maps");
 
@@ -88,39 +97,47 @@ int xdp_counter(struct xdp_md *ctx)
         return XDP_PASS;
 
     // Check if packet matches any configured destination port (manually unrolled)
-    int port_matched = 0;
-    __u32 key;
+    // Capture the matched port in host byte order for use as map key
+    __u16 matched_port = 0;
+    __u32 cfg_key;
     __u16 *port_cfg;
 
-    key = 0; port_cfg = bpf_map_lookup_elem(&config_map, &key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+    cfg_key = 0; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
 
-    key = 1; port_cfg = bpf_map_lookup_elem(&config_map, &key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+    cfg_key = 1; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
 
-    key = 2; port_cfg = bpf_map_lookup_elem(&config_map, &key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+    cfg_key = 2; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
 
-    key = 3; port_cfg = bpf_map_lookup_elem(&config_map, &key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+    cfg_key = 3; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
 
-    key = 4; port_cfg = bpf_map_lookup_elem(&config_map, &key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+    cfg_key = 4; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
 
-    key = 5; port_cfg = bpf_map_lookup_elem(&config_map, &key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+    cfg_key = 5; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
 
-    key = 6; port_cfg = bpf_map_lookup_elem(&config_map, &key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+    cfg_key = 6; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
 
-    key = 7; port_cfg = bpf_map_lookup_elem(&config_map, &key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) port_matched = 1;
+    cfg_key = 7; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
 
-    if (!port_matched)
+    if (matched_port == 0)
         return XDP_PASS;
 
     // Extract source IP (convert to host byte order for consistent key)
     __u32 src_ip = bpf_ntohl(ip->saddr);
+
+    // Build composite map key (src_ip + dst_port)
+    struct map_key mkey = {
+        .src_ip = src_ip,
+        .dst_port = matched_port,
+        ._pad = 0,
+    };
 
     // Calculate packet size (total Ethernet frame)
     __u64 pkt_len = data_end - data;
@@ -136,8 +153,8 @@ int xdp_counter(struct xdp_md *ctx)
     // Handshake ACK: ACK set, SYN not set, RST not set, no payload
     int is_handshake_ack = tcp->ack && !tcp->syn && !tcp->rst && (tcp_payload_len == 0);
 
-    // Look up or initialize counters for this source IP
-    struct counters *ctr = bpf_map_lookup_elem(&counter_map, &src_ip);
+    // Look up or initialize counters for this (src_ip, dst_port) pair
+    struct counters *ctr = bpf_map_lookup_elem(&counter_map, &mkey);
     if (ctr) {
         // Update existing counters
         __sync_fetch_and_add(&ctr->packets, 1);
@@ -163,7 +180,7 @@ int xdp_counter(struct xdp_md *ctx)
             ._pad = 0,
             .bytes = pkt_len,
         };
-        bpf_map_update_elem(&counter_map, &src_ip, &new_ctr, BPF_ANY);
+        bpf_map_update_elem(&counter_map, &mkey, &new_ctr, BPF_ANY);
     }
 
     // Always pass the packet - we never drop or redirect

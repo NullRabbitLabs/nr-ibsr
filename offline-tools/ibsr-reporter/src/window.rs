@@ -15,7 +15,7 @@ pub fn aggregate_snapshots(
 
     for snapshot in snapshots {
         for bucket in &snapshot.buckets {
-            let key = AggregatedKey::new(bucket.key_type, bucket.key_value);
+            let key = AggregatedKey::new(bucket.key_type, bucket.key_value, bucket.dst_port);
             let entry = aggregated.entry(key).or_default();
             entry.syn += bucket.syn as u64;
             entry.ack += bucket.ack as u64;
@@ -85,10 +85,11 @@ mod tests {
         Snapshot::new(ts, dst_ports, buckets)
     }
 
-    fn make_bucket(key_value: u32, syn: u32, ack: u32, handshake_ack: u32, packets: u32, bytes: u64) -> BucketEntry {
+    fn make_bucket(key_value: u32, dst_port: u16, syn: u32, ack: u32, handshake_ack: u32, packets: u32, bytes: u64) -> BucketEntry {
         BucketEntry {
             key_type: KeyType::SrcIp,
             key_value,
+            dst_port: Some(dst_port),
             syn,
             ack,
             handshake_ack,
@@ -112,13 +113,13 @@ mod tests {
     #[test]
     fn test_aggregate_single_snapshot_one_bucket() {
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 100, 50, 50, 150, 15000),
+            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
         ]);
 
         let result = aggregate_snapshots(&[&s], 10);
 
         assert_eq!(result.len(), 1);
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert_eq!(stats.total_syn, 100);
@@ -130,16 +131,16 @@ mod tests {
     #[test]
     fn test_aggregate_single_snapshot_multiple_buckets() {
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 100, 50, 50, 150, 15000),
-            make_bucket(0x0A000002, 200, 100, 100, 300, 30000),
+            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
+            make_bucket(0x0A000002, 8080, 200, 100, 100, 300, 30000),
         ]);
 
         let result = aggregate_snapshots(&[&s], 10);
 
         assert_eq!(result.len(), 2);
 
-        let key1 = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
-        let key2 = AggregatedKey::new(KeyType::SrcIp, 0x0A000002);
+        let key1 = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let key2 = AggregatedKey::new(KeyType::SrcIp, 0x0A000002, Some(8080));
 
         assert_eq!(result.get(&key1).unwrap().total_syn, 100);
         assert_eq!(result.get(&key2).unwrap().total_syn, 200);
@@ -152,15 +153,15 @@ mod tests {
     #[test]
     fn test_aggregate_multiple_snapshots_sums() {
         let s1 = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 100, 50, 50, 150, 15000),
+            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
         ]);
         let s2 = make_snapshot(1001, &[8080], vec![
-            make_bucket(0x0A000001, 200, 100, 100, 300, 30000),
+            make_bucket(0x0A000001, 8080, 200, 100, 100, 300, 30000),
         ]);
 
         let result = aggregate_snapshots(&[&s1, &s2], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
         let stats = result.get(&key).unwrap();
 
         // Summed across both snapshots
@@ -173,10 +174,10 @@ mod tests {
     #[test]
     fn test_aggregate_multiple_snapshots_different_keys() {
         let s1 = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 100, 50, 50, 150, 15000),
+            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
         ]);
         let s2 = make_snapshot(1001, &[8080], vec![
-            make_bucket(0x0A000002, 200, 100, 100, 300, 30000),
+            make_bucket(0x0A000002, 8080, 200, 100, 100, 300, 30000),
         ]);
 
         let result = aggregate_snapshots(&[&s1, &s2], 10);
@@ -187,13 +188,13 @@ mod tests {
 
     #[test]
     fn test_aggregate_three_snapshots() {
-        let s1 = make_snapshot(1000, &[8080], vec![make_bucket(1, 10, 5, 5, 15, 1500)]);
-        let s2 = make_snapshot(1001, &[8080], vec![make_bucket(1, 20, 10, 10, 30, 3000)]);
-        let s3 = make_snapshot(1002, &[8080], vec![make_bucket(1, 30, 15, 15, 45, 4500)]);
+        let s1 = make_snapshot(1000, &[8080], vec![make_bucket(1, 8080, 10, 5, 5, 15, 1500)]);
+        let s2 = make_snapshot(1001, &[8080], vec![make_bucket(1, 8080, 20, 10, 10, 30, 3000)]);
+        let s3 = make_snapshot(1002, &[8080], vec![make_bucket(1, 8080, 30, 15, 15, 45, 4500)]);
 
         let result = aggregate_snapshots(&[&s1, &s2, &s3], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 1);
+        let key = AggregatedKey::new(KeyType::SrcIp, 1, Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert_eq!(stats.total_syn, 60);
@@ -209,13 +210,13 @@ mod tests {
     #[test]
     fn test_syn_rate_calculation() {
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 100, 50, 50, 150, 15000),
+            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
         ]);
 
         // 100 SYNs over 10 seconds = 10 SYNs/sec
         let result = aggregate_snapshots(&[&s], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert!((stats.syn_rate - 10.0).abs() < 0.001);
@@ -224,13 +225,13 @@ mod tests {
     #[test]
     fn test_syn_rate_different_window() {
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 100, 50, 50, 150, 15000),
+            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
         ]);
 
         // 100 SYNs over 5 seconds = 20 SYNs/sec
         let result = aggregate_snapshots(&[&s], 5);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert!((stats.syn_rate - 20.0).abs() < 0.001);
@@ -239,13 +240,13 @@ mod tests {
     #[test]
     fn test_syn_rate_zero_window() {
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 100, 50, 50, 150, 15000),
+            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
         ]);
 
         // Zero window should give 0 rate (avoid div/0)
         let result = aggregate_snapshots(&[&s], 0);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert_eq!(stats.syn_rate, 0.0);
@@ -259,13 +260,13 @@ mod tests {
     fn test_success_ratio_calculation() {
         // success_ratio = handshake_ack / syn
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 100, 80, 50, 150, 15000),
+            make_bucket(0x0A000001, 8080, 100, 80, 50, 150, 15000),
         ]);
 
         // 50 handshake_ack / 100 SYNs = 0.5
         let result = aggregate_snapshots(&[&s], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert!((stats.success_ratio - 0.5).abs() < 0.001);
@@ -274,13 +275,13 @@ mod tests {
     #[test]
     fn test_success_ratio_perfect() {
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 100, 150, 100, 250, 25000),
+            make_bucket(0x0A000001, 8080, 100, 150, 100, 250, 25000),
         ]);
 
         // 100 handshake_ack / 100 SYNs = 1.0
         let result = aggregate_snapshots(&[&s], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert!((stats.success_ratio - 1.0).abs() < 0.001);
@@ -292,6 +293,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000001,
+                dst_port: Some(8080),
                 syn: 0,
                 ack: 50,
                 handshake_ack: 30,
@@ -304,7 +306,7 @@ mod tests {
         // 0 SYNs should give 0.0 ratio (avoid div/0)
         let result = aggregate_snapshots(&[&s], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert_eq!(stats.success_ratio, 0.0);
@@ -314,13 +316,13 @@ mod tests {
     fn test_success_ratio_low() {
         // SYN flood scenario: many SYNs, few handshake completions
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 1000, 500, 10, 1510, 151000),
+            make_bucket(0x0A000001, 8080, 1000, 500, 10, 1510, 151000),
         ]);
 
         // 10 handshake_ack / 1000 SYNs = 0.01
         let result = aggregate_snapshots(&[&s], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert!((stats.success_ratio - 0.01).abs() < 0.001);
@@ -333,6 +335,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000001,
+                dst_port: Some(8080),
                 syn: 100,
                 ack: 5000,        // Total ACKs (includes data ACKs from established connections)
                 handshake_ack: 95, // Only handshake completion ACKs (no payload)
@@ -346,7 +349,7 @@ mod tests {
         // 95 / 100 = 0.95
         let result = aggregate_snapshots(&[&s], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert!((stats.success_ratio - 0.95).abs() < 0.001);
@@ -360,12 +363,12 @@ mod tests {
     #[test]
     fn test_aggregate_deterministic() {
         let s1 = make_snapshot(1000, &[8080], vec![
-            make_bucket(2, 200, 100, 100, 300, 30000),
-            make_bucket(1, 100, 50, 50, 150, 15000),
+            make_bucket(2, 8080, 200, 100, 100, 300, 30000),
+            make_bucket(1, 8080, 100, 50, 50, 150, 15000),
         ]);
         let s2 = make_snapshot(1001, &[8080], vec![
-            make_bucket(1, 50, 25, 25, 75, 7500),
-            make_bucket(2, 100, 50, 50, 150, 15000),
+            make_bucket(1, 8080, 50, 25, 25, 75, 7500),
+            make_bucket(2, 8080, 100, 50, 50, 150, 15000),
         ]);
 
         let result1 = aggregate_snapshots(&[&s1, &s2], 10);
@@ -381,15 +384,15 @@ mod tests {
     #[test]
     fn test_sorted_aggregated_deterministic_order() {
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(3, 300, 150, 150, 450, 45000),
-            make_bucket(1, 100, 50, 50, 150, 15000),
-            make_bucket(2, 200, 100, 100, 300, 30000),
+            make_bucket(3, 8080, 300, 150, 150, 450, 45000),
+            make_bucket(1, 8080, 100, 50, 50, 150, 15000),
+            make_bucket(2, 8080, 200, 100, 100, 300, 30000),
         ]);
 
         let result = aggregate_snapshots(&[&s], 10);
         let sorted = sorted_aggregated(&result);
 
-        // Should be sorted by key (key_type, key_value)
+        // Should be sorted by key (key_type, key_value, dst_port)
         assert_eq!(sorted.len(), 3);
         assert_eq!(sorted[0].0.key_value, 1);
         assert_eq!(sorted[1].0.key_value, 2);
@@ -416,6 +419,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcCidr24,
                 key_value: 0x0A000000,
+                dst_port: None,
                 syn: 100,
                 ack: 50,
                 handshake_ack: 50,
@@ -427,7 +431,7 @@ mod tests {
 
         let result = aggregate_snapshots(&[&s], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcCidr24, 0x0A000000);
+        let key = AggregatedKey::new(KeyType::SrcCidr24, 0x0A000000, None);
         assert!(result.contains_key(&key));
     }
 
@@ -437,6 +441,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcIp,
                 key_value: 0x0A000001,
+                dst_port: Some(8080),
                 syn: 100,
                 ack: 50,
                 handshake_ack: 50,
@@ -447,6 +452,7 @@ mod tests {
             BucketEntry {
                 key_type: KeyType::SrcCidr24,
                 key_value: 0x0A000000,
+                dst_port: None,
                 syn: 200,
                 ack: 100,
                 handshake_ack: 100,
@@ -461,8 +467,8 @@ mod tests {
         // Both key types present and separate
         assert_eq!(result.len(), 2);
 
-        let ip_key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
-        let cidr_key = AggregatedKey::new(KeyType::SrcCidr24, 0x0A000000);
+        let ip_key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let cidr_key = AggregatedKey::new(KeyType::SrcCidr24, 0x0A000000, None);
 
         assert!(result.contains_key(&ip_key));
         assert!(result.contains_key(&cidr_key));

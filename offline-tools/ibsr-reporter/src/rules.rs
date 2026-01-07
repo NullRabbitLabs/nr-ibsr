@@ -174,8 +174,12 @@ mod tests {
     }
 
     fn make_offender(ip: u32, syn_rate: f64, key_type: KeyType) -> Offender {
+        let dst_port = match key_type {
+            KeyType::SrcIp => Some(8080),
+            KeyType::SrcCidr24 => None,
+        };
         Offender {
-            key: AggregatedKey::new(key_type, ip),
+            key: AggregatedKey::new(key_type, ip, dst_port),
             syn_rate,
             success_ratio: 0.05,
             would_block_packets: 100,

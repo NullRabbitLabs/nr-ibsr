@@ -3,25 +3,28 @@
 use ibsr_schema::KeyType;
 use serde::{Deserialize, Serialize};
 
-/// Aggregated key identifying a source.
+/// Aggregated key identifying a source with optional port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AggregatedKey {
     pub key_type: KeyType,
     pub key_value: u32,
+    /// Destination port (for per-port granularity).
+    pub dst_port: Option<u16>,
 }
 
 impl AggregatedKey {
     /// Create a new aggregated key.
-    pub fn new(key_type: KeyType, key_value: u32) -> Self {
-        Self { key_type, key_value }
+    pub fn new(key_type: KeyType, key_value: u32, dst_port: Option<u16>) -> Self {
+        Self { key_type, key_value, dst_port }
     }
 
-    /// Format key as human-readable string (IP or CIDR notation).
+    /// Format key as human-readable string (IP or CIDR notation, optionally with port).
     pub fn to_display_string(&self) -> String {
         let ip = std::net::Ipv4Addr::from(self.key_value);
-        match self.key_type {
-            KeyType::SrcIp => ip.to_string(),
-            KeyType::SrcCidr24 => format!("{}/24", ip),
+        match (self.key_type, self.dst_port) {
+            (KeyType::SrcIp, Some(port)) => format!("{}:{}", ip, port),
+            (KeyType::SrcIp, None) => ip.to_string(),
+            (KeyType::SrcCidr24, _) => format!("{}/24", ip),
         }
     }
 }
@@ -67,28 +70,35 @@ mod tests {
 
     #[test]
     fn test_aggregated_key_new() {
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001);
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(80));
         assert_eq!(key.key_type, KeyType::SrcIp);
         assert_eq!(key.key_value, 0x0A000001);
+        assert_eq!(key.dst_port, Some(80));
     }
 
     #[test]
-    fn test_aggregated_key_display_src_ip() {
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001); // 10.0.0.1
+    fn test_aggregated_key_display_src_ip_with_port() {
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080)); // 10.0.0.1:8080
+        assert_eq!(key.to_display_string(), "10.0.0.1:8080");
+    }
+
+    #[test]
+    fn test_aggregated_key_display_src_ip_without_port() {
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, None); // 10.0.0.1
         assert_eq!(key.to_display_string(), "10.0.0.1");
     }
 
     #[test]
     fn test_aggregated_key_display_cidr24() {
-        let key = AggregatedKey::new(KeyType::SrcCidr24, 0x0A000000); // 10.0.0.0
+        let key = AggregatedKey::new(KeyType::SrcCidr24, 0x0A000000, None); // 10.0.0.0
         assert_eq!(key.to_display_string(), "10.0.0.0/24");
     }
 
     #[test]
     fn test_aggregated_key_ordering() {
-        let key1 = AggregatedKey::new(KeyType::SrcIp, 100);
-        let key2 = AggregatedKey::new(KeyType::SrcIp, 200);
-        let key3 = AggregatedKey::new(KeyType::SrcCidr24, 100);
+        let key1 = AggregatedKey::new(KeyType::SrcIp, 100, Some(80));
+        let key2 = AggregatedKey::new(KeyType::SrcIp, 200, Some(80));
+        let key3 = AggregatedKey::new(KeyType::SrcCidr24, 100, None);
 
         // SrcIp < SrcCidr24 (enum ordering)
         assert!(key1 < key3);
@@ -100,14 +110,14 @@ mod tests {
     fn test_aggregated_key_hash_eq() {
         use std::collections::HashSet;
 
-        let key1 = AggregatedKey::new(KeyType::SrcIp, 100);
-        let key2 = AggregatedKey::new(KeyType::SrcIp, 100);
-        let key3 = AggregatedKey::new(KeyType::SrcIp, 200);
+        let key1 = AggregatedKey::new(KeyType::SrcIp, 100, Some(80));
+        let key2 = AggregatedKey::new(KeyType::SrcIp, 100, Some(80));
+        let key3 = AggregatedKey::new(KeyType::SrcIp, 100, Some(443)); // Different port
 
         let mut set = HashSet::new();
         set.insert(key1);
         assert!(set.contains(&key2));
-        assert!(!set.contains(&key3));
+        assert!(!set.contains(&key3)); // Different port = different key
     }
 
     // ===========================================
