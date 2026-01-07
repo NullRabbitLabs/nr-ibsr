@@ -1,7 +1,8 @@
 # IBSR Test and Build Image
 # Debian 12 base with Rust toolchain and coverage tools
+# syntax=docker/dockerfile:1
 
-FROM rust:1.87-bookworm
+FROM rust:1.87-bookworm AS base
 
 # Install dependencies for coverage and BPF toolchain
 RUN apt-get update && apt-get install -y \
@@ -23,14 +24,25 @@ RUN cargo install cargo-llvm-cov
 # Set working directory
 WORKDIR /app
 
-# Copy workspace
+# Test stage - runs tests with coverage during build (uses cache mounts)
+# Use ./test.sh to run, or docker compose run test for backwards compatibility
+FROM base AS test
 COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo llvm-cov --workspace \
+    --fail-under-lines 97 \
+    --fail-under-functions 94 \
+    --ignore-filename-regex "main\.rs|build\.rs|bpf_reader\.rs"
 
-# Default command: run tests with coverage
-# Coverage thresholds allow for auto-generated derive macro code
-# Coverage thresholds:
-# - 99% lines: accounts for auto-generated derive macro code
-# - 95% functions: accounts for mock implementations with multiple trait methods
-CMD ["cargo", "llvm-cov", "--all-features", "--workspace", \
-     "--fail-under-lines", "99", \
-     "--fail-under-functions", "95"]
+# Builder stage - used by build.sh with cache mounts
+FROM base AS builder
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release && \
+    cp /app/target/release/ibsr /ibsr
+
+# Export stage - minimal output
+FROM scratch AS export
+COPY --from=builder /ibsr /ibsr

@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use ibsr_bpf::{counters_to_snapshot, Counters, MapReader, MapReaderError};
+use ibsr_bpf::{counters_to_snapshot, MapReader, MapReaderError};
 use ibsr_clock::Clock;
 use ibsr_fs::{rotate_snapshots, Filesystem, FsError, RotationConfig, SnapshotWriter};
 use thiserror::Error;
@@ -91,7 +91,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ibsr_bpf::MockMapReader;
+    use ibsr_bpf::{Counters, MockMapReader};
     use ibsr_clock::MockClock;
     use ibsr_fs::{MockFilesystem, StandardSnapshotWriter};
     use std::path::PathBuf;
@@ -101,10 +101,16 @@ mod tests {
     // Integration Tests — Collector Loop
     // ===========================================
 
+    // Hour-boundary timestamps for tests (hourly file format)
+    const HOUR_0: u64 = 1704067200; // 2024-01-01 00:00:00 UTC
+    const HOUR_1: u64 = 1704070800; // 2024-01-01 01:00:00 UTC
+    const HOUR_2: u64 = 1704074400; // 2024-01-01 02:00:00 UTC
+    const HOUR_3: u64 = 1704078000; // 2024-01-01 03:00:00 UTC
+
     #[test]
     fn test_collect_once_empty_map() {
         let map_reader = MockMapReader::new();
-        let clock = MockClock::new(1000);
+        let clock = MockClock::new(HOUR_0);
         let fs = Arc::new(MockFilesystem::new());
         let output_dir = PathBuf::from("/tmp/snapshots");
         let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
@@ -117,13 +123,13 @@ mod tests {
             .expect("collect");
 
         assert_eq!(result.bucket_count, 0);
-        assert_eq!(result.timestamp, 1000);
+        assert_eq!(result.timestamp, HOUR_0);
         assert_eq!(result.rotated_count, 0);
 
         // Verify snapshot was written
         let files = fs.list_snapshots(&output_dir).expect("list");
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].timestamp, 1000);
+        assert_eq!(files[0].timestamp, HOUR_0);
     }
 
     #[test]
@@ -152,7 +158,7 @@ mod tests {
             },
         );
 
-        let clock = MockClock::new(2000);
+        let clock = MockClock::new(HOUR_1);
         let fs = Arc::new(MockFilesystem::new());
         let output_dir = PathBuf::from("/tmp/snapshots");
         let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
@@ -165,20 +171,20 @@ mod tests {
             .expect("collect");
 
         assert_eq!(result.bucket_count, 2);
-        assert_eq!(result.timestamp, 2000);
+        assert_eq!(result.timestamp, HOUR_1);
     }
 
     #[test]
     fn test_collect_once_triggers_rotation() {
         let map_reader = MockMapReader::new();
-        let clock = MockClock::new(5000);
+        let clock = MockClock::new(HOUR_3);
         let fs = Arc::new(MockFilesystem::new());
         let output_dir = PathBuf::from("/tmp/snapshots");
 
-        // Pre-populate with old snapshots that should be rotated
-        fs.add_file(output_dir.join("snapshot_1000.jsonl"), vec![]);
-        fs.add_file(output_dir.join("snapshot_2000.jsonl"), vec![]);
-        fs.add_file(output_dir.join("snapshot_3000.jsonl"), vec![]);
+        // Pre-populate with old snapshots that should be rotated (hourly format)
+        fs.add_file(output_dir.join("snapshot_2024010100.jsonl"), vec![]); // HOUR_0
+        fs.add_file(output_dir.join("snapshot_2024010101.jsonl"), vec![]); // HOUR_1
+        fs.add_file(output_dir.join("snapshot_2024010102.jsonl"), vec![]); // HOUR_2
 
         let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
         let config = CollectorConfig {
@@ -189,29 +195,29 @@ mod tests {
         let result = collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config)
             .expect("collect");
 
-        // Should have rotated 2 files (keeping newest 2: 3000 and 5000)
+        // Should have rotated 2 files (keeping newest 2: HOUR_2 and HOUR_3)
         assert_eq!(result.rotated_count, 2);
 
         let files = fs.list_snapshots(&output_dir).expect("list");
         assert_eq!(files.len(), 2);
-        assert_eq!(files[0].timestamp, 3000);
-        assert_eq!(files[1].timestamp, 5000);
+        assert_eq!(files[0].timestamp, HOUR_2);
+        assert_eq!(files[1].timestamp, HOUR_3);
     }
 
     #[test]
     fn test_collect_once_rotation_by_age() {
         let map_reader = MockMapReader::new();
-        let clock = MockClock::new(10000);
+        let clock = MockClock::new(HOUR_3);
         let fs = Arc::new(MockFilesystem::new());
         let output_dir = PathBuf::from("/tmp/snapshots");
 
-        // Add old snapshot that should be rotated by age
-        fs.add_file(output_dir.join("snapshot_1000.jsonl"), vec![]); // Age: 9000 sec
+        // Add old snapshot that should be rotated by age (HOUR_0 is 3 hours old)
+        fs.add_file(output_dir.join("snapshot_2024010100.jsonl"), vec![]);
 
         let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
         let config = CollectorConfig {
             dst_ports: vec![8899],
-            rotation: RotationConfig::new(100, 5000), // Max age 5000 sec
+            rotation: RotationConfig::new(100, 7200), // Max age 2 hours (7200 sec)
         };
 
         let result = collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config)
@@ -222,7 +228,7 @@ mod tests {
 
         let files = fs.list_snapshots(&output_dir).expect("list");
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].timestamp, 10000); // Only the new snapshot
+        assert_eq!(files[0].timestamp, HOUR_3); // Only the new snapshot
     }
 
     #[test]
@@ -235,39 +241,39 @@ mod tests {
             rotation: RotationConfig::new(100, 86400),
         };
 
-        // Cycle 1: timestamp 1000
-        let clock1 = MockClock::new(1000);
+        // Cycle 1: HOUR_0
+        let clock1 = MockClock::new(HOUR_0);
         let writer1 = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
         map_reader.add_counter(0x0A000001, Counters {
             syn: 10, ack: 20, handshake_ack: 10, rst: 0, packets: 30, bytes: 1000,
         });
         collect_once(&map_reader, &clock1, &writer1, &*fs, &output_dir, &config).expect("cycle 1");
 
-        // Cycle 2: timestamp 2000
-        let clock2 = MockClock::new(2000);
+        // Cycle 2: HOUR_1
+        let clock2 = MockClock::new(HOUR_1);
         let writer2 = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
         map_reader.add_counter(0x0A000002, Counters {
             syn: 5, ack: 10, handshake_ack: 5, rst: 1, packets: 16, bytes: 500,
         });
         collect_once(&map_reader, &clock2, &writer2, &*fs, &output_dir, &config).expect("cycle 2");
 
-        // Cycle 3: timestamp 3000
-        let clock3 = MockClock::new(3000);
+        // Cycle 3: HOUR_2
+        let clock3 = MockClock::new(HOUR_2);
         let writer3 = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
         collect_once(&map_reader, &clock3, &writer3, &*fs, &output_dir, &config).expect("cycle 3");
 
-        // Should have 3 snapshots
+        // Should have 3 snapshots (one per hour)
         let files = fs.list_snapshots(&output_dir).expect("list");
         assert_eq!(files.len(), 3);
-        assert_eq!(files[0].timestamp, 1000);
-        assert_eq!(files[1].timestamp, 2000);
-        assert_eq!(files[2].timestamp, 3000);
+        assert_eq!(files[0].timestamp, HOUR_0);
+        assert_eq!(files[1].timestamp, HOUR_1);
+        assert_eq!(files[2].timestamp, HOUR_2);
     }
 
     #[test]
     fn test_collect_preserves_dst_ports() {
         let map_reader = MockMapReader::new();
-        let clock = MockClock::new(1000);
+        let clock = MockClock::new(HOUR_0);
         let fs = Arc::new(MockFilesystem::new());
         let output_dir = PathBuf::from("/tmp/snapshots");
         let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
@@ -279,7 +285,7 @@ mod tests {
         collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config).expect("collect");
 
         // Read the snapshot and verify dst_ports (sorted)
-        let path = output_dir.join("snapshot_1000.jsonl");
+        let path = output_dir.join("snapshot_2024010100.jsonl");
         let content = fs.get_file(&path).expect("file exists");
         let json = String::from_utf8(content).expect("valid utf8");
 

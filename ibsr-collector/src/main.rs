@@ -4,6 +4,11 @@
 
 use std::process::ExitCode;
 
+/// Git commit hash captured at build time.
+const GIT_HASH: &str = env!("GIT_HASH");
+/// Build timestamp in ISO 8601 format.
+const BUILD_TIME: &str = env!("BUILD_TIME");
+
 use clap::Parser;
 use ibsr_clock::SystemClock;
 use ibsr_collector::exit::{codes, exit_code};
@@ -38,6 +43,14 @@ fn run_collect(
     let ports = args.get_all_ports();
     let interface = args.iface.as_deref().unwrap_or("eth0");
     let logger = StderrLogger::new(Verbosity::from_count(args.verbose));
+
+    // Print version info with -vv
+    logger.debug(&format!(
+        "ibsr {} ({} built {})",
+        env!("CARGO_PKG_VERSION"),
+        GIT_HASH,
+        BUILD_TIME
+    ));
 
     let map_reader = ibsr_bpf::BpfMapReader::new(interface, &ports, args.map_size)?;
 

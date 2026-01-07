@@ -46,19 +46,27 @@ esac
 
 echo "Building IBSR for $ARCH ($PLATFORM)..."
 
-# Build the image with all source files (no-cache to pick up code changes)
-docker build --no-cache --platform "$PLATFORM" -t ibsr-build .
-
-# Run cargo build inside container (no volume mount to avoid target dir conflicts)
-CONTAINER_ID=$(docker create --platform "$PLATFORM" ibsr-build cargo build --release)
-docker start -a "$CONTAINER_ID"
-
-# Extract the binary from the container
+# Create dist directory
 mkdir -p dist
-docker cp "$CONTAINER_ID:/app/target/release/ibsr" "./dist/ibsr-$ARCH"
 
-# Clean up the container
-docker rm "$CONTAINER_ID" > /dev/null
+# Build using BuildKit with cache mounts for cargo registry and target
+# - Base image (toolchain) is cached
+# - Cargo registry is cached between builds
+# - Target directory is cached for incremental compilation
+# - Source code is always fresh (COPY happens after cache setup)
+DOCKER_BUILDKIT=1 docker build \
+    --platform "$PLATFORM" \
+    --target export \
+    --output "type=local,dest=./dist" \
+    -t ibsr-build .
+
+# Rename the output binary
+mv "./dist/ibsr" "./dist/ibsr-$ARCH"
+
+# Get build info (same values embedded in binary)
+GIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 echo ""
 echo "Build complete: ./dist/ibsr-$ARCH"
+echo "Build: $GIT_HASH ($BUILD_TIME)"
