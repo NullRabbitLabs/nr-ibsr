@@ -71,7 +71,7 @@ Optional:
   --max-age <SECS>        Max age of snapshots in seconds (default: 86400)
   --map-size <N>          BPF LRU map size (default: 100000)
   -v, --verbose           Increase verbosity (-v, -vv)
-  --report-interval-sec   Status report interval (default: 60)
+  --status-interval-sec   Interval for status.jsonl updates (default: 60)
 
 Outputs:
   snapshot_<timestamp>.jsonl   Per-cycle traffic snapshot

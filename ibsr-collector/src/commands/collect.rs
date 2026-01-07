@@ -74,11 +74,11 @@ where
     // Log startup configuration at verbose level
     let ports = args.get_all_ports();
     logger.verbose(&format!(
-        "Starting collector: ports={:?}, out_dir={}, snapshot_interval={}s, report_interval={}s",
+        "Starting collector: ports={:?}, out_dir={}, snapshot_interval={}s, status_interval={}s",
         ports,
         run_dir.display(),
         args.snapshot_interval_sec,
-        args.report_interval_sec
+        args.status_interval_sec
     ));
 
     // Build collector config
@@ -105,7 +105,7 @@ where
         &config,
         args.duration_sec,
         args.snapshot_interval_sec,
-        args.report_interval_sec,
+        args.status_interval_sec,
         sleeper,
         shutdown,
         logger,
@@ -132,7 +132,7 @@ fn run_collection_loop<M, C, F, W, S, H, L>(
     config: &CollectorConfig,
     duration_sec: Option<u64>,
     snapshot_interval_sec: u64,
-    report_interval_sec: u64,
+    status_interval_sec: u64,
     sleeper: &S,
     shutdown: &H,
     logger: &L,
@@ -155,7 +155,7 @@ where
     let start_ts = clock.now_unix_sec();
     let end_ts = duration_sec.map(|d| start_ts + d);
     let mut last_snapshot_ts = start_ts;
-    let mut last_report_ts = start_ts;
+    let mut last_status_ts = start_ts;
 
     loop {
         // Check if shutdown was requested
@@ -189,13 +189,13 @@ where
             let _ = status_writer.append(&status);
         }
 
-        // Log periodic status to stdout based on report_interval_sec
-        if current_ts >= last_report_ts + report_interval_sec {
+        // Log periodic status to stdout based on status_interval_sec
+        if current_ts >= last_status_ts + status_interval_sec {
             logger.info(&format!(
                 "cycle={} interval_ips={} total_ips={} snapshots={} snapshot_interval={}s",
                 cycles, interval_ips, total_ips, snapshots_written, snapshot_interval_sec
             ));
-            last_report_ts = current_ts;
+            last_status_ts = current_ts;
         }
 
         // Check if duration has expired
@@ -253,7 +253,7 @@ mod tests {
             max_age: 86400,
             map_size: 100000,
             verbose: 0,
-            report_interval_sec: 60,
+            status_interval_sec: 60,
             snapshot_interval_sec: 1, // Write snapshot immediately for test
         };
 
@@ -308,7 +308,7 @@ mod tests {
             max_age: 86400,
             map_size: 100000,
             verbose: 0,
-            report_interval_sec: 60,
+            status_interval_sec: 60,
             snapshot_interval_sec: 1,
         };
 
@@ -343,7 +343,7 @@ mod tests {
             max_age: 86400,
             map_size: 100000,
             verbose: 0,
-            report_interval_sec: 60,
+            status_interval_sec: 60,
             snapshot_interval_sec: 1,
         };
 
@@ -373,7 +373,7 @@ mod tests {
             max_age: 86400,
             map_size: 100000,
             verbose: 0,
-            report_interval_sec: 60,
+            status_interval_sec: 60,
             snapshot_interval_sec: 1,
         };
 
@@ -400,7 +400,7 @@ mod tests {
             max_age: 86400,
             map_size: 100000,
             verbose: 0,
-            report_interval_sec: 60,
+            status_interval_sec: 60,
             snapshot_interval_sec: 1,
         };
 
@@ -432,7 +432,7 @@ mod tests {
             max_age: 86400,
             map_size: 100000,
             verbose: 0,
-            report_interval_sec: 60,
+            status_interval_sec: 60,
             snapshot_interval_sec: 1,
         };
 
@@ -479,7 +479,7 @@ mod tests {
             max_age: 86400,
             map_size: 100000,
             verbose: 0,
-            report_interval_sec: 60,
+            status_interval_sec: 60,
             snapshot_interval_sec: 1,
         };
 
@@ -521,7 +521,7 @@ mod tests {
             max_age: 86400,
             map_size: 100000,
             verbose: 0,
-            report_interval_sec: 60,
+            status_interval_sec: 60,
             snapshot_interval_sec: 1,
         };
 
@@ -556,7 +556,7 @@ mod tests {
             max_age: 86400,
             map_size: 100000,
             verbose: 0,
-            report_interval_sec: 60,
+            status_interval_sec: 60,
             snapshot_interval_sec: 1,
         };
 
@@ -606,7 +606,7 @@ mod tests {
             max_age: 86400,
             map_size: 100000,
             verbose: 0,
-            report_interval_sec: 60,
+            status_interval_sec: 60,
             snapshot_interval_sec: 1,
         };
 
@@ -676,7 +676,7 @@ mod tests {
             max_age: 86400,
             map_size: 100000,
             verbose: 0,
-            report_interval_sec: 60,
+            status_interval_sec: 60,
             snapshot_interval_sec: 1,
         };
 

@@ -67,8 +67,8 @@ pub enum Command {
     Collect(CollectArgs),
 }
 
-/// Default report interval in seconds.
-pub const DEFAULT_REPORT_INTERVAL_SEC: u64 = 60;
+/// Default status interval in seconds (for status.jsonl updates).
+pub const DEFAULT_STATUS_INTERVAL_SEC: u64 = 60;
 
 /// Default snapshot interval in seconds.
 pub const DEFAULT_SNAPSHOT_INTERVAL_SEC: u64 = 60;
@@ -115,9 +115,9 @@ pub struct CollectArgs {
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     pub verbose: u8,
 
-    /// Interval for status reports in seconds.
-    #[arg(long, default_value_t = DEFAULT_REPORT_INTERVAL_SEC)]
-    pub report_interval_sec: u64,
+    /// Interval for status.jsonl updates in seconds.
+    #[arg(long, default_value_t = DEFAULT_STATUS_INTERVAL_SEC)]
+    pub status_interval_sec: u64,
 
     /// Interval for writing snapshots to disk in seconds.
     /// Internal counter reads still happen every second; this controls file emission.
@@ -799,22 +799,22 @@ eth0 00000000 0102A8C0";
     }
 
     #[test]
-    fn test_collect_report_interval_default() {
+    fn test_collect_status_interval_default() {
         let cli = parse_from(["ibsr", "collect", "-p", "8899"]).expect("parse");
         match cli.command {
             Command::Collect(args) => {
-                assert_eq!(args.report_interval_sec, 60);
+                assert_eq!(args.status_interval_sec, 60);
             }
         }
     }
 
     #[test]
-    fn test_collect_report_interval_custom() {
-        let cli = parse_from(["ibsr", "collect", "-p", "8899", "--report-interval-sec", "30"])
+    fn test_collect_status_interval_custom() {
+        let cli = parse_from(["ibsr", "collect", "-p", "8899", "--status-interval-sec", "30"])
             .expect("parse");
         match cli.command {
             Command::Collect(args) => {
-                assert_eq!(args.report_interval_sec, 30);
+                assert_eq!(args.status_interval_sec, 30);
             }
         }
     }

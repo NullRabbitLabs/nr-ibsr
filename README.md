@@ -96,7 +96,7 @@ ibsr collect -p 8899 --iface eth0
 | `--max-files` | Maximum snapshot files to retain | 3600 |
 | `--max-age` | Maximum snapshot age in seconds | 86400 |
 | `--map-size` | BPF LRU map size (max source IPs) | 100000 |
-| `--report-interval-sec` | Status heartbeat interval | 60 |
+| `--status-interval-sec` | Interval for status.jsonl updates | 60 |
 | `-v`, `--verbose` | Increase verbosity (-v, -vv) | Quiet |
 
 ## Snapshot Format
@@ -104,14 +104,14 @@ ibsr collect -p 8899 --iface eth0
 Snapshots are written as JSONL (one JSON object per line) in hourly files named `snapshot_YYYYMMDDHH.jsonl`:
 
 ```json
-{"version":2,"ts_unix_sec":1704067200,"dst_ports":[22,80,443],"buckets":[{"key_type":"src_ip","key_value":167772161,"syn":100,"ack":200,"handshake_ack":95,"rst":5,"packets":305,"bytes":45000}]}
+{"version":3,"ts_unix_sec":1704067200,"dst_ports":[22,80,443],"buckets":[{"key_type":"src_ip","key_value":167772161,"dst_port":22,"syn":100,"ack":200,"handshake_ack":95,"rst":5,"packets":305,"bytes":45000}]}
 ```
 
-### Schema (v2)
+### Schema (v3)
 
 ```rust
 Snapshot {
-    version: u32,           // Schema version (currently 2)
+    version: u32,           // Schema version (currently 3)
     ts_unix_sec: u64,       // Unix timestamp
     dst_ports: Vec<u16>,    // Monitored ports
     buckets: Vec<BucketEntry>,
@@ -120,6 +120,7 @@ Snapshot {
 BucketEntry {
     key_type: KeyType,      // "src_ip"
     key_value: u32,         // IPv4 address as u32
+    dst_port: Option<u16>,  // Destination port this bucket tracks
     syn: u32,               // SYN packets
     ack: u32,               // ACK packets
     handshake_ack: u32,     // ACKs completing handshake (no payload)
@@ -129,7 +130,7 @@ BucketEntry {
 }
 ```
 
-Buckets are deterministically ordered by `(key_type, key_value)` for stable diffs and testing.
+Buckets are deterministically ordered by `(key_type, key_value, dst_port)` for stable diffs and testing.
 
 ## Status File
 
