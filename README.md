@@ -187,11 +187,50 @@ trait SnapshotWriter { fn write(&self, snapshot: &Snapshot) -> Result<PathBuf>; 
 trait Filesystem { fn write_atomic(&self, path, data); fn list(&self); fn remove(&self); }
 ```
 
-## Offline Parsing
+## Offline Analysis
 
-Snapshots can be parsed offline using the `offline-tools/ibsr-reporter` crate or any JSON parser.
+### Generating Reports with ibsr-report
 
-### Using ibsr-reporter (Rust)
+The `ibsr-report` CLI generates IBSR reports from collector output:
+
+```bash
+# Build the reporter (from offline-tools directory)
+cd offline-tools && cargo build --release
+
+# Generate report from collector output
+./target/release/ibsr-report \
+  --in ../output/ibsr-20260107-201845Z \
+  --out ./reports/run1 \
+  --dst-ports 8899,8900
+```
+
+#### Generated Files
+
+| File | Description |
+|------|-------------|
+| `rules.json` | Candidate enforcement rules (XDP-safe format) |
+| `report.md` | Human-readable IBSR report with 5 sections |
+| `evidence.csv` | Per-source decision evidence for auditing |
+
+#### Command Reference
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--in`, `-i` | Input directory (collector output) | Required |
+| `--out`, `-o` | Output directory for reports | Required |
+| `--dst-ports` | Comma-separated destination ports | Required |
+| `--allowlist` | Path to allowlist file (IPs/CIDRs) | None |
+| `--window-sec` | Aggregation window size | 10 |
+| `--syn-rate-threshold` | SYN/sec threshold for blocking | 100.0 |
+| `--success-ratio-threshold` | ACK/SYN ratio threshold | 0.1 |
+| `--block-duration-sec` | Block duration in seconds | 300 |
+| `-v`, `--verbose` | Show warnings during parsing | Quiet |
+
+### Parsing Snapshots
+
+Snapshots can be parsed using the `offline-tools/ibsr-reporter` crate or any JSON parser.
+
+#### Using ibsr-reporter (Rust)
 
 ```rust
 use ibsr_reporter::ingest::{load_snapshots_from_dir, parse_snapshot};

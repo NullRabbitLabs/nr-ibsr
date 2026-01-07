@@ -11,6 +11,11 @@ ibsr-clock = { path = "../../ibsr-clock" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+clap = { version = "4.5", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[[bin]]
+name = "ibsr-report"
+path = "src/bin/report.rs"
