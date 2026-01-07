@@ -122,7 +122,7 @@ impl MapReader for BpfMapReader {
             let key_bytes: [u8; 8] = key
                 .try_into()
                 .map_err(|_| MapReaderError::ReadError("invalid key size".to_string()))?;
-            let src_ip = u32::from_ne_bytes(key_bytes[0..4].try_into().unwrap());
+            let src_ip = u32::from_be_bytes(key_bytes[0..4].try_into().unwrap());
             let dst_port = u16::from_ne_bytes(key_bytes[4..6].try_into().unwrap());
             let map_key = MapKey { src_ip, dst_port };
 
