@@ -19,9 +19,9 @@ impl AggregatedKey {
     }
 
     /// Format key as human-readable string (IP or CIDR notation, optionally with port).
-    /// key_value is in host byte order, convert to network for Ipv4Addr.
+    /// key_value uses MSB=first-octet representation (same as Ipv4Addr).
     pub fn to_display_string(&self) -> String {
-        let ip = std::net::Ipv4Addr::from(self.key_value.to_be());
+        let ip = std::net::Ipv4Addr::from(self.key_value);
         match (self.key_type, self.dst_port) {
             (KeyType::SrcIp, Some(port)) => format!("{}:{}", ip, port),
             (KeyType::SrcIp, None) => ip.to_string(),
@@ -71,6 +71,7 @@ mod tests {
 
     #[test]
     fn test_aggregated_key_new() {
+        // key_value uses MSB=first-octet representation (0x0A000001 = 10.0.0.1)
         let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(80));
         assert_eq!(key.key_type, KeyType::SrcIp);
         assert_eq!(key.key_value, 0x0A000001);
@@ -79,19 +80,22 @@ mod tests {
 
     #[test]
     fn test_aggregated_key_display_src_ip_with_port() {
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080)); // 10.0.0.1:8080
+        // 0x0A000001 = 10.0.0.1
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
         assert_eq!(key.to_display_string(), "10.0.0.1:8080");
     }
 
     #[test]
     fn test_aggregated_key_display_src_ip_without_port() {
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, None); // 10.0.0.1
+        // 0x0A000001 = 10.0.0.1
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, None);
         assert_eq!(key.to_display_string(), "10.0.0.1");
     }
 
     #[test]
     fn test_aggregated_key_display_cidr24() {
-        let key = AggregatedKey::new(KeyType::SrcCidr24, 0x0A000000, None); // 10.0.0.0
+        // 0x0A000000 = 10.0.0.0
+        let key = AggregatedKey::new(KeyType::SrcCidr24, 0x0A000000, None);
         assert_eq!(key.to_display_string(), "10.0.0.0/24");
     }
 

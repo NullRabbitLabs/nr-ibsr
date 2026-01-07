@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn test_trigger_fires_both_conditions_met() {
         let config = make_config();
-        let key = make_key(0x0A000001);
+        let key = make_key(u32::from_be(0x0A000001));
         // syn_rate = 150 >= 100, success_ratio = 0.05 <= 0.1
         let stats = make_stats(150.0, 0.05);
 
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn test_trigger_fires_exact_thresholds() {
         let config = make_config();
-        let key = make_key(0x0A000001);
+        let key = make_key(u32::from_be(0x0A000001));
         // syn_rate = 100 (exactly threshold), success_ratio = 0.1 (exactly threshold)
         let stats = make_stats(100.0, 0.1);
 
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn test_no_trigger_syn_rate_below() {
         let config = make_config();
-        let key = make_key(0x0A000001);
+        let key = make_key(u32::from_be(0x0A000001));
         // syn_rate = 50 < 100, success_ratio = 0.05 <= 0.1
         let stats = make_stats(50.0, 0.05);
 
@@ -165,7 +165,7 @@ mod tests {
     #[test]
     fn test_no_trigger_syn_rate_just_below() {
         let config = make_config();
-        let key = make_key(0x0A000001);
+        let key = make_key(u32::from_be(0x0A000001));
         // syn_rate = 99.9 < 100
         let stats = make_stats(99.9, 0.05);
 
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn test_no_trigger_success_ratio_above() {
         let config = make_config();
-        let key = make_key(0x0A000001);
+        let key = make_key(u32::from_be(0x0A000001));
         // syn_rate = 150 >= 100, success_ratio = 0.5 > 0.1
         let stats = make_stats(150.0, 0.5);
 
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn test_no_trigger_success_ratio_just_above() {
         let config = make_config();
-        let key = make_key(0x0A000001);
+        let key = make_key(u32::from_be(0x0A000001));
         // syn_rate = 150, success_ratio = 0.11 > 0.1
         let stats = make_stats(150.0, 0.11);
 
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn test_no_trigger_neither_condition() {
         let config = make_config();
-        let key = make_key(0x0A000001);
+        let key = make_key(u32::from_be(0x0A000001));
         // syn_rate = 50 < 100, success_ratio = 0.5 > 0.1
         let stats = make_stats(50.0, 0.5);
 
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn test_block_duration() {
         let config = make_config();
-        let key = make_key(0x0A000001);
+        let key = make_key(u32::from_be(0x0A000001));
         let stats = make_stats(150.0, 0.05);
 
         let result = evaluate_key(key, stats, &config, 1000);
@@ -245,7 +245,7 @@ mod tests {
             .with_success_ratio_threshold(0.1)
             .with_block_duration_sec(600);
 
-        let key = make_key(0x0A000001);
+        let key = make_key(u32::from_be(0x0A000001));
         let stats = make_stats(150.0, 0.05);
 
         let result = evaluate_key(key, stats, &config, 2000);
@@ -264,14 +264,14 @@ mod tests {
     #[test]
     fn test_allowlist_ip_always_allow() {
         let mut allowlist = Allowlist::empty();
-        allowlist.add_ip(0x0A000001);
+        allowlist.add_ip(0x0A000001); // 10.0.0.1
 
         let config = ReporterConfig::new(vec![8080])
             .with_syn_rate_threshold(100.0)
             .with_success_ratio_threshold(0.1)
             .with_allowlist(allowlist);
 
-        let key = make_key(0x0A000001);
+        let key = make_key(0x0A000001); // 10.0.0.1
         // Would trigger without allowlist
         let stats = make_stats(150.0, 0.05);
 
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn test_allowlist_ip_non_matching_still_blocks() {
         let mut allowlist = Allowlist::empty();
-        allowlist.add_ip(0x0A000001);
+        allowlist.add_ip(0x0A000001); // 10.0.0.1
 
         let config = ReporterConfig::new(vec![8080])
             .with_syn_rate_threshold(100.0)
@@ -292,7 +292,7 @@ mod tests {
             .with_allowlist(allowlist);
 
         // Different IP
-        let key = make_key(0x0A000002);
+        let key = make_key(0x0A000002); // 10.0.0.2
         let stats = make_stats(150.0, 0.05);
 
         let result = evaluate_key(key, stats, &config, 1000);
@@ -316,7 +316,7 @@ mod tests {
             .with_allowlist(allowlist);
 
         // 10.0.0.1 is in 10.0.0.0/24
-        let key = make_key(0x0A000001);
+        let key = make_key(0x0A000001); // 10.0.0.1
         let stats = make_stats(150.0, 0.05);
 
         let result = evaluate_key(key, stats, &config, 1000);
@@ -336,7 +336,7 @@ mod tests {
             .with_allowlist(allowlist);
 
         // 10.0.1.1 is NOT in 10.0.0.0/24
-        let key = make_key(0x0A000101);
+        let key = make_key(0x0A000101); // 10.0.1.1
         let stats = make_stats(150.0, 0.05);
 
         let result = evaluate_key(key, stats, &config, 1000);
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn test_non_allowlisted_keys_filter() {
         let mut allowlist = Allowlist::empty();
-        allowlist.add_ip(0x0A000001);
+        allowlist.add_ip(0x0A000001); // 10.0.0.1
 
         let config = ReporterConfig::new(vec![8080])
             .with_syn_rate_threshold(100.0)
@@ -399,7 +399,7 @@ mod tests {
     fn test_empty_allowlist_no_bypasses() {
         let config = make_config(); // empty allowlist by default
 
-        let key = make_key(0x0A000001);
+        let key = make_key(u32::from_be(0x0A000001));
         let stats = make_stats(150.0, 0.05);
 
         let result = evaluate_key(key, stats, &config, 1000);
@@ -417,8 +417,8 @@ mod tests {
         let config = make_config();
 
         let entries = vec![
-            (make_key(0x0A000001), make_stats(150.0, 0.05)), // blocked
-            (make_key(0x0A000002), make_stats(50.0, 0.5)),   // allowed
+            (make_key(u32::from_be(0x0A000001)), make_stats(150.0, 0.05)), // blocked
+            (make_key(u32::from_be(0x0A000002)), make_stats(50.0, 0.5)),   // allowed
         ];
 
         let decisions = evaluate_all(&entries, &config, 1000);

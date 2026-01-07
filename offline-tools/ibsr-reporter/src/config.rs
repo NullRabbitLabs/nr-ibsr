@@ -129,13 +129,15 @@ impl Allowlist {
     }
 
     /// Parse and add an IP address from string.
+    /// Stores in network byte order internally; comparison converts from host order.
     pub fn add_ip_str(&mut self, ip_str: &str) -> Result<(), AllowlistError> {
         let ip: Ipv4Addr = ip_str.parse().map_err(|_| AllowlistError::InvalidIp(ip_str.to_string()))?;
-        self.ips.insert(u32::from(ip));
+        self.ips.insert(u32::from(ip)); // Network byte order
         Ok(())
     }
 
     /// Parse and add a CIDR from string (e.g., "10.0.0.0/24").
+    /// Stores in network byte order internally; comparison converts from host order.
     pub fn add_cidr_str(&mut self, cidr_str: &str) -> Result<(), AllowlistError> {
         let parts: Vec<&str> = cidr_str.split('/').collect();
         if parts.len() != 2 {
@@ -149,7 +151,7 @@ impl Allowlist {
             return Err(AllowlistError::InvalidCidr(cidr_str.to_string()));
         }
 
-        // Normalize network address (zero out host bits)
+        // Network byte order - mask works correctly with standard bit shifting
         let ip_u32 = u32::from(ip);
         let mask = if prefix_len == 0 { 0 } else { !0u32 << (32 - prefix_len) };
         let network = ip_u32 & mask;
@@ -159,6 +161,7 @@ impl Allowlist {
     }
 
     /// Check if an IP address is in the allowlist.
+    /// Input `ip` uses MSB=first-octet representation (same as snapshot key_value and Ipv4Addr).
     pub fn contains(&self, ip: u32) -> bool {
         // Check exact IP match
         if self.ips.contains(&ip) {
@@ -278,12 +281,13 @@ mod tests {
     #[test]
     fn test_allowlist_add_ip() {
         let mut allowlist = Allowlist::empty();
+        // All values use MSB=first-octet representation (0x0A000001 = 10.0.0.1)
         allowlist.add_ip(0x0A000001); // 10.0.0.1
 
         assert!(!allowlist.is_empty());
         assert_eq!(allowlist.ip_count(), 1);
-        assert!(allowlist.contains(0x0A000001));
-        assert!(!allowlist.contains(0x0A000002));
+        assert!(allowlist.contains(0x0A000001)); // 10.0.0.1
+        assert!(!allowlist.contains(0x0A000002)); // 10.0.0.2
     }
 
     #[test]
@@ -291,7 +295,7 @@ mod tests {
         let mut allowlist = Allowlist::empty();
         allowlist.add_ip_str("10.0.0.1").unwrap();
 
-        assert!(allowlist.contains(0x0A000001));
+        assert!(allowlist.contains(0x0A000001)); // 10.0.0.1
     }
 
     #[test]
@@ -304,15 +308,13 @@ mod tests {
     #[test]
     fn test_allowlist_add_cidr() {
         let mut allowlist = Allowlist::empty();
+        // All values use MSB=first-octet representation
         allowlist.add_cidr(0x0A000000, 24); // 10.0.0.0/24
 
         assert_eq!(allowlist.cidr_count(), 1);
-        // 10.0.0.1 should match
-        assert!(allowlist.contains(0x0A000001));
-        // 10.0.0.255 should match
-        assert!(allowlist.contains(0x0A0000FF));
-        // 10.0.1.0 should NOT match
-        assert!(!allowlist.contains(0x0A000100));
+        assert!(allowlist.contains(0x0A000001)); // 10.0.0.1 should match
+        assert!(allowlist.contains(0x0A0000FF)); // 10.0.0.255 should match
+        assert!(!allowlist.contains(0x0A000100)); // 10.0.1.0 should NOT match
     }
 
     #[test]
@@ -353,11 +355,11 @@ mod tests {
     fn test_allowlist_contains_ip_priority() {
         // IP match takes priority, but both should work
         let mut allowlist = Allowlist::empty();
-        allowlist.add_ip(0x0A000001);
-        allowlist.add_cidr(0x0A000000, 24);
+        allowlist.add_ip(0x0A000001); // 10.0.0.1
+        allowlist.add_cidr(0x0A000000, 24); // 10.0.0.0/24
 
-        assert!(allowlist.contains(0x0A000001));
-        assert!(allowlist.contains(0x0A000002));
+        assert!(allowlist.contains(0x0A000001)); // 10.0.0.1 - matches IP
+        assert!(allowlist.contains(0x0A000002)); // 10.0.0.2 - matches CIDR
     }
 
     #[test]
@@ -385,20 +387,21 @@ mod tests {
         allowlist.add_cidr_str("0.0.0.0/0").unwrap();
 
         // /0 matches everything
-        assert!(allowlist.contains(0x0A000001));
-        assert!(allowlist.contains(0xFFFFFFFF));
+        assert!(allowlist.contains(0x0A000001)); // 10.0.0.1
+        assert!(allowlist.contains(0xFFFFFFFF)); // 255.255.255.255
     }
 
     #[test]
     fn test_allowlist_new_constructor() {
+        // All values use MSB=first-octet representation
         let allowlist = Allowlist::new(
-            vec![0x0A000001, 0x0A000002],
-            vec![(0xC0A80000, 24)],
+            vec![0x0A000001, 0x0A000002], // 10.0.0.1, 10.0.0.2
+            vec![(0xC0A80000, 24)], // 192.168.0.0/24
         );
 
         assert_eq!(allowlist.ip_count(), 2);
         assert_eq!(allowlist.cidr_count(), 1);
-        assert!(allowlist.contains(0x0A000001));
+        assert!(allowlist.contains(0x0A000001)); // 10.0.0.1
         assert!(allowlist.contains(0xC0A80064)); // 192.168.0.100
     }
 }

@@ -254,8 +254,8 @@ mod tests {
             percent_bytes_blocked: 45.0,
             percent_syn_blocked: 60.0,
             top_offenders: vec![
-                make_offender(0x0A000001, 150.0),
-                make_offender(0x0A000002, 120.0),
+                make_offender(0x0A000001, 150.0), // 10.0.0.1
+                make_offender(0x0A000002, 120.0), // 10.0.0.2
             ],
             fp_bound: FpBound::Computed(2.5),
             total_packets: 1000,

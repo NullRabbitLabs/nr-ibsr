@@ -127,6 +127,7 @@ fn key_type_to_string(key_type: KeyType) -> String {
 }
 
 /// Convert key to display string.
+/// key_value uses MSB=first-octet representation (same as Ipv4Addr).
 fn key_to_string(key: &AggregatedKey) -> String {
     let ip = Ipv4Addr::from(key.key_value);
     match key.key_type {
@@ -352,9 +353,9 @@ mod tests {
     #[test]
     fn test_rules_exceptions_sorted() {
         let mut allowlist = Allowlist::empty();
-        allowlist.add_ip(0x0A000003);
-        allowlist.add_ip(0x0A000001);
-        allowlist.add_ip(0x0A000002);
+        allowlist.add_ip(0x0A000003); // 10.0.0.3
+        allowlist.add_ip(0x0A000001); // 10.0.0.1
+        allowlist.add_ip(0x0A000002); // 10.0.0.2
 
         let config = make_config().with_allowlist(allowlist);
         let rules = generate(&[], &config, 1000);

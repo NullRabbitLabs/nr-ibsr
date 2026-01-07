@@ -508,7 +508,7 @@ mod tests {
     fn test_offender_fields() {
         let config = make_config();
         let decisions = vec![
-            make_decision(0x0A000001, 150, 15000, 75, 120.0, 0.08, true, false),
+            make_decision(u32::from_be(0x0A000001), 150, 15000, 75, 120.0, 0.08, true, false),
         ];
 
         let result = compute(&decisions, &config);
@@ -516,7 +516,7 @@ mod tests {
         assert_eq!(result.top_offenders.len(), 1);
         let offender = &result.top_offenders[0];
 
-        assert_eq!(offender.key.key_value, 0x0A000001);
+        assert_eq!(offender.key.key_value, u32::from_be(0x0A000001));
         assert!((offender.syn_rate - 120.0).abs() < 0.001);
         assert!((offender.success_ratio - 0.08).abs() < 0.001);
         assert_eq!(offender.would_block_packets, 150);

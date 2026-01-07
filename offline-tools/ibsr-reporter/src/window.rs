@@ -171,13 +171,13 @@ mod tests {
     #[test]
     fn test_aggregate_single_snapshot_one_bucket() {
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
+            make_bucket(u32::from_be(0x0A000001), 8080, 100, 50, 50, 150, 15000),
         ]);
 
         let result = aggregate_snapshots(&[&s], 10);
 
         assert_eq!(result.len(), 1);
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let key = AggregatedKey::new(KeyType::SrcIp, u32::from_be(0x0A000001), Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert_eq!(stats.total_syn, 100);
@@ -189,16 +189,16 @@ mod tests {
     #[test]
     fn test_aggregate_single_snapshot_multiple_buckets() {
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
-            make_bucket(0x0A000002, 8080, 200, 100, 100, 300, 30000),
+            make_bucket(u32::from_be(0x0A000001), 8080, 100, 50, 50, 150, 15000),
+            make_bucket(u32::from_be(0x0A000002), 8080, 200, 100, 100, 300, 30000),
         ]);
 
         let result = aggregate_snapshots(&[&s], 10);
 
         assert_eq!(result.len(), 2);
 
-        let key1 = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
-        let key2 = AggregatedKey::new(KeyType::SrcIp, 0x0A000002, Some(8080));
+        let key1 = AggregatedKey::new(KeyType::SrcIp, u32::from_be(0x0A000001), Some(8080));
+        let key2 = AggregatedKey::new(KeyType::SrcIp, u32::from_be(0x0A000002), Some(8080));
 
         assert_eq!(result.get(&key1).unwrap().total_syn, 100);
         assert_eq!(result.get(&key2).unwrap().total_syn, 200);
@@ -212,15 +212,15 @@ mod tests {
     fn test_aggregate_multiple_snapshots_computes_deltas() {
         // BPF counters are cumulative: s2 has higher values than s1
         let s1 = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
+            make_bucket(u32::from_be(0x0A000001), 8080, 100, 50, 50, 150, 15000),
         ]);
         let s2 = make_snapshot(1001, &[8080], vec![
-            make_bucket(0x0A000001, 8080, 200, 100, 100, 300, 30000),
+            make_bucket(u32::from_be(0x0A000001), 8080, 200, 100, 100, 300, 30000),
         ]);
 
         let result = aggregate_snapshots(&[&s1, &s2], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let key = AggregatedKey::new(KeyType::SrcIp, u32::from_be(0x0A000001), Some(8080));
         let stats = result.get(&key).unwrap();
 
         // Delta computation: first snapshot uses raw (100), second computes delta (200-100=100)
@@ -234,10 +234,10 @@ mod tests {
     #[test]
     fn test_aggregate_multiple_snapshots_different_keys() {
         let s1 = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
+            make_bucket(u32::from_be(0x0A000001), 8080, 100, 50, 50, 150, 15000),
         ]);
         let s2 = make_snapshot(1001, &[8080], vec![
-            make_bucket(0x0A000002, 8080, 200, 100, 100, 300, 30000),
+            make_bucket(u32::from_be(0x0A000002), 8080, 200, 100, 100, 300, 30000),
         ]);
 
         let result = aggregate_snapshots(&[&s1, &s2], 10);
@@ -328,13 +328,13 @@ mod tests {
     #[test]
     fn test_syn_rate_calculation() {
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
+            make_bucket(u32::from_be(0x0A000001), 8080, 100, 50, 50, 150, 15000),
         ]);
 
         // 100 SYNs over 10 seconds = 10 SYNs/sec
         let result = aggregate_snapshots(&[&s], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let key = AggregatedKey::new(KeyType::SrcIp, u32::from_be(0x0A000001), Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert!((stats.syn_rate - 10.0).abs() < 0.001);
@@ -343,13 +343,13 @@ mod tests {
     #[test]
     fn test_syn_rate_different_window() {
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
+            make_bucket(u32::from_be(0x0A000001), 8080, 100, 50, 50, 150, 15000),
         ]);
 
         // 100 SYNs over 5 seconds = 20 SYNs/sec
         let result = aggregate_snapshots(&[&s], 5);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let key = AggregatedKey::new(KeyType::SrcIp, u32::from_be(0x0A000001), Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert!((stats.syn_rate - 20.0).abs() < 0.001);
@@ -358,13 +358,13 @@ mod tests {
     #[test]
     fn test_syn_rate_zero_window() {
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
+            make_bucket(u32::from_be(0x0A000001), 8080, 100, 50, 50, 150, 15000),
         ]);
 
         // Zero window should give 0 rate (avoid div/0)
         let result = aggregate_snapshots(&[&s], 0);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let key = AggregatedKey::new(KeyType::SrcIp, u32::from_be(0x0A000001), Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert_eq!(stats.syn_rate, 0.0);
@@ -378,13 +378,13 @@ mod tests {
     fn test_success_ratio_calculation() {
         // success_ratio = handshake_ack / syn
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 8080, 100, 80, 50, 150, 15000),
+            make_bucket(u32::from_be(0x0A000001), 8080, 100, 80, 50, 150, 15000),
         ]);
 
         // 50 handshake_ack / 100 SYNs = 0.5
         let result = aggregate_snapshots(&[&s], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let key = AggregatedKey::new(KeyType::SrcIp, u32::from_be(0x0A000001), Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert!((stats.success_ratio - 0.5).abs() < 0.001);
@@ -393,13 +393,13 @@ mod tests {
     #[test]
     fn test_success_ratio_perfect() {
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 8080, 100, 150, 100, 250, 25000),
+            make_bucket(u32::from_be(0x0A000001), 8080, 100, 150, 100, 250, 25000),
         ]);
 
         // 100 handshake_ack / 100 SYNs = 1.0
         let result = aggregate_snapshots(&[&s], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let key = AggregatedKey::new(KeyType::SrcIp, u32::from_be(0x0A000001), Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert!((stats.success_ratio - 1.0).abs() < 0.001);
@@ -410,7 +410,7 @@ mod tests {
         let s = make_snapshot(1000, &[8080], vec![
             BucketEntry {
                 key_type: KeyType::SrcIp,
-                key_value: 0x0A000001,
+                key_value: u32::from_be(0x0A000001),
                 dst_port: Some(8080),
                 syn: 0,
                 ack: 50,
@@ -424,7 +424,7 @@ mod tests {
         // 0 SYNs should give 0.0 ratio (avoid div/0)
         let result = aggregate_snapshots(&[&s], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let key = AggregatedKey::new(KeyType::SrcIp, u32::from_be(0x0A000001), Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert_eq!(stats.success_ratio, 0.0);
@@ -434,13 +434,13 @@ mod tests {
     fn test_success_ratio_low() {
         // SYN flood scenario: many SYNs, few handshake completions
         let s = make_snapshot(1000, &[8080], vec![
-            make_bucket(0x0A000001, 8080, 1000, 500, 10, 1510, 151000),
+            make_bucket(u32::from_be(0x0A000001), 8080, 1000, 500, 10, 1510, 151000),
         ]);
 
         // 10 handshake_ack / 1000 SYNs = 0.01
         let result = aggregate_snapshots(&[&s], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let key = AggregatedKey::new(KeyType::SrcIp, u32::from_be(0x0A000001), Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert!((stats.success_ratio - 0.01).abs() < 0.001);
@@ -452,7 +452,7 @@ mod tests {
         let s = make_snapshot(1000, &[8080], vec![
             BucketEntry {
                 key_type: KeyType::SrcIp,
-                key_value: 0x0A000001,
+                key_value: u32::from_be(0x0A000001),
                 dst_port: Some(8080),
                 syn: 100,
                 ack: 5000,        // Total ACKs (includes data ACKs from established connections)
@@ -467,7 +467,7 @@ mod tests {
         // 95 / 100 = 0.95
         let result = aggregate_snapshots(&[&s], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let key = AggregatedKey::new(KeyType::SrcIp, u32::from_be(0x0A000001), Some(8080));
         let stats = result.get(&key).unwrap();
 
         assert!((stats.success_ratio - 0.95).abs() < 0.001);
@@ -536,7 +536,7 @@ mod tests {
         let s = make_snapshot(1000, &[8080], vec![
             BucketEntry {
                 key_type: KeyType::SrcCidr24,
-                key_value: 0x0A000000,
+                key_value: u32::from_be(0x0A000000),
                 dst_port: None,
                 syn: 100,
                 ack: 50,
@@ -549,7 +549,7 @@ mod tests {
 
         let result = aggregate_snapshots(&[&s], 10);
 
-        let key = AggregatedKey::new(KeyType::SrcCidr24, 0x0A000000, None);
+        let key = AggregatedKey::new(KeyType::SrcCidr24, u32::from_be(0x0A000000), None);
         assert!(result.contains_key(&key));
     }
 
@@ -558,7 +558,7 @@ mod tests {
         let s = make_snapshot(1000, &[8080], vec![
             BucketEntry {
                 key_type: KeyType::SrcIp,
-                key_value: 0x0A000001,
+                key_value: u32::from_be(0x0A000001),
                 dst_port: Some(8080),
                 syn: 100,
                 ack: 50,
@@ -569,7 +569,7 @@ mod tests {
             },
             BucketEntry {
                 key_type: KeyType::SrcCidr24,
-                key_value: 0x0A000000,
+                key_value: u32::from_be(0x0A000000),
                 dst_port: None,
                 syn: 200,
                 ack: 100,
@@ -585,8 +585,8 @@ mod tests {
         // Both key types present and separate
         assert_eq!(result.len(), 2);
 
-        let ip_key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
-        let cidr_key = AggregatedKey::new(KeyType::SrcCidr24, 0x0A000000, None);
+        let ip_key = AggregatedKey::new(KeyType::SrcIp, u32::from_be(0x0A000001), Some(8080));
+        let cidr_key = AggregatedKey::new(KeyType::SrcCidr24, u32::from_be(0x0A000000), None);
 
         assert!(result.contains_key(&ip_key));
         assert!(result.contains_key(&cidr_key));

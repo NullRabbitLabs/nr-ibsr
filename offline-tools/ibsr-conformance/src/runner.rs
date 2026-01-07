@@ -259,6 +259,7 @@ mod tests {
             &[8080],
             vec![BucketEntry {
                 key_type: KeyType::SrcIp,
+                // key_value uses MSB=first-octet representation (0x0A000001 = 10.0.0.1)
                 key_value: 0x0A000001, // 10.0.0.1
                 dst_port: Some(8080),
                 syn: 5000,
@@ -277,6 +278,7 @@ mod tests {
             &[8080],
             vec![BucketEntry {
                 key_type: KeyType::SrcIp,
+                // key_value uses MSB=first-octet representation (0x0A000002 = 10.0.0.2)
                 key_value: 0x0A000002, // 10.0.0.2
                 dst_port: Some(8080),
                 syn: 100,
@@ -367,22 +369,25 @@ mod tests {
     #[test]
     fn test_parse_allowlist_single_ip() {
         let allowlist = parse_allowlist("10.0.0.1").unwrap();
+        // All values use MSB=first-octet representation (0x0A000001 = 10.0.0.1)
         assert!(allowlist.contains(0x0A000001));
     }
 
     #[test]
     fn test_parse_allowlist_cidr() {
         let allowlist = parse_allowlist("192.168.0.0/24").unwrap();
-        assert!(allowlist.contains(0xC0A80001)); // 192.168.0.1
+        // 192.168.0.1 = 0xC0A80001 should be in 192.168.0.0/24
+        assert!(allowlist.contains(0xC0A80001));
     }
 
     #[test]
     fn test_parse_allowlist_mixed() {
         let content = "10.0.0.1\n192.168.0.0/24\n# comment\n\n10.0.0.2";
         let allowlist = parse_allowlist(content).unwrap();
-        assert!(allowlist.contains(0x0A000001));
-        assert!(allowlist.contains(0x0A000002));
-        assert!(allowlist.contains(0xC0A80001));
+        // All values use MSB=first-octet representation
+        assert!(allowlist.contains(0x0A000001)); // 10.0.0.1
+        assert!(allowlist.contains(0x0A000002)); // 10.0.0.2
+        assert!(allowlist.contains(0xC0A80001)); // 192.168.0.1 in 192.168.0.0/24
     }
 
     #[test]
@@ -413,6 +418,7 @@ mod tests {
         use ibsr_reporter::types::AggregatedKey;
 
         let decisions = vec![KeyDecision {
+            // key_value uses MSB=first-octet representation (0x0A000001 = 10.0.0.1)
             key: AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080)),
             stats: AggregatedStats {
                 total_syn: 100,

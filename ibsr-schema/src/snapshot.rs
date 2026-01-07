@@ -175,10 +175,12 @@ impl<'de> Deserialize<'de> for BucketEntry {
 
                 let key_type = key_type.ok_or_else(|| de::Error::missing_field("key_type"))?;
                 let src_ip_str = src_ip.ok_or_else(|| de::Error::missing_field("src_ip"))?;
-                let key_value = src_ip_str
-                    .parse::<Ipv4Addr>()
-                    .map_err(|_| de::Error::custom(format!("invalid IP address: {}", src_ip_str)))?
-                    .into();
+                // Parse IP - u32::from(Ipv4Addr) uses MSB=first-octet representation
+                let key_value = u32::from(
+                    src_ip_str
+                        .parse::<Ipv4Addr>()
+                        .map_err(|_| de::Error::custom(format!("invalid IP address: {}", src_ip_str)))?,
+                );
                 let syn = syn.ok_or_else(|| de::Error::missing_field("syn"))?;
                 let ack = ack.ok_or_else(|| de::Error::missing_field("ack"))?;
                 let handshake_ack =
@@ -286,18 +288,17 @@ pub enum SnapshotError {
     InvalidIpAddress(String),
 }
 
-/// Convert a u32 IP address (host byte order) to dotted-decimal string.
-/// The u32 is in host byte order (as stored in BPF maps after ntohl conversion).
-/// We convert to network byte order for Ipv4Addr which expects big-endian.
+/// Convert a u32 IP address to dotted-decimal string.
+/// Uses MSB=first-octet representation (same as Ipv4Addr).
 pub fn ip_u32_to_string(ip: u32) -> String {
-    Ipv4Addr::from(ip.to_be()).to_string()
+    Ipv4Addr::from(ip).to_string()
 }
 
-/// Parse a dotted-decimal IP string to u32 in host byte order.
-/// Ipv4Addr parses to network byte order, so we convert to host byte order.
+/// Parse a dotted-decimal IP string to u32.
+/// Uses MSB=first-octet representation (same as Ipv4Addr).
 pub fn string_to_ip_u32(s: &str) -> Result<u32, SnapshotError> {
     s.parse::<Ipv4Addr>()
-        .map(|addr| u32::from(addr).to_be()) // Convert network→host byte order
+        .map(u32::from)
         .map_err(|_| SnapshotError::InvalidIpAddress(s.to_string()))
 }
 
@@ -697,24 +698,23 @@ mod tests {
 
     #[test]
     fn test_ip_u32_to_dotted_decimal() {
-        // u32 values are in HOST byte order (as stored in BPF maps after ntohl)
-        // Use u32::from_be() to convert network-order constants to host order
-        assert_eq!(ip_u32_to_string(u32::from_be(0x52_01_FE_7D)), "82.1.254.125");
-        assert_eq!(ip_u32_to_string(u32::from_be(0x0A_00_00_01)), "10.0.0.1");
-        assert_eq!(ip_u32_to_string(u32::from_be(0x0A_00_00_02)), "10.0.0.2");
-        assert_eq!(ip_u32_to_string(u32::from_be(0xC0_A8_01_01)), "192.168.1.1");
+        // u32 values use MSB=first-octet representation (0x0A000001 = 10.0.0.1)
+        assert_eq!(ip_u32_to_string(0x52_01_FE_7D), "82.1.254.125");
+        assert_eq!(ip_u32_to_string(0x0A_00_00_01), "10.0.0.1");
+        assert_eq!(ip_u32_to_string(0x0A_00_00_02), "10.0.0.2");
+        assert_eq!(ip_u32_to_string(0xC0_A8_01_01), "192.168.1.1");
 
-        // Edge cases (symmetric for 0 and MAX)
+        // Edge cases
         assert_eq!(ip_u32_to_string(0), "0.0.0.0");
         assert_eq!(ip_u32_to_string(u32::MAX), "255.255.255.255");
     }
 
     #[test]
     fn test_dotted_decimal_to_ip_u32() {
-        // string_to_ip_u32 returns HOST byte order
-        assert_eq!(string_to_ip_u32("82.1.254.125").unwrap(), u32::from_be(0x52_01_FE_7D));
-        assert_eq!(string_to_ip_u32("10.0.0.1").unwrap(), u32::from_be(0x0A_00_00_01));
-        assert_eq!(string_to_ip_u32("192.168.1.1").unwrap(), u32::from_be(0xC0_A8_01_01));
+        // string_to_ip_u32 returns MSB=first-octet representation
+        assert_eq!(string_to_ip_u32("82.1.254.125").unwrap(), 0x52_01_FE_7D);
+        assert_eq!(string_to_ip_u32("10.0.0.1").unwrap(), 0x0A_00_00_01);
+        assert_eq!(string_to_ip_u32("192.168.1.1").unwrap(), 0xC0_A8_01_01);
         assert_eq!(string_to_ip_u32("0.0.0.0").unwrap(), 0);
         assert_eq!(string_to_ip_u32("255.255.255.255").unwrap(), u32::MAX);
     }
@@ -746,7 +746,7 @@ mod tests {
     fn test_bucket_emits_src_ip_string_correctly() {
         let bucket = BucketEntry {
             key_type: KeyType::SrcIp,
-            key_value: 167772161, // 10.0.0.1
+            key_value: 0x0A000001, // 10.0.0.1
             dst_port: Some(8080),
             syn: 100,
             ack: 90,
@@ -767,7 +767,7 @@ mod tests {
     fn test_bucket_roundtrip_with_src_ip() {
         let original = BucketEntry {
             key_type: KeyType::SrcIp,
-            key_value: 1375862397, // 82.1.254.125
+            key_value: 0x5201FE7D, // 82.1.254.125
             dst_port: Some(22),
             syn: 50,
             ack: 45,
@@ -839,7 +839,7 @@ mod tests {
     fn test_snapshot_aggregation_in_output() {
         let bucket = BucketEntry {
             key_type: KeyType::SrcIp,
-            key_value: 167772162, // 10.0.0.2
+            key_value: 0x0A000002, // 10.0.0.2
             dst_port: Some(8080),
             syn: 100,
             ack: 90,
