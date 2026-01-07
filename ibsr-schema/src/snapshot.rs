@@ -286,17 +286,18 @@ pub enum SnapshotError {
     InvalidIpAddress(String),
 }
 
-/// Convert a u32 IP address to dotted-decimal string.
-/// The u32 is interpreted in host byte order (as stored in BPF maps after ntohl conversion).
+/// Convert a u32 IP address (host byte order) to dotted-decimal string.
+/// The u32 is in host byte order (as stored in BPF maps after ntohl conversion).
+/// We convert to network byte order for Ipv4Addr which expects big-endian.
 pub fn ip_u32_to_string(ip: u32) -> String {
-    Ipv4Addr::from(ip).to_string()
+    Ipv4Addr::from(ip.to_be()).to_string()
 }
 
-/// Parse a dotted-decimal IP string to u32.
-/// Returns the IP in host byte order.
+/// Parse a dotted-decimal IP string to u32 in host byte order.
+/// Ipv4Addr parses to network byte order, so we convert to host byte order.
 pub fn string_to_ip_u32(s: &str) -> Result<u32, SnapshotError> {
     s.parse::<Ipv4Addr>()
-        .map(|addr| addr.into())
+        .map(|addr| u32::from(addr).to_be()) // Convert network→host byte order
         .map_err(|_| SnapshotError::InvalidIpAddress(s.to_string()))
 }
 
@@ -696,37 +697,36 @@ mod tests {
 
     #[test]
     fn test_ip_u32_to_dotted_decimal() {
-        // User-specified test case
-        assert_eq!(ip_u32_to_string(1375862397), "82.1.254.125");
+        // u32 values are in HOST byte order (as stored in BPF maps after ntohl)
+        // Use u32::from_be() to convert network-order constants to host order
+        assert_eq!(ip_u32_to_string(u32::from_be(0x52_01_FE_7D)), "82.1.254.125");
+        assert_eq!(ip_u32_to_string(u32::from_be(0x0A_00_00_01)), "10.0.0.1");
+        assert_eq!(ip_u32_to_string(u32::from_be(0x0A_00_00_02)), "10.0.0.2");
+        assert_eq!(ip_u32_to_string(u32::from_be(0xC0_A8_01_01)), "192.168.1.1");
 
-        // Common test cases
-        assert_eq!(ip_u32_to_string(167772161), "10.0.0.1");
-        assert_eq!(ip_u32_to_string(167772162), "10.0.0.2");
-        assert_eq!(ip_u32_to_string(3232235777), "192.168.1.1");
-
-        // Edge cases
+        // Edge cases (symmetric for 0 and MAX)
         assert_eq!(ip_u32_to_string(0), "0.0.0.0");
         assert_eq!(ip_u32_to_string(u32::MAX), "255.255.255.255");
     }
 
     #[test]
     fn test_dotted_decimal_to_ip_u32() {
-        // Reverse conversion
-        assert_eq!(string_to_ip_u32("82.1.254.125").unwrap(), 1375862397);
-        assert_eq!(string_to_ip_u32("10.0.0.1").unwrap(), 167772161);
-        assert_eq!(string_to_ip_u32("192.168.1.1").unwrap(), 3232235777);
+        // string_to_ip_u32 returns HOST byte order
+        assert_eq!(string_to_ip_u32("82.1.254.125").unwrap(), u32::from_be(0x52_01_FE_7D));
+        assert_eq!(string_to_ip_u32("10.0.0.1").unwrap(), u32::from_be(0x0A_00_00_01));
+        assert_eq!(string_to_ip_u32("192.168.1.1").unwrap(), u32::from_be(0xC0_A8_01_01));
         assert_eq!(string_to_ip_u32("0.0.0.0").unwrap(), 0);
         assert_eq!(string_to_ip_u32("255.255.255.255").unwrap(), u32::MAX);
     }
 
     #[test]
     fn test_ip_roundtrip_conversion() {
-        // Roundtrip: u32 -> string -> u32
-        let test_values = [0u32, 1, 167772161, 1375862397, 3232235777, u32::MAX];
-        for &ip in &test_values {
-            let s = ip_u32_to_string(ip);
-            let back = string_to_ip_u32(&s).expect("parse back");
-            assert_eq!(ip, back, "roundtrip failed for {}", ip);
+        // Roundtrip: string -> u32 (host order) -> string
+        let test_ips = ["0.0.0.0", "10.0.0.1", "82.1.254.125", "192.168.1.1", "255.255.255.255"];
+        for &ip_str in &test_ips {
+            let host_order = string_to_ip_u32(ip_str).expect("parse");
+            let back = ip_u32_to_string(host_order);
+            assert_eq!(back, ip_str, "roundtrip failed for {}", ip_str);
         }
     }
 

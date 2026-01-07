@@ -19,8 +19,9 @@ impl AggregatedKey {
     }
 
     /// Format key as human-readable string (IP or CIDR notation, optionally with port).
+    /// key_value is in host byte order, convert to network for Ipv4Addr.
     pub fn to_display_string(&self) -> String {
-        let ip = std::net::Ipv4Addr::from(self.key_value);
+        let ip = std::net::Ipv4Addr::from(self.key_value.to_be());
         match (self.key_type, self.dst_port) {
             (KeyType::SrcIp, Some(port)) => format!("{}:{}", ip, port),
             (KeyType::SrcIp, None) => ip.to_string(),
