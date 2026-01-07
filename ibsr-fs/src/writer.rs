@@ -631,6 +631,7 @@ mod tests {
         let bucket = BucketEntry {
             key_type: KeyType::SrcIp,
             key_value: 0x0A000001,
+            dst_port: Some(8899),
             syn: 100,
             ack: 200,
             handshake_ack: 95,
@@ -965,6 +966,7 @@ mod tests {
         let bucket = BucketEntry {
             key_type: KeyType::SrcIp,
             key_value: 0x0A000001,
+            dst_port: Some(8899),
             syn: 100,
             ack: 200,
             handshake_ack: 95,

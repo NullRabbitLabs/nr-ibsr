@@ -224,7 +224,7 @@ mod tests {
     use crate::logger::NullLogger;
     use crate::signal::NeverShutdown;
     use crate::sleeper::MockSleeper;
-    use ibsr_bpf::{Counters, MockMapReader};
+    use ibsr_bpf::{Counters, MapKey, MockMapReader};
     use ibsr_clock::{AdvancingClock, MockClock};
     use ibsr_fs::MockFilesystem;
     use std::path::PathBuf;
@@ -271,7 +271,7 @@ mod tests {
     fn test_execute_collect_with_counters() {
         let mut map_reader = MockMapReader::new();
         map_reader.add_counter(
-            0x0A000001,
+            MapKey { src_ip: 0x0A000001, dst_port: 8899 },
             Counters {
                 syn: 100,
                 ack: 50,
@@ -282,7 +282,7 @@ mod tests {
             },
         );
         map_reader.add_counter(
-            0x0A000002,
+            MapKey { src_ip: 0x0A000002, dst_port: 8899 },
             Counters {
                 syn: 50,
                 ack: 25,
@@ -637,7 +637,7 @@ mod tests {
     fn test_execute_collect_status_tracks_ips() {
         let mut map_reader = MockMapReader::new();
         map_reader.add_counter(
-            0x0A000001,
+            MapKey { src_ip: 0x0A000001, dst_port: 8899 },
             Counters {
                 syn: 100,
                 ack: 50,
@@ -648,7 +648,7 @@ mod tests {
             },
         );
         map_reader.add_counter(
-            0x0A000002,
+            MapKey { src_ip: 0x0A000002, dst_port: 8899 },
             Counters {
                 syn: 50,
                 ack: 25,

@@ -91,7 +91,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ibsr_bpf::{Counters, MockMapReader};
+    use ibsr_bpf::{Counters, MapKey, MockMapReader};
     use ibsr_clock::MockClock;
     use ibsr_fs::{MockFilesystem, StandardSnapshotWriter};
     use std::path::PathBuf;
@@ -136,7 +136,7 @@ mod tests {
     fn test_collect_once_with_counters() {
         let mut map_reader = MockMapReader::new();
         map_reader.add_counter(
-            0x0A000001, // 10.0.0.1
+            MapKey { src_ip: 0x0A000001, dst_port: 8899 }, // 10.0.0.1
             Counters {
                 syn: 100,
                 ack: 200,
@@ -147,7 +147,7 @@ mod tests {
             },
         );
         map_reader.add_counter(
-            0x0A000002, // 10.0.0.2
+            MapKey { src_ip: 0x0A000002, dst_port: 8899 }, // 10.0.0.2
             Counters {
                 syn: 50,
                 ack: 100,
@@ -244,7 +244,7 @@ mod tests {
         // Cycle 1: HOUR_0
         let clock1 = MockClock::new(HOUR_0);
         let writer1 = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
-        map_reader.add_counter(0x0A000001, Counters {
+        map_reader.add_counter(MapKey { src_ip: 0x0A000001, dst_port: 8899 }, Counters {
             syn: 10, ack: 20, handshake_ack: 10, rst: 0, packets: 30, bytes: 1000,
         });
         collect_once(&map_reader, &clock1, &writer1, &*fs, &output_dir, &config).expect("cycle 1");
@@ -252,7 +252,7 @@ mod tests {
         // Cycle 2: HOUR_1
         let clock2 = MockClock::new(HOUR_1);
         let writer2 = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
-        map_reader.add_counter(0x0A000002, Counters {
+        map_reader.add_counter(MapKey { src_ip: 0x0A000002, dst_port: 8899 }, Counters {
             syn: 5, ack: 10, handshake_ack: 5, rst: 1, packets: 16, bytes: 500,
         });
         collect_once(&map_reader, &clock2, &writer2, &*fs, &output_dir, &config).expect("cycle 2");
@@ -399,7 +399,7 @@ mod tests {
     struct FailingMapReader;
 
     impl MapReader for FailingMapReader {
-        fn read_counters(&self) -> Result<std::collections::HashMap<u32, Counters>, MapReaderError> {
+        fn read_counters(&self) -> Result<std::collections::HashMap<MapKey, Counters>, MapReaderError> {
             Err(MapReaderError::ReadError("simulated failure".to_string()))
         }
     }

@@ -1,12 +1,17 @@
 //! Snapshot and BucketEntry types for IBSR.
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
+use std::net::Ipv4Addr;
 
 /// Current schema version.
 /// Version 1: Added multi-port support (dst_port -> dst_ports)
 /// Version 2: Added handshake_ack field for accurate SYN-flood detection
 /// Version 3: Added per-port granularity (dst_port field in BucketEntry)
-pub const SCHEMA_VERSION: u32 = 3;
+/// Version 4: Added aggregation field, changed key_value to src_ip string format
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Key type for bucket entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -17,12 +22,16 @@ pub enum KeyType {
 }
 
 /// A single bucket entry representing counters for one source.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Note: Custom Serialize/Deserialize implementations emit `src_ip` as a
+/// dotted-decimal string instead of `key_value` as u32, for human readability.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BucketEntry {
     pub key_type: KeyType,
+    /// The IP address as u32 (for internal use and sorting).
+    /// Serialized as `src_ip` in dotted-decimal format.
     pub key_value: u32,
     /// Destination port this bucket tracks (for per-port granularity).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub dst_port: Option<u16>,
     pub syn: u32,
     pub ack: u32,
@@ -35,10 +44,184 @@ pub struct BucketEntry {
     pub bytes: u64,
 }
 
+impl Serialize for BucketEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Count fields: key_type, src_ip, syn, ack, handshake_ack, rst, packets, bytes
+        // + optionally dst_port
+        let field_count = if self.dst_port.is_some() { 9 } else { 8 };
+        let mut state = serializer.serialize_struct("BucketEntry", field_count)?;
+
+        state.serialize_field("key_type", &self.key_type)?;
+        state.serialize_field("src_ip", &ip_u32_to_string(self.key_value))?;
+
+        if let Some(port) = self.dst_port {
+            state.serialize_field("dst_port", &port)?;
+        }
+
+        state.serialize_field("syn", &self.syn)?;
+        state.serialize_field("ack", &self.ack)?;
+        state.serialize_field("handshake_ack", &self.handshake_ack)?;
+        state.serialize_field("rst", &self.rst)?;
+        state.serialize_field("packets", &self.packets)?;
+        state.serialize_field("bytes", &self.bytes)?;
+
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for BucketEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            KeyType,
+            SrcIp,
+            DstPort,
+            Syn,
+            Ack,
+            HandshakeAck,
+            Rst,
+            Packets,
+            Bytes,
+        }
+
+        struct BucketEntryVisitor;
+
+        impl<'de> Visitor<'de> for BucketEntryVisitor {
+            type Value = BucketEntry;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct BucketEntry")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<BucketEntry, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut key_type = None;
+                let mut src_ip: Option<String> = None;
+                let mut dst_port = None;
+                let mut syn = None;
+                let mut ack = None;
+                let mut handshake_ack = None;
+                let mut rst = None;
+                let mut packets = None;
+                let mut bytes = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::KeyType => {
+                            if key_type.is_some() {
+                                return Err(de::Error::duplicate_field("key_type"));
+                            }
+                            key_type = Some(map.next_value()?);
+                        }
+                        Field::SrcIp => {
+                            if src_ip.is_some() {
+                                return Err(de::Error::duplicate_field("src_ip"));
+                            }
+                            src_ip = Some(map.next_value()?);
+                        }
+                        Field::DstPort => {
+                            if dst_port.is_some() {
+                                return Err(de::Error::duplicate_field("dst_port"));
+                            }
+                            dst_port = Some(map.next_value()?);
+                        }
+                        Field::Syn => {
+                            if syn.is_some() {
+                                return Err(de::Error::duplicate_field("syn"));
+                            }
+                            syn = Some(map.next_value()?);
+                        }
+                        Field::Ack => {
+                            if ack.is_some() {
+                                return Err(de::Error::duplicate_field("ack"));
+                            }
+                            ack = Some(map.next_value()?);
+                        }
+                        Field::HandshakeAck => {
+                            if handshake_ack.is_some() {
+                                return Err(de::Error::duplicate_field("handshake_ack"));
+                            }
+                            handshake_ack = Some(map.next_value()?);
+                        }
+                        Field::Rst => {
+                            if rst.is_some() {
+                                return Err(de::Error::duplicate_field("rst"));
+                            }
+                            rst = Some(map.next_value()?);
+                        }
+                        Field::Packets => {
+                            if packets.is_some() {
+                                return Err(de::Error::duplicate_field("packets"));
+                            }
+                            packets = Some(map.next_value()?);
+                        }
+                        Field::Bytes => {
+                            if bytes.is_some() {
+                                return Err(de::Error::duplicate_field("bytes"));
+                            }
+                            bytes = Some(map.next_value()?);
+                        }
+                    }
+                }
+
+                let key_type = key_type.ok_or_else(|| de::Error::missing_field("key_type"))?;
+                let src_ip_str = src_ip.ok_or_else(|| de::Error::missing_field("src_ip"))?;
+                let key_value = src_ip_str
+                    .parse::<Ipv4Addr>()
+                    .map_err(|_| de::Error::custom(format!("invalid IP address: {}", src_ip_str)))?
+                    .into();
+                let syn = syn.ok_or_else(|| de::Error::missing_field("syn"))?;
+                let ack = ack.ok_or_else(|| de::Error::missing_field("ack"))?;
+                let handshake_ack =
+                    handshake_ack.ok_or_else(|| de::Error::missing_field("handshake_ack"))?;
+                let rst = rst.ok_or_else(|| de::Error::missing_field("rst"))?;
+                let packets = packets.ok_or_else(|| de::Error::missing_field("packets"))?;
+                let bytes = bytes.ok_or_else(|| de::Error::missing_field("bytes"))?;
+
+                Ok(BucketEntry {
+                    key_type,
+                    key_value,
+                    dst_port,
+                    syn,
+                    ack,
+                    handshake_ack,
+                    rst,
+                    packets,
+                    bytes,
+                })
+            }
+        }
+
+        const FIELDS: &[&str] = &[
+            "key_type",
+            "src_ip",
+            "dst_port",
+            "syn",
+            "ack",
+            "handshake_ack",
+            "rst",
+            "packets",
+            "bytes",
+        ];
+        deserializer.deserialize_struct("BucketEntry", FIELDS, BucketEntryVisitor)
+    }
+}
+
 /// A snapshot of counters at a point in time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub version: u32,
+    /// Describes how metrics are aggregated: "src_ip_dst_port" means per source IP per destination port.
+    pub aggregation: String,
     pub ts_unix_sec: u64,
     /// Destination ports being monitored (sorted for deterministic output).
     pub dst_ports: Vec<u16>,
@@ -62,6 +245,7 @@ impl Snapshot {
 
         Self {
             version: SCHEMA_VERSION,
+            aggregation: "src_ip_dst_port".to_string(),
             ts_unix_sec,
             dst_ports: sorted_ports,
             buckets,
@@ -97,6 +281,23 @@ pub enum SnapshotError {
 
     #[error("schema version mismatch: expected {expected}, found {found}")]
     VersionMismatch { expected: u32, found: u32 },
+
+    #[error("invalid IP address: {0}")]
+    InvalidIpAddress(String),
+}
+
+/// Convert a u32 IP address to dotted-decimal string.
+/// The u32 is interpreted in host byte order (as stored in BPF maps after ntohl conversion).
+pub fn ip_u32_to_string(ip: u32) -> String {
+    Ipv4Addr::from(ip).to_string()
+}
+
+/// Parse a dotted-decimal IP string to u32.
+/// Returns the IP in host byte order.
+pub fn string_to_ip_u32(s: &str) -> Result<u32, SnapshotError> {
+    s.parse::<Ipv4Addr>()
+        .map(|addr| addr.into())
+        .map_err(|_| SnapshotError::InvalidIpAddress(s.to_string()))
 }
 
 #[cfg(test)]
@@ -387,7 +588,7 @@ mod tests {
     #[test]
     fn test_version_mismatch_rejected() {
         // Manually craft JSON with wrong version
-        let bad_json = r#"{"version":999,"ts_unix_sec":1234567890,"dst_ports":[8899],"buckets":[]}"#;
+        let bad_json = r#"{"version":999,"aggregation":"src_ip_dst_port","ts_unix_sec":1234567890,"dst_ports":[8899],"buckets":[]}"#;
 
         let result = Snapshot::from_json(bad_json);
 
@@ -396,7 +597,7 @@ mod tests {
         assert!(matches!(
             err,
             SnapshotError::VersionMismatch {
-                expected: 3,
+                expected: 4,
                 found: 999
             }
         ));
@@ -480,12 +681,178 @@ mod tests {
 
     #[test]
     fn test_schema_version_constant() {
-        assert_eq!(SCHEMA_VERSION, 3);
+        assert_eq!(SCHEMA_VERSION, 4);
     }
 
     #[test]
     fn test_snapshot_new_sets_version() {
         let snapshot = Snapshot::new(1234567890, &[8899], vec![]);
         assert_eq!(snapshot.version, SCHEMA_VERSION);
+    }
+
+    // ===========================================
+    // Test Category B — IP Conversion Utilities
+    // ===========================================
+
+    #[test]
+    fn test_ip_u32_to_dotted_decimal() {
+        // User-specified test case
+        assert_eq!(ip_u32_to_string(1375862397), "82.1.254.125");
+
+        // Common test cases
+        assert_eq!(ip_u32_to_string(167772161), "10.0.0.1");
+        assert_eq!(ip_u32_to_string(167772162), "10.0.0.2");
+        assert_eq!(ip_u32_to_string(3232235777), "192.168.1.1");
+
+        // Edge cases
+        assert_eq!(ip_u32_to_string(0), "0.0.0.0");
+        assert_eq!(ip_u32_to_string(u32::MAX), "255.255.255.255");
+    }
+
+    #[test]
+    fn test_dotted_decimal_to_ip_u32() {
+        // Reverse conversion
+        assert_eq!(string_to_ip_u32("82.1.254.125").unwrap(), 1375862397);
+        assert_eq!(string_to_ip_u32("10.0.0.1").unwrap(), 167772161);
+        assert_eq!(string_to_ip_u32("192.168.1.1").unwrap(), 3232235777);
+        assert_eq!(string_to_ip_u32("0.0.0.0").unwrap(), 0);
+        assert_eq!(string_to_ip_u32("255.255.255.255").unwrap(), u32::MAX);
+    }
+
+    #[test]
+    fn test_ip_roundtrip_conversion() {
+        // Roundtrip: u32 -> string -> u32
+        let test_values = [0u32, 1, 167772161, 1375862397, 3232235777, u32::MAX];
+        for &ip in &test_values {
+            let s = ip_u32_to_string(ip);
+            let back = string_to_ip_u32(&s).expect("parse back");
+            assert_eq!(ip, back, "roundtrip failed for {}", ip);
+        }
+    }
+
+    #[test]
+    fn test_string_to_ip_invalid() {
+        assert!(string_to_ip_u32("not an ip").is_err());
+        assert!(string_to_ip_u32("256.0.0.1").is_err());
+        assert!(string_to_ip_u32("").is_err());
+        assert!(string_to_ip_u32("10.0.0").is_err());
+    }
+
+    // ===========================================
+    // Test Category C — BucketEntry src_ip Serialization
+    // ===========================================
+
+    #[test]
+    fn test_bucket_emits_src_ip_string_correctly() {
+        let bucket = BucketEntry {
+            key_type: KeyType::SrcIp,
+            key_value: 167772161, // 10.0.0.1
+            dst_port: Some(8080),
+            syn: 100,
+            ack: 90,
+            handshake_ack: 90,
+            rst: 5,
+            packets: 200,
+            bytes: 20000,
+        };
+
+        let json = serde_json::to_string(&bucket).expect("serialize");
+
+        // JSON should contain "src_ip":"10.0.0.1" NOT "key_value":167772161
+        assert!(json.contains(r#""src_ip":"10.0.0.1""#), "JSON should contain src_ip string: {}", json);
+        assert!(!json.contains(r#""key_value""#), "JSON should NOT contain key_value: {}", json);
+    }
+
+    #[test]
+    fn test_bucket_roundtrip_with_src_ip() {
+        let original = BucketEntry {
+            key_type: KeyType::SrcIp,
+            key_value: 1375862397, // 82.1.254.125
+            dst_port: Some(22),
+            syn: 50,
+            ack: 45,
+            handshake_ack: 40,
+            rst: 2,
+            packets: 100,
+            bytes: 10000,
+        };
+
+        let json = serde_json::to_string(&original).expect("serialize");
+        let restored: BucketEntry = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(original.key_value, restored.key_value);
+        assert_eq!(original.key_type, restored.key_type);
+        assert_eq!(original.dst_port, restored.dst_port);
+        assert_eq!(original.syn, restored.syn);
+        assert_eq!(original.ack, restored.ack);
+        assert_eq!(original.handshake_ack, restored.handshake_ack);
+        assert_eq!(original.rst, restored.rst);
+        assert_eq!(original.packets, restored.packets);
+        assert_eq!(original.bytes, restored.bytes);
+    }
+
+    #[test]
+    fn test_bucket_roundtrip_edge_cases() {
+        // Test with various IP addresses
+        let ips = [0u32, 167772161, 1375862397, 3232235777, u32::MAX];
+
+        for ip in ips {
+            let original = BucketEntry {
+                key_type: KeyType::SrcIp,
+                key_value: ip,
+                dst_port: Some(80),
+                syn: 1,
+                ack: 1,
+                handshake_ack: 1,
+                rst: 0,
+                packets: 2,
+                bytes: 100,
+            };
+
+            let json = serde_json::to_string(&original).expect("serialize");
+            let restored: BucketEntry = serde_json::from_str(&json).expect("deserialize");
+
+            assert_eq!(original.key_value, restored.key_value,
+                "roundtrip failed for IP {}: {}", ip, json);
+        }
+    }
+
+    // ===========================================
+    // Test Category D — Aggregation Field
+    // ===========================================
+
+    #[test]
+    fn test_snapshot_includes_aggregation_header() {
+        let snapshot = Snapshot::new(1000, &[8080], vec![]);
+        let json = snapshot.to_json();
+
+        // Verify aggregation field is present and has correct value
+        assert!(json.contains(r#""aggregation":"src_ip_dst_port""#),
+            "JSON should contain aggregation field: {}", json);
+
+        // Verify roundtrip preserves aggregation
+        let restored = Snapshot::from_json(&json).expect("deserialize");
+        assert_eq!(restored.aggregation, "src_ip_dst_port");
+    }
+
+    #[test]
+    fn test_snapshot_aggregation_in_output() {
+        let bucket = BucketEntry {
+            key_type: KeyType::SrcIp,
+            key_value: 167772162, // 10.0.0.2
+            dst_port: Some(8080),
+            syn: 100,
+            ack: 90,
+            handshake_ack: 90,
+            rst: 5,
+            packets: 200,
+            bytes: 20000,
+        };
+        let snapshot = Snapshot::new(1000, &[8080], vec![bucket]);
+        let json = snapshot.to_json();
+
+        // Check the expected output format
+        assert!(json.contains(r#""aggregation":"src_ip_dst_port""#));
+        assert!(json.contains(r#""src_ip":"10.0.0.2""#));
     }
 }
