@@ -52,7 +52,7 @@ fn run_collect(
         BUILD_TIME
     ));
 
-    let map_reader = ibsr_bpf::BpfMapReader::new(interface, &ports, args.map_size)?;
+    let map_reader = ibsr_bpf::BpfMapReader::new(interface, &ports)?;
 
     // Log successful XDP attachment
     logger.info(&format!(

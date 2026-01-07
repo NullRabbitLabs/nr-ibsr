@@ -97,38 +97,40 @@ int xdp_counter(struct xdp_md *ctx)
         return XDP_PASS;
 
     // Check if packet matches any configured destination port (manually unrolled)
-    // Capture the matched port in host byte order for use as map key
+    // Short-circuit after first match to avoid unnecessary map lookups
     __u16 matched_port = 0;
     __u32 cfg_key;
     __u16 *port_cfg;
 
     cfg_key = 0; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto port_matched; }
 
     cfg_key = 1; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto port_matched; }
 
     cfg_key = 2; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto port_matched; }
 
     cfg_key = 3; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto port_matched; }
 
     cfg_key = 4; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto port_matched; }
 
     cfg_key = 5; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto port_matched; }
 
     cfg_key = 6; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto port_matched; }
 
     cfg_key = 7; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
-    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) matched_port = bpf_ntohs(*port_cfg);
+    if (port_cfg && *port_cfg != 0 && tcp->dest == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto port_matched; }
 
-    if (matched_port == 0)
-        return XDP_PASS;
+    // No port matched
+    return XDP_PASS;
 
+port_matched:
+    ; // Empty statement required before declaration in C
     // Extract source IP (convert to host byte order for consistent key)
     __u32 src_ip = bpf_ntohl(ip->saddr);
 

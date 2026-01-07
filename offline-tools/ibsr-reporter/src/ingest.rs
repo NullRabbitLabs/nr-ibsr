@@ -98,8 +98,9 @@ pub fn parse_snapshot(json: &str) -> Result<Snapshot, ibsr_schema::SnapshotError
 }
 
 /// Parse snapshots from a list of (filename, content) pairs.
-/// Returns successfully parsed snapshots, skipping malformed ones.
-/// If warn_fn is provided, it will be called for each skipped file.
+/// Each file may contain multiple JSON lines (JSONL format).
+/// Returns successfully parsed snapshots, skipping malformed lines.
+/// If warn_fn is provided, it will be called for each skipped line.
 pub fn parse_snapshots_lenient<F>(
     files: Vec<(String, String)>,
     mut warn_fn: Option<F>,
@@ -110,11 +111,18 @@ where
     let mut snapshots = Vec::new();
 
     for (filename, content) in files {
-        match parse_snapshot(&content) {
-            Ok(snapshot) => snapshots.push(snapshot),
-            Err(e) => {
-                if let Some(ref mut warn) = warn_fn {
-                    warn(&filename, &e.to_string());
+        for (line_num, line) in content.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match parse_snapshot(line) {
+                Ok(snapshot) => snapshots.push(snapshot),
+                Err(e) => {
+                    if let Some(ref mut warn) = warn_fn {
+                        let location = format!("{}:{}", filename, line_num + 1);
+                        warn(&location, &e.to_string());
+                    }
                 }
             }
         }
@@ -362,6 +370,58 @@ mod tests {
 
         let snapshots = parse_snapshots_lenient::<fn(&str, &str)>(files, None);
         assert!(snapshots.is_empty());
+    }
+
+    #[test]
+    fn test_parse_snapshots_lenient_multiline_jsonl() {
+        // Simulate hourly file with multiple snapshots (as written by the collector)
+        let multiline_content = r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}
+{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1001,"dst_ports":[8080],"buckets":[]}
+{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1002,"dst_ports":[8080],"buckets":[]}"#;
+
+        let files = vec![
+            ("hourly_file.jsonl".to_string(), multiline_content.to_string()),
+        ];
+
+        let snapshots = parse_snapshots_lenient::<fn(&str, &str)>(files, None);
+
+        assert_eq!(snapshots.len(), 3);
+        assert_eq!(snapshots[0].ts_unix_sec, 1000);
+        assert_eq!(snapshots[1].ts_unix_sec, 1001);
+        assert_eq!(snapshots[2].ts_unix_sec, 1002);
+    }
+
+    #[test]
+    fn test_parse_snapshots_lenient_multiline_with_empty_lines() {
+        // File with empty lines interspersed
+        let content = r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}
+
+{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1001,"dst_ports":[8080],"buckets":[]}
+
+{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1002,"dst_ports":[8080],"buckets":[]}"#;
+
+        let files = vec![("file.jsonl".to_string(), content.to_string())];
+        let snapshots = parse_snapshots_lenient::<fn(&str, &str)>(files, None);
+
+        assert_eq!(snapshots.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_snapshots_lenient_multiline_partial_failure() {
+        // One valid line, one invalid line in same file
+        let content = r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}
+invalid json line
+{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1002,"dst_ports":[8080],"buckets":[]}"#;
+
+        let files = vec![("file.jsonl".to_string(), content.to_string())];
+        let mut warnings = Vec::new();
+        let snapshots = parse_snapshots_lenient(files, Some(|loc: &str, _err: &str| {
+            warnings.push(loc.to_string());
+        }));
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains(":2")); // Line 2 failed
     }
 
     // -------------------------------------------

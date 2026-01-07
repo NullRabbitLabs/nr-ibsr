@@ -87,7 +87,8 @@ impl Filesystem for RealFilesystem {
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
 
         file.write_all(data)?;
-        file.sync_all()?;
+        // Use sync_data instead of sync_all - skips metadata sync, still durable for append-only
+        file.sync_data()?;
 
         Ok(())
     }

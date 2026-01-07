@@ -39,7 +39,9 @@ impl BpfMapReader {
     /// # Arguments
     /// * `interface` - Network interface name (e.g., "eth0")
     /// * `dst_ports` - TCP destination ports to monitor (up to 8, network byte order will be handled)
-    /// * `map_size` - Maximum entries in the LRU counter map
+    ///
+    /// # Note
+    /// The BPF LRU map size is fixed at 100,000 entries (hardcoded in eBPF).
     ///
     /// # Errors
     /// Returns `BpfError` if:
@@ -47,7 +49,7 @@ impl BpfMapReader {
     /// - Interface not found
     /// - Insufficient permissions
     /// - XDP attachment fails
-    pub fn new(interface: &str, dst_ports: &[u16], _map_size: u32) -> Result<Self, BpfError> {
+    pub fn new(interface: &str, dst_ports: &[u16]) -> Result<Self, BpfError> {
         // Get interface index
         let ifindex = nix::net::if_::if_nametoindex(interface)
             .map_err(|_| BpfError::InterfaceNotFound(interface.to_string()))?;

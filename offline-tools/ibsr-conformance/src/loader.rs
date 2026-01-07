@@ -173,9 +173,22 @@ fn load_snapshots(fixture_dir: &Path, fixture_name: &str) -> Result<Vec<Snapshot
         let path = entry.path();
         if path.extension().map_or(false, |e| e == "jsonl") {
             let content = read_file(&path)?;
-            let snapshot = Snapshot::from_json(&content)
-                .map_err(|e| LoadError::SnapshotError(e.to_string()))?;
-            snapshots.push(snapshot);
+            // Parse each line as a separate snapshot (JSONL format)
+            for (line_num, line) in content.lines().enumerate() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let snapshot = Snapshot::from_json(line).map_err(|e| {
+                    LoadError::SnapshotError(format!(
+                        "{}:{}: {}",
+                        path.display(),
+                        line_num + 1,
+                        e
+                    ))
+                })?;
+                snapshots.push(snapshot);
+            }
         }
     }
 
@@ -343,6 +356,43 @@ mod tests {
 
         let snapshots = load_snapshots(fixture_dir, "test").unwrap();
         assert_eq!(snapshots.len(), 1);
+    }
+
+    #[test]
+    fn test_load_snapshots_multiline_jsonl() {
+        let temp = TempDir::new().unwrap();
+        let fixture_dir = temp.path();
+        fs::create_dir_all(fixture_dir.join("snapshots")).unwrap();
+
+        // Create a multi-line JSONL file (as the collector produces)
+        let s1 = Snapshot::new(1000, &[8080], vec![]);
+        let s2 = Snapshot::new(1001, &[8080], vec![]);
+        let s3 = Snapshot::new(1002, &[8080], vec![]);
+        let content = format!("{}\n{}\n{}", s1.to_json(), s2.to_json(), s3.to_json());
+
+        fs::write(fixture_dir.join("snapshots/hourly.jsonl"), content).unwrap();
+
+        let snapshots = load_snapshots(fixture_dir, "test").unwrap();
+        assert_eq!(snapshots.len(), 3);
+        assert_eq!(snapshots[0].ts_unix_sec, 1000);
+        assert_eq!(snapshots[1].ts_unix_sec, 1001);
+        assert_eq!(snapshots[2].ts_unix_sec, 1002);
+    }
+
+    #[test]
+    fn test_load_snapshots_multiline_with_empty_lines() {
+        let temp = TempDir::new().unwrap();
+        let fixture_dir = temp.path();
+        fs::create_dir_all(fixture_dir.join("snapshots")).unwrap();
+
+        let s1 = Snapshot::new(1000, &[8080], vec![]);
+        let s2 = Snapshot::new(1001, &[8080], vec![]);
+        let content = format!("{}\n\n{}\n", s1.to_json(), s2.to_json());
+
+        fs::write(fixture_dir.join("snapshots/hourly.jsonl"), content).unwrap();
+
+        let snapshots = load_snapshots(fixture_dir, "test").unwrap();
+        assert_eq!(snapshots.len(), 2);
     }
 
     // -------------------------------------------
