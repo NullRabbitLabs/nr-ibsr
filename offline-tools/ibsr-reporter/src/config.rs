@@ -129,15 +129,15 @@ impl Allowlist {
     }
 
     /// Parse and add an IP address from string.
-    /// Stores in network byte order internally; comparison converts from host order.
+    /// Stores MSB-first representation (same as Ipv4Addr and snapshot key_value).
     pub fn add_ip_str(&mut self, ip_str: &str) -> Result<(), AllowlistError> {
         let ip: Ipv4Addr = ip_str.parse().map_err(|_| AllowlistError::InvalidIp(ip_str.to_string()))?;
-        self.ips.insert(u32::from(ip)); // Network byte order
+        self.ips.insert(u32::from(ip)); // MSB-first representation
         Ok(())
     }
 
     /// Parse and add a CIDR from string (e.g., "10.0.0.0/24").
-    /// Stores in network byte order internally; comparison converts from host order.
+    /// Stores MSB-first representation (same as Ipv4Addr and snapshot key_value).
     pub fn add_cidr_str(&mut self, cidr_str: &str) -> Result<(), AllowlistError> {
         let parts: Vec<&str> = cidr_str.split('/').collect();
         if parts.len() != 2 {
@@ -151,7 +151,7 @@ impl Allowlist {
             return Err(AllowlistError::InvalidCidr(cidr_str.to_string()));
         }
 
-        // Network byte order - mask works correctly with standard bit shifting
+        // MSB-first representation - mask works correctly with standard bit shifting
         let ip_u32 = u32::from(ip);
         let mask = if prefix_len == 0 { 0 } else { !0u32 << (32 - prefix_len) };
         let network = ip_u32 & mask;
