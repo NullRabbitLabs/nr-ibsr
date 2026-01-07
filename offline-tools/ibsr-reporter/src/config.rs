@@ -404,4 +404,50 @@ mod tests {
         assert!(allowlist.contains(0x0A000001)); // 10.0.0.1
         assert!(allowlist.contains(0xC0A80064)); // 192.168.0.100
     }
+
+    // ===========================================
+    // Byte-Order Verification Tests
+    // These tests ensure allowlist matching works correctly with MSB-first representation.
+    // If bytes were accidentally swapped, these tests would fail.
+    // ===========================================
+
+    #[test]
+    fn test_allowlist_string_parsing_uses_correct_byte_order() {
+        let mut allowlist = Allowlist::empty();
+        allowlist.add_ip_str("10.0.0.1").unwrap();
+
+        // Must match 0x0A000001, NOT 0x0100000A
+        assert!(
+            allowlist.contains(0x0A000001),
+            "Allowlist '10.0.0.1' must match key 0x0A000001"
+        );
+        assert!(
+            !allowlist.contains(0x0100000A),
+            "Allowlist '10.0.0.1' must NOT match swapped key 0x0100000A"
+        );
+    }
+
+    #[test]
+    fn test_allowlist_cidr_uses_correct_byte_order() {
+        let mut allowlist = Allowlist::empty();
+        allowlist.add_cidr_str("10.0.0.0/24").unwrap();
+
+        // 10.0.0.1 (0x0A000001) must match
+        assert!(
+            allowlist.contains(0x0A000001),
+            "CIDR 10.0.0.0/24 must match 0x0A000001 (10.0.0.1)"
+        );
+
+        // 10.0.0.255 (0x0A0000FF) must match
+        assert!(
+            allowlist.contains(0x0A0000FF),
+            "CIDR 10.0.0.0/24 must match 0x0A0000FF (10.0.0.255)"
+        );
+
+        // Swapped values must NOT match
+        assert!(
+            !allowlist.contains(0x0100000A),
+            "CIDR must NOT match swapped 0x0100000A"
+        );
+    }
 }

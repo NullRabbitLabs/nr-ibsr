@@ -855,4 +855,99 @@ mod tests {
         assert!(json.contains(r#""aggregation":"src_ip_dst_port""#));
         assert!(json.contains(r#""src_ip":"10.0.0.2""#));
     }
+
+    // ===========================================
+    // Test Category E — Byte-Order Verification Tests
+    // These tests verify our MSB-first convention is correctly maintained.
+    // If bytes were accidentally swapped, these tests would fail.
+    // ===========================================
+
+    #[test]
+    fn test_ip_byte_representation_is_msb_first() {
+        // Verify our convention: 0x0A000001 means 10.0.0.1
+        // MSB-first means first octet (10) is in the most significant byte
+        let ip: u32 = 0x0A000001;
+
+        // Byte representation should be [10, 0, 0, 1] in big-endian
+        assert_eq!(
+            ip.to_be_bytes(),
+            [10, 0, 0, 1],
+            "IP 0x0A000001 should have bytes [10, 0, 0, 1] in big-endian"
+        );
+
+        // Ipv4Addr::from() should interpret as 10.0.0.1
+        assert_eq!(
+            Ipv4Addr::from(ip).to_string(),
+            "10.0.0.1",
+            "Ipv4Addr::from(0x0A000001) must produce 10.0.0.1"
+        );
+    }
+
+    #[test]
+    fn test_ip_from_string_produces_correct_u32() {
+        // Parsing "10.0.0.1" must produce 0x0A000001
+        let addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let ip_u32 = u32::from(addr);
+
+        assert_eq!(
+            ip_u32, 0x0A000001,
+            "Parsing '10.0.0.1' must produce 0x0A000001, got {:#X}",
+            ip_u32
+        );
+        assert_eq!(ip_u32.to_be_bytes(), [10, 0, 0, 1]);
+    }
+
+    #[test]
+    fn test_swapped_ip_produces_wrong_string() {
+        // If someone accidentally byte-swaps, they get wrong output
+        // This test documents what WRONG looks like
+        let swapped: u32 = 0x0100000A; // Wrong: bytes reversed
+
+        // This would produce "1.0.0.10" - WRONG!
+        assert_eq!(
+            Ipv4Addr::from(swapped).to_string(),
+            "1.0.0.10",
+            "Swapped IP should produce wrong string (this test documents the bug)"
+        );
+
+        // Verify it's NOT the correct IP
+        assert_ne!(Ipv4Addr::from(swapped).to_string(), "10.0.0.1");
+    }
+
+    #[test]
+    fn test_bucket_key_value_to_display_roundtrip() {
+        // Test the FULL pipeline: key_value → JSON → parse → display
+        let bucket = BucketEntry {
+            key_type: KeyType::SrcIp,
+            key_value: 0x0A000001, // Must display as "10.0.0.1"
+            dst_port: Some(8080),
+            syn: 100,
+            ack: 90,
+            handshake_ack: 90,
+            rst: 5,
+            packets: 200,
+            bytes: 20000,
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&bucket).unwrap();
+
+        // JSON must contain "10.0.0.1", NOT "1.0.0.10"
+        assert!(
+            json.contains(r#""src_ip":"10.0.0.1""#),
+            "JSON must contain '10.0.0.1', got: {}",
+            json
+        );
+        assert!(
+            !json.contains("1.0.0.10"),
+            "JSON must NOT contain swapped IP '1.0.0.10'"
+        );
+
+        // Parse back and verify key_value
+        let parsed: BucketEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.key_value, 0x0A000001,
+            "Parsed key_value must be 0x0A000001"
+        );
+    }
 }

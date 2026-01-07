@@ -23,7 +23,7 @@
 // Layout: src_ip(4) + dst_port(2) + _pad(2) = 8 bytes
 // This allows per-IP-per-port traffic tracking
 struct map_key {
-    __u32 src_ip;    // Source IPv4 address (host byte order)
+    __u32 src_ip;    // Source IPv4 address (network byte order / MSB-first)
     __u16 dst_port;  // Destination port (host byte order)
     __u16 _pad;      // Explicit padding for 8-byte alignment
 };
@@ -131,8 +131,8 @@ int xdp_counter(struct xdp_md *ctx)
 
 port_matched:
     ; // Empty statement required before declaration in C
-    // Extract source IP (convert to host byte order for consistent key)
-    __u32 src_ip = bpf_ntohl(ip->saddr);
+    // Extract source IP (keep network byte order / MSB-first for consistent representation)
+    __u32 src_ip = ip->saddr;
 
     // Build composite map key (src_ip + dst_port)
     struct map_key mkey = {

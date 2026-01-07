@@ -495,4 +495,28 @@ mod tests {
             open_brackets, close_brackets
         );
     }
+
+    // -------------------------------------------
+    // Byte-Order Verification Tests
+    // -------------------------------------------
+
+    #[test]
+    fn test_rules_output_ip_is_not_swapped() {
+        let config = make_config();
+        let offenders = vec![make_offender(0x0A000001, 150.0, KeyType::SrcIp)];
+
+        let rules = generate(&offenders, &config, 1000);
+        let json = rules.to_json();
+
+        // Must contain "10.0.0.1", NOT "1.0.0.10"
+        assert!(
+            json.contains("10.0.0.1"),
+            "Rules JSON must contain '10.0.0.1', got: {}",
+            json
+        );
+        assert!(
+            !json.contains("1.0.0.10"),
+            "Rules JSON must NOT contain swapped '1.0.0.10'"
+        );
+    }
 }

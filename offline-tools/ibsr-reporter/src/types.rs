@@ -170,4 +170,24 @@ mod tests {
         let bounds = WindowBounds::new(1010, 1000);
         assert_eq!(bounds.duration_sec(), 0);
     }
+
+    // ===========================================
+    // Byte-Order Verification Tests
+    // ===========================================
+
+    #[test]
+    fn test_display_string_not_swapped() {
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let display = key.to_display_string();
+
+        assert_eq!(
+            display, "10.0.0.1:8080",
+            "Display must be '10.0.0.1:8080', got '{}'",
+            display
+        );
+        assert!(
+            !display.contains("1.0.0.10"),
+            "Display must NOT contain swapped IP"
+        );
+    }
 }
