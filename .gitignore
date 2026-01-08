@@ -31,3 +31,12 @@ coverage/
 # Deployment
 deploy.sh
 dist/
+
+# Collector output
+output/
+
+# Generated reports (ibsr-report)
+reports/
+rules.json
+report.md
+evidence.csv
