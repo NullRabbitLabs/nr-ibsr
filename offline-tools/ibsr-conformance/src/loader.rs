@@ -286,7 +286,7 @@ mod tests {
         let fixture_dir = temp.path();
         fs::create_dir_all(fixture_dir.join("snapshots")).unwrap();
 
-        let snapshot = Snapshot::new(1000, &[8080], vec![]);
+        let snapshot = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000);
         fs::write(
             fixture_dir.join("snapshots/1000.jsonl"),
             snapshot.to_json(),
@@ -306,7 +306,7 @@ mod tests {
 
         // Write in reverse order
         for ts in [1002, 1001, 1000] {
-            let snapshot = Snapshot::new(ts, &[8080], vec![]);
+            let snapshot = Snapshot::new(ts, &[8080], vec![], 60, 1000, 1000);
             fs::write(
                 fixture_dir.join(format!("snapshots/{}.jsonl", ts)),
                 snapshot.to_json(),
@@ -345,7 +345,7 @@ mod tests {
         fs::create_dir_all(fixture_dir.join("snapshots")).unwrap();
 
         // Write a valid snapshot
-        let snapshot = Snapshot::new(1000, &[8080], vec![]);
+        let snapshot = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000);
         fs::write(
             fixture_dir.join("snapshots/1000.jsonl"),
             snapshot.to_json(),
@@ -365,9 +365,9 @@ mod tests {
         fs::create_dir_all(fixture_dir.join("snapshots")).unwrap();
 
         // Create a multi-line JSONL file (as the collector produces)
-        let s1 = Snapshot::new(1000, &[8080], vec![]);
-        let s2 = Snapshot::new(1001, &[8080], vec![]);
-        let s3 = Snapshot::new(1002, &[8080], vec![]);
+        let s1 = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000);
+        let s2 = Snapshot::new(1001, &[8080], vec![], 60, 1000, 1000);
+        let s3 = Snapshot::new(1002, &[8080], vec![], 60, 1000, 1000);
         let content = format!("{}\n{}\n{}", s1.to_json(), s2.to_json(), s3.to_json());
 
         fs::write(fixture_dir.join("snapshots/hourly.jsonl"), content).unwrap();
@@ -385,8 +385,8 @@ mod tests {
         let fixture_dir = temp.path();
         fs::create_dir_all(fixture_dir.join("snapshots")).unwrap();
 
-        let s1 = Snapshot::new(1000, &[8080], vec![]);
-        let s2 = Snapshot::new(1001, &[8080], vec![]);
+        let s1 = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000);
+        let s2 = Snapshot::new(1001, &[8080], vec![], 60, 1000, 1000);
         let content = format!("{}\n\n{}\n", s1.to_json(), s2.to_json());
 
         fs::write(fixture_dir.join("snapshots/hourly.jsonl"), content).unwrap();

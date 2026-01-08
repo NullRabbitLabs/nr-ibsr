@@ -101,10 +101,16 @@ impl MapReader for MockMapReader {
 /// * `counters` - Map of (src_ip, dst_port) to counter values
 /// * `clock` - Clock implementation for timestamp
 /// * `dst_ports` - The destination ports being monitored (for metadata)
+/// * `interval_sec` - Snapshot emission interval in seconds
+/// * `run_id` - Stable run identifier (Unix timestamp when run started)
+/// * `base_ts_unix_sec` - First snapshot timestamp of the run
 pub fn counters_to_snapshot<C: Clock>(
     counters: &HashMap<MapKey, Counters>,
     clock: &C,
     dst_ports: &[u16],
+    interval_sec: u32,
+    run_id: u64,
+    base_ts_unix_sec: u64,
 ) -> Snapshot {
     let buckets: Vec<BucketEntry> = counters
         .iter()
@@ -121,7 +127,7 @@ pub fn counters_to_snapshot<C: Clock>(
         })
         .collect();
 
-    Snapshot::new(clock.now_unix_sec(), dst_ports, buckets)
+    Snapshot::new(clock.now_unix_sec(), dst_ports, buckets, interval_sec, run_id, base_ts_unix_sec)
 }
 
 #[cfg(test)]
@@ -151,7 +157,7 @@ mod tests {
         );
 
         let clock = MockClock::new(1234567890);
-        let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[8899], 60, 1234567890, 1234567890);
 
         assert_eq!(snapshot.buckets.len(), 1);
         let bucket = &snapshot.buckets[0];
@@ -193,7 +199,7 @@ mod tests {
         );
 
         let clock = MockClock::new(1234567890);
-        let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[8899], 60, 1234567890, 1234567890);
 
         assert_eq!(snapshot.buckets.len(), 2);
     }
@@ -203,7 +209,7 @@ mod tests {
         let counters: HashMap<MapKey, Counters> = HashMap::new();
         let clock = MockClock::new(1234567890);
 
-        let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[8899], 60, 1234567890, 1234567890);
 
         assert!(snapshot.buckets.is_empty());
     }
@@ -215,7 +221,7 @@ mod tests {
         let counters: HashMap<MapKey, Counters> = HashMap::new();
         let clock = MockClock::new(9999999999);
 
-        let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[8899], 60, 9999999999, 9999999999);
 
         assert_eq!(snapshot.ts_unix_sec, 9999999999);
     }
@@ -225,7 +231,7 @@ mod tests {
         let counters: HashMap<MapKey, Counters> = HashMap::new();
         let clock = MockClock::new(0);
 
-        let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[8899], 60, 0, 0);
 
         assert_eq!(snapshot.ts_unix_sec, 0);
     }
@@ -235,7 +241,7 @@ mod tests {
         let counters: HashMap<MapKey, Counters> = HashMap::new();
         let clock = MockClock::new(u64::MAX);
 
-        let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[8899], 60, u64::MAX, u64::MAX);
 
         assert_eq!(snapshot.ts_unix_sec, u64::MAX);
     }
@@ -247,7 +253,7 @@ mod tests {
         let counters: HashMap<MapKey, Counters> = HashMap::new();
         let clock = MockClock::new(1234567890);
 
-        let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[8899], 60, 1234567890, 1234567890);
 
         assert_eq!(snapshot.dst_ports, vec![8899]);
     }
@@ -257,7 +263,7 @@ mod tests {
         let counters: HashMap<MapKey, Counters> = HashMap::new();
         let clock = MockClock::new(1234567890);
 
-        let snapshot = counters_to_snapshot(&counters, &clock, &[443]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[443], 60, 1234567890, 1234567890);
 
         assert_eq!(snapshot.dst_ports, vec![443]);
     }
@@ -267,7 +273,7 @@ mod tests {
         let counters: HashMap<MapKey, Counters> = HashMap::new();
         let clock = MockClock::new(1234567890);
 
-        let snapshot = counters_to_snapshot(&counters, &clock, &[u16::MAX]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[u16::MAX], 60, 1234567890, 1234567890);
 
         assert_eq!(snapshot.dst_ports, vec![u16::MAX]);
     }
@@ -284,7 +290,7 @@ mod tests {
         counters.insert(MapKey { src_ip: 0x0B000001, dst_port: 80 }, Counters::default());
 
         let clock = MockClock::new(1234567890);
-        let snapshot = counters_to_snapshot(&counters, &clock, &[80, 443]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[80, 443], 60, 1234567890, 1234567890);
 
         // Should be sorted by key_value (IP address), then by dst_port
         assert_eq!(snapshot.buckets[0].key_value, 0x0A000001);
@@ -306,8 +312,8 @@ mod tests {
         counters2.insert(MapKey { src_ip: 0x0B000001, dst_port: 8899 }, Counters { syn: 1, ..Default::default() });
 
         let clock = MockClock::new(1234567890);
-        let snapshot1 = counters_to_snapshot(&counters1, &clock, &[8899]);
-        let snapshot2 = counters_to_snapshot(&counters2, &clock, &[8899]);
+        let snapshot1 = counters_to_snapshot(&counters1, &clock, &[8899], 60, 1234567890, 1234567890);
+        let snapshot2 = counters_to_snapshot(&counters2, &clock, &[8899], 60, 1234567890, 1234567890);
 
         // Same data should produce identical JSON regardless of insertion order
         assert_eq!(snapshot1.to_json(), snapshot2.to_json());
@@ -406,7 +412,7 @@ mod tests {
         );
 
         let clock = MockClock::new(1234567890);
-        let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[8899], 60, 1234567890, 1234567890);
 
         let bucket = &snapshot.buckets[0];
         assert_eq!(bucket.key_value, u32::MAX);
@@ -425,7 +431,7 @@ mod tests {
         counters.insert(MapKey { src_ip: 0, dst_port: 0 }, Counters::default());
 
         let clock = MockClock::new(1234567890);
-        let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[8899], 60, 1234567890, 1234567890);
 
         let bucket = &snapshot.buckets[0];
         assert_eq!(bucket.key_value, 0);
@@ -461,7 +467,7 @@ mod tests {
         let counters = reader.read_counters().expect("read counters");
 
         // Convert to snapshot
-        let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[8899], 60, 1234567890, 1234567890);
 
         // Verify snapshot
         assert_eq!(snapshot.ts_unix_sec, 1234567890);
@@ -487,7 +493,7 @@ mod tests {
         );
 
         let clock = MockClock::new(1234567890);
-        let snapshot = counters_to_snapshot(&counters, &clock, &[8899]);
+        let snapshot = counters_to_snapshot(&counters, &clock, &[8899], 60, 1234567890, 1234567890);
 
         // Serialize and deserialize
         let json = snapshot.to_json();

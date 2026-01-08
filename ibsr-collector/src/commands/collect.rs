@@ -85,6 +85,8 @@ where
     let config = CollectorConfig {
         dst_ports: args.get_all_ports(),
         rotation: RotationConfig::new(args.max_files, args.max_age),
+        interval_sec: args.snapshot_interval_sec as u32,
+        run_id: run_ts,
     };
 
     // Create snapshot writer pointing to run directory
@@ -157,6 +159,9 @@ where
     let mut last_snapshot_ts = start_ts;
     let mut last_status_ts = start_ts;
 
+    // Track base timestamp for schema v5 - set on first snapshot, constant thereafter
+    let mut base_ts_unix_sec: Option<u64> = None;
+
     loop {
         // Check if shutdown was requested
         if shutdown.should_stop() {
@@ -169,8 +174,16 @@ where
         let should_write_snapshot = current_ts >= last_snapshot_ts + snapshot_interval_sec;
 
         if should_write_snapshot {
+            // For first snapshot, use run_id as base_ts; thereafter use stored value
+            let snapshot_base_ts = base_ts_unix_sec.unwrap_or(config.run_id);
+
             // Run collection and write snapshot
-            let result = collect_once(map_reader, clock, writer, fs, output_dir, config)?;
+            let result = collect_once(map_reader, clock, writer, fs, output_dir, config, snapshot_base_ts)?;
+
+            // Store base_ts after first successful snapshot
+            if base_ts_unix_sec.is_none() {
+                base_ts_unix_sec = Some(config.run_id);
+            }
 
             cycles += 1;
             interval_ips = result.bucket_count;

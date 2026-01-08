@@ -140,7 +140,7 @@ mod tests {
     // ===========================================
 
     fn make_snapshot(ts: u64, dst_ports: &[u16], buckets: Vec<BucketEntry>) -> Snapshot {
-        Snapshot::new(ts, dst_ports, buckets)
+        Snapshot::new(ts, dst_ports, buckets, 60, ts, ts)
     }
 
     fn make_bucket(key_value: u32, dst_port: u16, syn: u32, ack: u32, handshake_ack: u32, packets: u32, bytes: u64) -> BucketEntry {

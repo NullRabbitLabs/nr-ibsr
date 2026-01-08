@@ -1,1 +1,1 @@
-{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[{"key_type":"src_ip","src_ip":"10.0.0.2","dst_port":8080,"syn":100,"ack":90,"handshake_ack":90,"rst":5,"packets":200,"bytes":20000}]}
+{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[{"key_type":"src_ip","src_ip":"10.0.0.2","dst_port":8080,"syn":100,"ack":90,"handshake_ack":90,"rst":5,"packets":200,"bytes":20000}]}

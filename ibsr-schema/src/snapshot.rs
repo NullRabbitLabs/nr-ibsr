@@ -11,7 +11,8 @@ use std::net::Ipv4Addr;
 /// Version 2: Added handshake_ack field for accurate SYN-flood detection
 /// Version 3: Added per-port granularity (dst_port field in BucketEntry)
 /// Version 4: Added aggregation field, changed key_value to src_ip string format
-pub const SCHEMA_VERSION: u32 = 4;
+/// Version 5: Added interval_sec, run_id, counter_mode, base_ts_unix_sec for offline reporting
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Key type for bucket entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -225,6 +226,15 @@ pub struct Snapshot {
     /// Describes how metrics are aggregated: "src_ip_dst_port" means per source IP per destination port.
     pub aggregation: String,
     pub ts_unix_sec: u64,
+    /// Snapshot emission interval in seconds (e.g., 60 for one snapshot per minute).
+    pub interval_sec: u32,
+    /// Stable run identifier: Unix timestamp when the run started.
+    /// Constant across all snapshots in a run.
+    pub run_id: u64,
+    /// Counter semantics: always "cumulative" (counters accumulate from run start).
+    pub counter_mode: String,
+    /// First snapshot timestamp of the run. Used with interval_sec for delta computation.
+    pub base_ts_unix_sec: u64,
     /// Destination ports being monitored (sorted for deterministic output).
     pub dst_ports: Vec<u16>,
     pub buckets: Vec<BucketEntry>,
@@ -232,7 +242,22 @@ pub struct Snapshot {
 
 impl Snapshot {
     /// Create a new snapshot with the current schema version.
-    pub fn new(ts_unix_sec: u64, dst_ports: &[u16], mut buckets: Vec<BucketEntry>) -> Self {
+    ///
+    /// # Arguments
+    /// * `ts_unix_sec` - Unix timestamp of this snapshot
+    /// * `dst_ports` - Destination ports being monitored
+    /// * `buckets` - Bucket entries (will be sorted for determinism)
+    /// * `interval_sec` - Snapshot emission interval in seconds
+    /// * `run_id` - Stable run identifier (Unix timestamp when run started)
+    /// * `base_ts_unix_sec` - First snapshot timestamp of the run
+    pub fn new(
+        ts_unix_sec: u64,
+        dst_ports: &[u16],
+        mut buckets: Vec<BucketEntry>,
+        interval_sec: u32,
+        run_id: u64,
+        base_ts_unix_sec: u64,
+    ) -> Self {
         // Sort buckets for deterministic ordering: by key_type, then key_value, then dst_port
         buckets.sort_by(|a, b| {
             a.key_type
@@ -249,6 +274,10 @@ impl Snapshot {
             version: SCHEMA_VERSION,
             aggregation: "src_ip_dst_port".to_string(),
             ts_unix_sec,
+            interval_sec,
+            run_id,
+            counter_mode: "cumulative".to_string(),
+            base_ts_unix_sec,
             dst_ports: sorted_ports,
             buckets,
         }
@@ -312,7 +341,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_empty_snapshot() {
-        let snapshot = Snapshot::new(1234567890, &[8899], vec![]);
+        let snapshot = Snapshot::new(1234567890, &[8899], vec![], 60, 1234567890, 1234567890);
 
         let json = snapshot.to_json();
         let restored = Snapshot::from_json(&json).expect("deserialize");
@@ -333,7 +362,7 @@ mod tests {
             packets: 305,
             bytes: 45000,
         };
-        let snapshot = Snapshot::new(1234567890, &[8899], vec![bucket]);
+        let snapshot = Snapshot::new(1234567890, &[8899], vec![bucket], 60, 1234567890, 1234567890);
 
         let json = snapshot.to_json();
         let restored = Snapshot::from_json(&json).expect("deserialize");
@@ -378,7 +407,7 @@ mod tests {
                 bytes: 26500,
             },
         ];
-        let snapshot = Snapshot::new(1234567890, &[8000], buckets);
+        let snapshot = Snapshot::new(1234567890, &[8000], buckets, 60, 1234567890, 1234567890);
 
         let json = snapshot.to_json();
         let restored = Snapshot::from_json(&json).expect("deserialize");
@@ -425,7 +454,7 @@ mod tests {
             },
         ];
 
-        let snapshot = Snapshot::new(1234567890, &[8899], buckets_unordered);
+        let snapshot = Snapshot::new(1234567890, &[8899], buckets_unordered, 60, 1234567890, 1234567890);
 
         // Should be sorted: SrcIp entries first (by key_value), then SrcCidr24
         assert_eq!(snapshot.buckets.len(), 3);
@@ -489,8 +518,8 @@ mod tests {
             },
         ];
 
-        let snapshot1 = Snapshot::new(1234567890, &[8899], buckets1);
-        let snapshot2 = Snapshot::new(1234567890, &[8899], buckets2);
+        let snapshot1 = Snapshot::new(1234567890, &[8899], buckets1, 60, 1234567890, 1234567890);
+        let snapshot2 = Snapshot::new(1234567890, &[8899], buckets2, 60, 1234567890, 1234567890);
 
         let json1 = snapshot1.to_json();
         let json2 = snapshot2.to_json();
@@ -538,7 +567,7 @@ mod tests {
             },
         ];
 
-        let snapshot = Snapshot::new(1234567890, &[8899], buckets);
+        let snapshot = Snapshot::new(1234567890, &[8899], buckets, 60, 1234567890, 1234567890);
 
         // Should be sorted by key_value within SrcCidr24
         assert_eq!(snapshot.buckets.len(), 3);
@@ -549,7 +578,7 @@ mod tests {
 
     #[test]
     fn test_empty_snapshot_handling() {
-        let snapshot = Snapshot::new(0, &[], vec![]);
+        let snapshot = Snapshot::new(0, &[], vec![], 60, 0, 0);
 
         assert_eq!(snapshot.version, SCHEMA_VERSION);
         assert_eq!(snapshot.ts_unix_sec, 0);
@@ -574,7 +603,7 @@ mod tests {
             packets: u32::MAX,
             bytes: u64::MAX,
         };
-        let snapshot = Snapshot::new(u64::MAX, &[u16::MAX], vec![bucket]);
+        let snapshot = Snapshot::new(u64::MAX, &[u16::MAX], vec![bucket], u32::MAX, u64::MAX, u64::MAX);
 
         let json = snapshot.to_json();
         let restored = Snapshot::from_json(&json).expect("deserialize");
@@ -585,12 +614,15 @@ mod tests {
         assert_eq!(restored.buckets[0].dst_port, Some(u16::MAX));
         assert_eq!(restored.ts_unix_sec, u64::MAX);
         assert_eq!(restored.dst_ports, vec![u16::MAX]);
+        assert_eq!(restored.interval_sec, u32::MAX);
+        assert_eq!(restored.run_id, u64::MAX);
+        assert_eq!(restored.base_ts_unix_sec, u64::MAX);
     }
 
     #[test]
     fn test_version_mismatch_rejected() {
         // Manually craft JSON with wrong version
-        let bad_json = r#"{"version":999,"aggregation":"src_ip_dst_port","ts_unix_sec":1234567890,"dst_ports":[8899],"buckets":[]}"#;
+        let bad_json = r#"{"version":999,"aggregation":"src_ip_dst_port","ts_unix_sec":1234567890,"interval_sec":60,"run_id":1234567890,"counter_mode":"cumulative","base_ts_unix_sec":1234567890,"dst_ports":[8899],"buckets":[]}"#;
 
         let result = Snapshot::from_json(bad_json);
 
@@ -599,7 +631,7 @@ mod tests {
         assert!(matches!(
             err,
             SnapshotError::VersionMismatch {
-                expected: 4,
+                expected: 5,
                 found: 999
             }
         ));
@@ -638,7 +670,7 @@ mod tests {
             packets: 305,
             bytes: 45000,
         };
-        let snapshot = Snapshot::new(1234567890, &[8899], vec![bucket]);
+        let snapshot = Snapshot::new(1234567890, &[8899], vec![bucket], 60, 1234567890, 1234567890);
 
         let json = snapshot.to_json();
 
@@ -683,12 +715,12 @@ mod tests {
 
     #[test]
     fn test_schema_version_constant() {
-        assert_eq!(SCHEMA_VERSION, 4);
+        assert_eq!(SCHEMA_VERSION, 5);
     }
 
     #[test]
     fn test_snapshot_new_sets_version() {
-        let snapshot = Snapshot::new(1234567890, &[8899], vec![]);
+        let snapshot = Snapshot::new(1234567890, &[8899], vec![], 60, 1234567890, 1234567890);
         assert_eq!(snapshot.version, SCHEMA_VERSION);
     }
 
@@ -823,7 +855,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_includes_aggregation_header() {
-        let snapshot = Snapshot::new(1000, &[8080], vec![]);
+        let snapshot = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000);
         let json = snapshot.to_json();
 
         // Verify aggregation field is present and has correct value
@@ -848,7 +880,7 @@ mod tests {
             packets: 200,
             bytes: 20000,
         };
-        let snapshot = Snapshot::new(1000, &[8080], vec![bucket]);
+        let snapshot = Snapshot::new(1000, &[8080], vec![bucket], 60, 1000, 1000);
         let json = snapshot.to_json();
 
         // Check the expected output format
@@ -949,5 +981,126 @@ mod tests {
             parsed.key_value, 0x0A000001,
             "Parsed key_value must be 0x0A000001"
         );
+    }
+
+    // ===========================================
+    // Test Category F — Schema v5 Fields
+    // These tests verify the new v5 schema fields:
+    // - interval_sec: snapshot emission interval
+    // - run_id: stable run identifier (start timestamp)
+    // - counter_mode: always "cumulative"
+    // - base_ts_unix_sec: first snapshot timestamp of run
+    // ===========================================
+
+    #[test]
+    fn test_v5_schema_version() {
+        assert_eq!(SCHEMA_VERSION, 5, "Schema version must be 5");
+    }
+
+    #[test]
+    fn test_v5_new_fields_present() {
+        let snapshot = Snapshot::new(
+            1704067200,      // ts_unix_sec
+            &[8080],         // dst_ports
+            vec![],          // buckets
+            60,              // interval_sec
+            1704067200,      // run_id
+            1704067200,      // base_ts_unix_sec
+        );
+
+        assert_eq!(snapshot.interval_sec, 60);
+        assert_eq!(snapshot.run_id, 1704067200);
+        assert_eq!(snapshot.counter_mode, "cumulative");
+        assert_eq!(snapshot.base_ts_unix_sec, 1704067200);
+    }
+
+    #[test]
+    fn test_v5_serialization_includes_new_fields() {
+        let snapshot = Snapshot::new(1704067200, &[8080], vec![], 60, 1704067200, 1704067200);
+        let json = snapshot.to_json();
+
+        assert!(json.contains(r#""interval_sec":60"#), "JSON missing interval_sec: {}", json);
+        assert!(json.contains(r#""run_id":1704067200"#), "JSON missing run_id: {}", json);
+        assert!(json.contains(r#""counter_mode":"cumulative""#), "JSON missing counter_mode: {}", json);
+        assert!(json.contains(r#""base_ts_unix_sec":1704067200"#), "JSON missing base_ts_unix_sec: {}", json);
+    }
+
+    #[test]
+    fn test_v5_roundtrip() {
+        let bucket = BucketEntry {
+            key_type: KeyType::SrcIp,
+            key_value: 0x0A000001,
+            dst_port: Some(8080),
+            syn: 100,
+            ack: 90,
+            handshake_ack: 85,
+            rst: 5,
+            packets: 200,
+            bytes: 20000,
+        };
+        let snapshot = Snapshot::new(
+            1704067260,      // ts_unix_sec (60s after base)
+            &[8080],
+            vec![bucket],
+            60,              // interval_sec
+            1704067200,      // run_id
+            1704067200,      // base_ts_unix_sec
+        );
+
+        let json = snapshot.to_json();
+        let restored = Snapshot::from_json(&json).expect("deserialize v5 snapshot");
+
+        assert_eq!(restored.version, 5);
+        assert_eq!(restored.interval_sec, 60);
+        assert_eq!(restored.run_id, 1704067200);
+        assert_eq!(restored.counter_mode, "cumulative");
+        assert_eq!(restored.base_ts_unix_sec, 1704067200);
+        assert_eq!(restored.ts_unix_sec, 1704067260);
+        assert_eq!(restored.buckets.len(), 1);
+    }
+
+    #[test]
+    fn test_v5_run_id_constant_across_snapshots() {
+        // Multiple snapshots in same run should have same run_id
+        let run_id = 1704067200u64;
+        let base_ts = 1704067200u64;
+
+        let snap1 = Snapshot::new(1704067200, &[8080], vec![], 60, run_id, base_ts);
+        let snap2 = Snapshot::new(1704067260, &[8080], vec![], 60, run_id, base_ts);
+        let snap3 = Snapshot::new(1704067320, &[8080], vec![], 60, run_id, base_ts);
+
+        assert_eq!(snap1.run_id, run_id);
+        assert_eq!(snap2.run_id, run_id);
+        assert_eq!(snap3.run_id, run_id);
+        assert_eq!(snap1.base_ts_unix_sec, base_ts);
+        assert_eq!(snap2.base_ts_unix_sec, base_ts);
+        assert_eq!(snap3.base_ts_unix_sec, base_ts);
+    }
+
+    #[test]
+    fn test_v4_json_rejected() {
+        // v4 JSON with all v5 fields should be rejected with version mismatch
+        // (We include v5 fields so serde can parse it, then version check fails)
+        let v4_json = r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
+
+        let result = Snapshot::from_json(v4_json);
+
+        assert!(result.is_err(), "v4 JSON should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, SnapshotError::VersionMismatch { expected: 5, found: 4 }),
+            "Expected version mismatch error, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_v5_missing_new_fields_rejected() {
+        // v5 without new fields should fail to parse
+        let incomplete_v5 = r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
+
+        let result = Snapshot::from_json(incomplete_v5);
+
+        assert!(result.is_err(), "v5 JSON missing new fields should be rejected");
     }
 }

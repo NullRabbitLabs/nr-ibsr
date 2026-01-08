@@ -618,7 +618,7 @@ mod tests {
         let writer = StandardSnapshotWriter::new(fs, PathBuf::from("/tmp/snapshots"));
 
         // 1704067200 = 2024-01-01 00:00:00 UTC
-        let snapshot = Snapshot::new(1704067200, &[8899], vec![]);
+        let snapshot = Snapshot::new(1704067200, &[8899], vec![], 60, 1704067200, 1704067200);
         let path = writer.write(&snapshot).expect("write");
 
         assert_eq!(path, PathBuf::from("/tmp/snapshots/snapshot_2024010100.jsonl"));
@@ -641,7 +641,7 @@ mod tests {
             bytes: 45000,
         };
         // 1704067200 = 2024-01-01 00:00:00 UTC
-        let snapshot = Snapshot::new(1704067200, &[8899], vec![bucket]);
+        let snapshot = Snapshot::new(1704067200, &[8899], vec![bucket], 60, 1704067200, 1704067200);
         writer.write(&snapshot).expect("write");
 
         // Access the underlying filesystem to check content
@@ -672,9 +672,9 @@ mod tests {
         let writer = StandardSnapshotWriter::new(fs, PathBuf::from("/tmp/snapshots"));
 
         // All timestamps in 2024-01-01 00:xx:xx UTC (same hour)
-        let snapshot1 = Snapshot::new(1704067200, &[8899], vec![]); // 00:00:00
-        let snapshot2 = Snapshot::new(1704068000, &[8899], vec![]); // 00:13:20
-        let snapshot3 = Snapshot::new(1704069000, &[8899], vec![]); // 00:30:00
+        let snapshot1 = Snapshot::new(1704067200, &[8899], vec![], 60, 1704067200, 1704067200); // 00:00:00
+        let snapshot2 = Snapshot::new(1704068000, &[8899], vec![], 60, 1704067200, 1704067200); // 00:13:20
+        let snapshot3 = Snapshot::new(1704069000, &[8899], vec![], 60, 1704067200, 1704067200); // 00:30:00
 
         writer.write(&snapshot1).expect("write 1");
         writer.write(&snapshot2).expect("write 2");
@@ -698,9 +698,9 @@ mod tests {
         let writer = StandardSnapshotWriter::new(fs, PathBuf::from("/tmp/snapshots"));
 
         // Different hours
-        let snapshot1 = Snapshot::new(1704067200, &[8899], vec![]); // 2024-01-01 00:00
-        let snapshot2 = Snapshot::new(1704070800, &[8899], vec![]); // 2024-01-01 01:00
-        let snapshot3 = Snapshot::new(1704074400, &[8899], vec![]); // 2024-01-01 02:00
+        let snapshot1 = Snapshot::new(1704067200, &[8899], vec![], 60, 1704067200, 1704067200); // 2024-01-01 00:00
+        let snapshot2 = Snapshot::new(1704070800, &[8899], vec![], 60, 1704067200, 1704067200); // 2024-01-01 01:00
+        let snapshot3 = Snapshot::new(1704074400, &[8899], vec![], 60, 1704067200, 1704067200); // 2024-01-01 02:00
 
         writer.write(&snapshot1).expect("write 1");
         writer.write(&snapshot2).expect("write 2");
@@ -976,7 +976,7 @@ mod tests {
             bytes: 45000,
         };
         // 1704067200 = 2024-01-01 00:00:00 UTC
-        let snapshot = Snapshot::new(1704067200, &[8899], vec![bucket]);
+        let snapshot = Snapshot::new(1704067200, &[8899], vec![bucket], 60, 1704067200, 1704067200);
         let path = writer.write(&snapshot).expect("write");
 
         assert!(path.exists());
@@ -996,7 +996,7 @@ mod tests {
         assert!(!output_dir.exists());
 
         // 1704067200 = 2024-01-01 00:00:00 UTC
-        let snapshot = Snapshot::new(1704067200, &[8899], vec![]);
+        let snapshot = Snapshot::new(1704067200, &[8899], vec![], 60, 1704067200, 1704067200);
         writer.write(&snapshot).expect("write");
 
         assert!(output_dir.exists());

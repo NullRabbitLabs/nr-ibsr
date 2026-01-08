@@ -205,7 +205,7 @@ mod tests {
     // ===========================================
 
     fn make_snapshot(ts: u64, dst_ports: &[u16], buckets: Vec<BucketEntry>) -> Snapshot {
-        Snapshot::new(ts, dst_ports, buckets)
+        Snapshot::new(ts, dst_ports, buckets, 60, ts, ts)
     }
 
     fn make_bucket(key_value: u32, syn: u32, ack: u32) -> BucketEntry {
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_parse_snapshot_valid_json() {
-        let json = r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
+        let json = r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
         let snapshot = parse_snapshot(json).unwrap();
         assert_eq!(snapshot.ts_unix_sec, 1000);
         assert_eq!(snapshot.dst_ports, vec![8080]);
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn test_parse_snapshot_with_buckets() {
-        let json = r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[{"key_type":"src_ip","src_ip":"10.0.0.1","dst_port":8080,"syn":100,"ack":50,"handshake_ack":50,"rst":5,"packets":155,"bytes":15500}]}"#;
+        let json = r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[{"key_type":"src_ip","src_ip":"10.0.0.1","dst_port":8080,"syn":100,"ack":50,"handshake_ack":50,"rst":5,"packets":155,"bytes":15500}]}"#;
         let snapshot = parse_snapshot(json).unwrap();
         assert_eq!(snapshot.buckets.len(), 1);
         assert_eq!(snapshot.buckets[0].syn, 100);
@@ -254,14 +254,14 @@ mod tests {
 
     #[test]
     fn test_parse_snapshot_wrong_version() {
-        let json = r#"{"version":999,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
+        let json = r#"{"version":999,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
         let result = parse_snapshot(json);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_snapshot_missing_field() {
-        let json = r#"{"version":4,"ts_unix_sec":1000}"#;
+        let json = r#"{"version":5,"ts_unix_sec":1000}"#;
         let result = parse_snapshot(json);
         assert!(result.is_err());
     }
@@ -333,9 +333,9 @@ mod tests {
     #[test]
     fn test_parse_snapshots_lenient_skips_malformed() {
         let files = vec![
-            ("snap_1000.jsonl".to_string(), r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#.to_string()),
+            ("snap_1000.jsonl".to_string(), r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#.to_string()),
             ("snap_1001.jsonl".to_string(), "invalid json".to_string()),
-            ("snap_1002.jsonl".to_string(), r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1002,"dst_ports":[8080],"buckets":[]}"#.to_string()),
+            ("snap_1002.jsonl".to_string(), r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1002,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#.to_string()),
         ];
 
         let mut warnings = Vec::new();
@@ -354,7 +354,7 @@ mod tests {
     fn test_parse_snapshots_lenient_no_warn_fn() {
         let files = vec![
             ("snap_1000.jsonl".to_string(), "invalid".to_string()),
-            ("snap_1001.jsonl".to_string(), r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1001,"dst_ports":[8080],"buckets":[]}"#.to_string()),
+            ("snap_1001.jsonl".to_string(), r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1001,"interval_sec":60,"run_id":1001,"counter_mode":"cumulative","base_ts_unix_sec":1001,"dst_ports":[8080],"buckets":[]}"#.to_string()),
         ];
 
         let snapshots = parse_snapshots_lenient::<fn(&str, &str)>(files, None);
@@ -375,9 +375,9 @@ mod tests {
     #[test]
     fn test_parse_snapshots_lenient_multiline_jsonl() {
         // Simulate hourly file with multiple snapshots (as written by the collector)
-        let multiline_content = r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}
-{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1001,"dst_ports":[8080],"buckets":[]}
-{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1002,"dst_ports":[8080],"buckets":[]}"#;
+        let multiline_content = r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}
+{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1001,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}
+{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1002,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
 
         let files = vec![
             ("hourly_file.jsonl".to_string(), multiline_content.to_string()),
@@ -394,11 +394,11 @@ mod tests {
     #[test]
     fn test_parse_snapshots_lenient_multiline_with_empty_lines() {
         // File with empty lines interspersed
-        let content = r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}
+        let content = r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}
 
-{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1001,"dst_ports":[8080],"buckets":[]}
+{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1001,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}
 
-{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1002,"dst_ports":[8080],"buckets":[]}"#;
+{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1002,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
 
         let files = vec![("file.jsonl".to_string(), content.to_string())];
         let snapshots = parse_snapshots_lenient::<fn(&str, &str)>(files, None);
@@ -409,9 +409,9 @@ mod tests {
     #[test]
     fn test_parse_snapshots_lenient_multiline_partial_failure() {
         // One valid line, one invalid line in same file
-        let content = r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}
+        let content = r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}
 invalid json line
-{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1002,"dst_ports":[8080],"buckets":[]}"#;
+{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1002,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
 
         let files = vec![("file.jsonl".to_string(), content.to_string())];
         let mut warnings = Vec::new();
@@ -579,11 +579,11 @@ invalid json line
         // Create test files
         std::fs::write(
             dir.path().join("snapshot_1000.jsonl"),
-            r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
+            r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
         std::fs::write(
             dir.path().join("snapshot_1001.jsonl"),
-            r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1001,"dst_ports":[8080],"buckets":[]}"#,
+            r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1001,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
         // Non-jsonl file should be ignored
         std::fs::write(dir.path().join("readme.txt"), "ignored").unwrap();
@@ -599,11 +599,11 @@ invalid json line
 
         std::fs::write(
             dir.path().join("snapshot_1000.jsonl"),
-            r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
+            r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
         std::fs::write(
             dir.path().join("snapshot_1002.jsonl"),
-            r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1002,"dst_ports":[8080],"buckets":[]}"#,
+            r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1002,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
 
         let stream = load_snapshots_from_dir::<fn(&str, &str)>(dir.path(), None).unwrap();
@@ -629,7 +629,7 @@ invalid json line
 
         std::fs::write(
             dir.path().join("snapshot_1000.jsonl"),
-            r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
+            r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#,
         ).unwrap();
         std::fs::write(
             dir.path().join("snapshot_1001.jsonl"),

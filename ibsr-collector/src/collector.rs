@@ -44,6 +44,12 @@ pub struct CollectorConfig {
 
     /// Rotation settings.
     pub rotation: RotationConfig,
+
+    /// Snapshot emission interval in seconds (e.g., 60 for one snapshot per minute).
+    pub interval_sec: u32,
+
+    /// Stable run identifier: Unix timestamp when the run started.
+    pub run_id: u64,
 }
 
 /// Perform a single collection cycle.
@@ -53,6 +59,15 @@ pub struct CollectorConfig {
 /// 2. Convert to snapshot with current timestamp
 /// 3. Write snapshot to disk
 /// 4. Rotate old snapshots
+///
+/// # Arguments
+/// * `map_reader` - Source of counter data
+/// * `clock` - Clock for timestamps
+/// * `writer` - Destination for snapshot data
+/// * `fs` - Filesystem for rotation
+/// * `output_dir` - Directory for snapshot files
+/// * `config` - Collector configuration (ports, rotation, interval, run_id)
+/// * `base_ts_unix_sec` - First snapshot timestamp of this run
 pub fn collect_once<M, C, F, W>(
     map_reader: &M,
     clock: &C,
@@ -60,6 +75,7 @@ pub fn collect_once<M, C, F, W>(
     fs: &F,
     output_dir: &Path,
     config: &CollectorConfig,
+    base_ts_unix_sec: u64,
 ) -> Result<CollectResult, CollectorError>
 where
     M: MapReader,
@@ -71,7 +87,14 @@ where
     let counters = map_reader.read_counters()?;
 
     // Convert to snapshot
-    let snapshot = counters_to_snapshot(&counters, clock, &config.dst_ports);
+    let snapshot = counters_to_snapshot(
+        &counters,
+        clock,
+        &config.dst_ports,
+        config.interval_sec,
+        config.run_id,
+        base_ts_unix_sec,
+    );
     let timestamp = snapshot.ts_unix_sec;
     let bucket_count = snapshot.buckets.len();
 
@@ -117,9 +140,11 @@ mod tests {
         let config = CollectorConfig {
             dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 86400),
+            interval_sec: 60,
+            run_id: HOUR_0,
         };
 
-        let result = collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config)
+        let result = collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config, HOUR_0)
             .expect("collect");
 
         assert_eq!(result.bucket_count, 0);
@@ -165,9 +190,11 @@ mod tests {
         let config = CollectorConfig {
             dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 86400),
+            interval_sec: 60,
+            run_id: HOUR_0,
         };
 
-        let result = collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config)
+        let result = collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config, HOUR_0)
             .expect("collect");
 
         assert_eq!(result.bucket_count, 2);
@@ -190,9 +217,11 @@ mod tests {
         let config = CollectorConfig {
             dst_ports: vec![8899],
             rotation: RotationConfig::new(2, 86400), // Max 2 files
+            interval_sec: 60,
+            run_id: HOUR_0,
         };
 
-        let result = collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config)
+        let result = collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config, HOUR_0)
             .expect("collect");
 
         // Should have rotated 2 files (keeping newest 2: HOUR_2 and HOUR_3)
@@ -218,9 +247,11 @@ mod tests {
         let config = CollectorConfig {
             dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 7200), // Max age 2 hours (7200 sec)
+            interval_sec: 60,
+            run_id: HOUR_0,
         };
 
-        let result = collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config)
+        let result = collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config, HOUR_0)
             .expect("collect");
 
         // Old snapshot should be rotated
@@ -239,6 +270,8 @@ mod tests {
         let config = CollectorConfig {
             dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 86400),
+            interval_sec: 60,
+            run_id: HOUR_0,
         };
 
         // Cycle 1: HOUR_0
@@ -247,7 +280,7 @@ mod tests {
         map_reader.add_counter(MapKey { src_ip: 0x0A000001, dst_port: 8899 }, Counters {
             syn: 10, ack: 20, handshake_ack: 10, rst: 0, packets: 30, bytes: 1000,
         });
-        collect_once(&map_reader, &clock1, &writer1, &*fs, &output_dir, &config).expect("cycle 1");
+        collect_once(&map_reader, &clock1, &writer1, &*fs, &output_dir, &config, HOUR_0).expect("cycle 1");
 
         // Cycle 2: HOUR_1
         let clock2 = MockClock::new(HOUR_1);
@@ -255,12 +288,12 @@ mod tests {
         map_reader.add_counter(MapKey { src_ip: 0x0A000002, dst_port: 8899 }, Counters {
             syn: 5, ack: 10, handshake_ack: 5, rst: 1, packets: 16, bytes: 500,
         });
-        collect_once(&map_reader, &clock2, &writer2, &*fs, &output_dir, &config).expect("cycle 2");
+        collect_once(&map_reader, &clock2, &writer2, &*fs, &output_dir, &config, HOUR_0).expect("cycle 2");
 
         // Cycle 3: HOUR_2
         let clock3 = MockClock::new(HOUR_2);
         let writer3 = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir.clone());
-        collect_once(&map_reader, &clock3, &writer3, &*fs, &output_dir, &config).expect("cycle 3");
+        collect_once(&map_reader, &clock3, &writer3, &*fs, &output_dir, &config, HOUR_0).expect("cycle 3");
 
         // Should have 3 snapshots (one per hour)
         let files = fs.list_snapshots(&output_dir).expect("list");
@@ -280,9 +313,11 @@ mod tests {
         let config = CollectorConfig {
             dst_ports: vec![9000, 8080], // Multiple ports
             rotation: RotationConfig::new(100, 86400),
+            interval_sec: 60,
+            run_id: HOUR_0,
         };
 
-        collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config).expect("collect");
+        collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config, HOUR_0).expect("collect");
 
         // Read the snapshot and verify dst_ports (sorted)
         let path = output_dir.join("snapshot_2024010100.jsonl");
@@ -311,9 +346,13 @@ mod tests {
         let config = CollectorConfig {
             dst_ports: vec![8899, 8080],
             rotation: RotationConfig::new(100, 3600),
+            interval_sec: 60,
+            run_id: HOUR_0,
         };
         let cloned = config.clone();
         assert_eq!(cloned.dst_ports, vec![8899, 8080]);
+        assert_eq!(cloned.interval_sec, 60);
+        assert_eq!(cloned.run_id, HOUR_0);
     }
 
     #[test]
@@ -333,11 +372,15 @@ mod tests {
         let config = CollectorConfig {
             dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 3600),
+            interval_sec: 60,
+            run_id: HOUR_0,
         };
         let debug = format!("{:?}", config);
         assert!(debug.contains("dst_ports"));
         assert!(debug.contains("8899"));
         assert!(debug.contains("rotation"));
+        assert!(debug.contains("interval_sec"));
+        assert!(debug.contains("run_id"));
     }
 
     #[test]
@@ -350,9 +393,11 @@ mod tests {
         let config = CollectorConfig {
             dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 86400),
+            interval_sec: 60,
+            run_id: 1000,
         };
 
-        let result = collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config);
+        let result = collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config, 1000);
         assert!(result.is_err());
         assert!(matches!(result, Err(CollectorError::MapRead(_))));
     }
@@ -367,9 +412,11 @@ mod tests {
         let config = CollectorConfig {
             dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 86400),
+            interval_sec: 60,
+            run_id: 1000,
         };
 
-        let result = collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config);
+        let result = collect_once(&map_reader, &clock, &writer, &*fs, &output_dir, &config, 1000);
         assert!(result.is_err());
         assert!(matches!(result, Err(CollectorError::Write(_))));
     }
@@ -384,9 +431,11 @@ mod tests {
         let config = CollectorConfig {
             dst_ports: vec![8899],
             rotation: RotationConfig::new(100, 86400),
+            interval_sec: 60,
+            run_id: 1000,
         };
 
-        let result = collect_once(&map_reader, &clock, &writer, &fs, &output_dir, &config);
+        let result = collect_once(&map_reader, &clock, &writer, &fs, &output_dir, &config, 1000);
         assert!(result.is_err());
         assert!(matches!(result, Err(CollectorError::Write(_))));
     }
