@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "generated_at": 1005,
   "match_criteria": {
     "proto": "tcp",
@@ -11,6 +11,7 @@
     {
       "key_type": "src_ip",
       "key_value": "10.0.0.1",
+      "abuse_class": "SYN_FLOOD_LIKE",
       "window_sec": 10,
       "syn_rate_threshold": 100.0,
       "success_ratio_threshold": 0.1,

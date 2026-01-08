@@ -38,7 +38,7 @@ No abuse pattern detected matching the trigger conditions.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "generated_at": 1000,
   "match_criteria": {
     "proto": "tcp",

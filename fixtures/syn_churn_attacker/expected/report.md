@@ -43,7 +43,7 @@ Detected 1 source(s) matching abuse pattern (TCP SYN churn).
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "generated_at": 1000,
   "match_criteria": {
     "proto": "tcp",
@@ -55,6 +55,7 @@ Detected 1 source(s) matching abuse pattern (TCP SYN churn).
     {
       "key_type": "src_ip",
       "key_value": "10.0.0.1",
+      "abuse_class": "SYN_FLOOD_LIKE",
       "window_sec": 10,
       "syn_rate_threshold": 100.0,
       "success_ratio_threshold": 0.1,
