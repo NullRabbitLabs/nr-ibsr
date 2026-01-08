@@ -8,6 +8,7 @@ use ibsr_reporter::decision::{evaluate_key, Decision, KeyDecision};
 use ibsr_reporter::ingest::{load_snapshots_from_dir, IngestError, SnapshotStream};
 use ibsr_reporter::report::{self, Report};
 use ibsr_reporter::rules::{self, EnforcementRules};
+use ibsr_reporter::summary::{Summary, SummaryBuilder};
 use ibsr_reporter::window;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -20,11 +21,11 @@ struct Args {
     #[arg(short = 'i', long = "in")]
     input_dir: PathBuf,
 
-    /// Output directory for generated files (rules.json, report.md, evidence.csv)
+    /// Output directory for generated files (rules.json, report.md, evidence.csv, summary.json)
     #[arg(short = 'o', long = "out")]
     output_dir: PathBuf,
 
-    /// Destination TCP ports as comma-separated list (e.g., 8899,8900)
+    /// Destination TCP ports as comma-separated list (optional filter, inferred from snapshots if omitted)
     #[arg(long = "dst-ports", value_delimiter = ',')]
     dst_ports: Vec<u16>,
 
@@ -36,11 +37,11 @@ struct Args {
     #[arg(long, default_value_t = 10)]
     window_sec: u64,
 
-    /// SYN rate threshold (SYNs per second)
+    /// SYN flood: SYN rate threshold (SYNs per second)
     #[arg(long, default_value_t = 100.0)]
     syn_rate_threshold: f64,
 
-    /// Success ratio threshold (ACK/SYN)
+    /// SYN flood: Success ratio threshold (ACK/SYN)
     #[arg(long, default_value_t = 0.1)]
     success_ratio_threshold: f64,
 
@@ -56,6 +57,18 @@ struct Args {
     #[arg(long, default_value_t = 10)]
     min_samples_for_fp: usize,
 
+    /// Volumetric abuse: SYN rate threshold (SYNs per second)
+    #[arg(long, default_value_t = 500.0)]
+    vol_syn_rate: f64,
+
+    /// Volumetric abuse: Packet rate threshold (packets per second)
+    #[arg(long, default_value_t = 1000.0)]
+    vol_pkt_rate: f64,
+
+    /// Volumetric abuse: Byte rate threshold (bytes per second)
+    #[arg(long, default_value_t = 1_000_000.0)]
+    vol_byte_rate: f64,
+
     /// Increase verbosity (-v for warnings, -vv for debug)
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     verbose: u8,
@@ -66,8 +79,8 @@ enum ReportError {
     #[error("input directory does not exist: {0}")]
     InputNotFound(PathBuf),
 
-    #[error("at least one destination port is required (use --dst-ports)")]
-    NoPortsSpecified,
+    #[error("no destination ports found in snapshots or specified via --dst-ports")]
+    NoPortsFound,
 
     #[error("failed to load snapshots: {0}")]
     Ingest(#[from] IngestError),
@@ -100,7 +113,7 @@ fn main() -> ExitCode {
 
 fn exit_code(err: &ReportError) -> u8 {
     match err {
-        ReportError::InputNotFound(_) | ReportError::NoPortsSpecified => 2,
+        ReportError::InputNotFound(_) | ReportError::NoPortsFound => 2,
         ReportError::AllowlistParse { .. } => 3,
         ReportError::Ingest(_) | ReportError::OutputDirCreate(_) | ReportError::WriteError { .. } => {
             1
@@ -113,14 +126,8 @@ fn run(args: Args) -> Result<(), ReportError> {
     if !args.input_dir.exists() {
         return Err(ReportError::InputNotFound(args.input_dir));
     }
-    if args.dst_ports.is_empty() {
-        return Err(ReportError::NoPortsSpecified);
-    }
 
-    // Build config
-    let config = build_config(&args)?;
-
-    // Load snapshots
+    // Load snapshots first (to infer ports if not specified)
     let stream = if args.verbose > 0 {
         load_snapshots_from_dir(&args.input_dir, Some(|loc: &str, err: &str| {
             eprintln!("warning: {loc}: {err}");
@@ -129,12 +136,30 @@ fn run(args: Args) -> Result<(), ReportError> {
         load_snapshots_from_dir::<fn(&str, &str)>(&args.input_dir, None)?
     };
 
+    // Determine dst_ports: use CLI if provided, otherwise infer from snapshots
+    let dst_ports = if args.dst_ports.is_empty() {
+        let inferred = stream.inferred_dst_ports();
+        if inferred.is_empty() {
+            return Err(ReportError::NoPortsFound);
+        }
+        if args.verbose > 0 {
+            eprintln!("info: inferred dst_ports from snapshots: {:?}", inferred);
+        }
+        inferred
+    } else {
+        // CLI ports act as a filter
+        args.dst_ports.clone()
+    };
+
+    // Build config with determined ports
+    let config = build_config(&args, dst_ports)?;
+
     // Get current timestamp for rules generation
     let clock = SystemClock;
     let current_ts = clock.now_unix_sec();
 
     // Execute pipeline
-    let (report, rules, decisions) = execute_pipeline(&stream, &config, current_ts);
+    let (report, rules, decisions, summary) = execute_pipeline(&stream, &config, current_ts);
 
     // Create output directory
     std::fs::create_dir_all(&args.output_dir).map_err(ReportError::OutputDirCreate)?;
@@ -160,11 +185,18 @@ fn run(args: Args) -> Result<(), ReportError> {
         }
     })?;
 
+    let summary_path = args.output_dir.join("summary.json");
+    std::fs::write(&summary_path, summary.to_json()).map_err(|e| ReportError::WriteError {
+        file: "summary.json".to_string(),
+        source: e,
+    })?;
+
     // Print summary
     println!("Generated files in {}:", args.output_dir.display());
     println!("  - rules.json");
     println!("  - report.md");
     println!("  - evidence.csv");
+    println!("  - summary.json");
 
     let blocked_count = decisions
         .iter()
@@ -188,14 +220,17 @@ fn run(args: Args) -> Result<(), ReportError> {
     Ok(())
 }
 
-fn build_config(args: &Args) -> Result<ReporterConfig, ReportError> {
-    let mut config = ReporterConfig::new(args.dst_ports.clone())
+fn build_config(args: &Args, dst_ports: Vec<u16>) -> Result<ReporterConfig, ReportError> {
+    let mut config = ReporterConfig::new(dst_ports)
         .with_window_sec(args.window_sec)
         .with_syn_rate_threshold(args.syn_rate_threshold)
         .with_success_ratio_threshold(args.success_ratio_threshold)
         .with_block_duration_sec(args.block_duration_sec)
         .with_fp_safe_ratio(args.fp_safe_ratio)
-        .with_min_samples_for_fp(args.min_samples_for_fp);
+        .with_min_samples_for_fp(args.min_samples_for_fp)
+        .with_vol_syn_rate(args.vol_syn_rate)
+        .with_vol_pkt_rate(args.vol_pkt_rate)
+        .with_vol_byte_rate(args.vol_byte_rate);
 
     if let Some(allowlist_path) = &args.allowlist {
         let content = std::fs::read_to_string(allowlist_path).map_err(|e| {
@@ -241,46 +276,51 @@ fn execute_pipeline(
     snapshots: &SnapshotStream,
     config: &ReporterConfig,
     current_ts: u64,
-) -> (Report, EnforcementRules, Vec<KeyDecision>) {
+) -> (Report, EnforcementRules, Vec<KeyDecision>, Summary) {
     let bounds = snapshots.bounds();
 
-    // Extract dst_ports from first snapshot if available, otherwise use config
-    let dst_ports = snapshots
-        .snapshots()
-        .first()
-        .map(|s| s.dst_ports.clone())
-        .unwrap_or_else(|| config.dst_ports.clone());
+    // Get run_id and schema versions from snapshots
+    let run_id = snapshots.inferred_run_id().unwrap_or(0);
+    let (schema_min, schema_max) = snapshots.schema_version_range();
 
-    // Create config with correct dst_ports
-    let mut config = config.clone();
-    config.dst_ports = dst_ports;
-
-    // Aggregate statistics
+    // Aggregate statistics using v2 (correct delta computation)
     let snapshot_refs: Vec<_> = snapshots.snapshots().iter().collect();
-    let aggregated = window::aggregate_snapshots(&snapshot_refs, config.window_sec);
+    let aggregated = window::aggregate_snapshots_v2(&snapshot_refs, config.window_sec);
     let sorted = window::sorted_aggregated(&aggregated);
 
     // Evaluate decisions
     let decisions: Vec<KeyDecision> = sorted
         .iter()
-        .map(|(key, stats)| evaluate_key(*key, *stats, &config, current_ts))
+        .map(|(key, stats)| evaluate_key(*key, *stats, config, current_ts))
         .collect();
 
     // Compute counterfactual
-    let counterfactual = counterfactual::compute(&decisions, &config);
+    let counterfactual = counterfactual::compute(&decisions, config);
 
     // Generate rules and report
-    let rules = rules::generate(&counterfactual.top_offenders, &config, current_ts);
-    let report = report::generate(&bounds, &config, &counterfactual, &rules);
+    let rules = rules::generate(&counterfactual.top_offenders, config, current_ts);
+    let report = report::generate(&bounds, config, &counterfactual, &rules);
 
-    (report, rules, decisions)
+    // Build summary
+    let summary = SummaryBuilder::new(run_id, bounds)
+        .with_schema_versions(schema_min, schema_max)
+        .with_ports(config.dst_ports.clone())
+        .with_window_sec(config.window_sec)
+        .with_syn_thresholds(config.syn_rate_threshold, config.success_ratio_threshold)
+        .with_block_duration(config.block_duration_sec)
+        .with_volumetric_thresholds(config.vol_syn_rate, config.vol_pkt_rate, config.vol_byte_rate)
+        .with_counterfactual(counterfactual)
+        .with_enforcement(report.readiness.is_safe, report.readiness.reasons.clone())
+        .build();
+
+    (report, rules, decisions, summary)
 }
 
 fn generate_evidence_csv(decisions: &[KeyDecision]) -> String {
     let mut lines = Vec::with_capacity(decisions.len() + 1);
 
     // Header
-    lines.push("source,syn_rate,success_ratio,decision,packets,bytes,syn".to_string());
+    lines.push("source,abuse_class,syn_rate,success_ratio,decision,packets,bytes,syn".to_string());
 
     // Sort decisions for deterministic output
     let mut sorted: Vec<_> = decisions.iter().collect();
@@ -289,14 +329,16 @@ fn generate_evidence_csv(decisions: &[KeyDecision]) -> String {
     // Data rows
     for d in sorted {
         let source = d.key.to_display_string();
+        let abuse_class = d.abuse_class.map(|c| c.to_string()).unwrap_or_else(|| "".to_string());
         let decision_str = match d.decision {
             Decision::Allow => "allow",
             Decision::Block { .. } => "block",
         };
 
         lines.push(format!(
-            "{},{:.2},{:.4},{},{},{},{}",
+            "{},{},{:.2},{:.4},{},{},{},{}",
             source,
+            abuse_class,
             d.stats.syn_rate,
             d.stats.success_ratio,
             decision_str,

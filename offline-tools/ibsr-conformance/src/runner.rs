@@ -200,7 +200,7 @@ fn generate_evidence_csv(decisions: &[KeyDecision]) -> String {
     let mut lines = Vec::with_capacity(decisions.len() + 1);
 
     // Header
-    lines.push("source,syn_rate,success_ratio,decision,packets,bytes,syn".to_string());
+    lines.push("source,abuse_class,syn_rate,success_ratio,decision,packets,bytes,syn".to_string());
 
     // Sort decisions for deterministic output
     let mut sorted: Vec<_> = decisions.iter().collect();
@@ -209,14 +209,16 @@ fn generate_evidence_csv(decisions: &[KeyDecision]) -> String {
     // Data rows
     for d in sorted {
         let source = d.key.to_display_string();
+        let abuse_class = d.abuse_class.map(|c| c.to_string()).unwrap_or_else(|| "".to_string());
         let decision_str = match d.decision {
             Decision::Allow => "allow",
             Decision::Block { .. } => "block",
         };
 
         lines.push(format!(
-            "{},{:.2},{:.4},{},{},{},{}",
+            "{},{},{:.2},{:.4},{},{},{},{}",
             source,
+            abuse_class,
             d.stats.syn_rate,
             d.stats.success_ratio,
             decision_str,
@@ -416,11 +418,12 @@ mod tests {
     #[test]
     fn test_generate_evidence_csv_empty() {
         let csv = generate_evidence_csv(&[]);
-        assert_eq!(csv, "source,syn_rate,success_ratio,decision,packets,bytes,syn\n");
+        assert_eq!(csv, "source,abuse_class,syn_rate,success_ratio,decision,packets,bytes,syn\n");
     }
 
     #[test]
     fn test_generate_evidence_csv_single() {
+        use ibsr_reporter::abuse::{AbuseClass, DetectionConfidence};
         use ibsr_reporter::types::AggregatedKey;
 
         let decisions = vec![KeyDecision {
@@ -437,14 +440,16 @@ mod tests {
             },
             decision: Decision::Block { until_ts: 1000 },
             allowlisted: false,
+            abuse_class: Some(AbuseClass::SynFloodLike),
+            confidence: DetectionConfidence::High,
         }];
 
         let csv = generate_evidence_csv(&decisions);
         let lines: Vec<_> = csv.lines().collect();
 
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "source,syn_rate,success_ratio,decision,packets,bytes,syn");
-        assert_eq!(lines[1], "10.0.0.1:8080,20.00,0.1000,block,200,30000,100");
+        assert_eq!(lines[0], "source,abuse_class,syn_rate,success_ratio,decision,packets,bytes,syn");
+        assert_eq!(lines[1], "10.0.0.1:8080,SYN_FLOOD_LIKE,20.00,0.1000,block,200,30000,100");
     }
 
     // -------------------------------------------

@@ -22,6 +22,7 @@ pub struct CounterfactualResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Offender {
     pub key: AggregatedKey,
+    pub abuse_class: String,
     pub syn_rate: f64,
     pub success_ratio: f64,
     pub would_block_packets: u64,
@@ -80,6 +81,7 @@ pub fn compute(decisions: &[KeyDecision], config: &ReporterConfig) -> Counterfac
         .iter()
         .map(|d| Offender {
             key: d.key,
+            abuse_class: d.abuse_class.map(|c| c.to_string()).unwrap_or_else(|| "UNKNOWN".to_string()),
             syn_rate: d.stats.syn_rate,
             success_ratio: d.stats.success_ratio,
             would_block_packets: d.stats.total_packets,
@@ -185,6 +187,8 @@ mod tests {
         blocked: bool,
         allowlisted: bool,
     ) -> KeyDecision {
+        use crate::abuse::{AbuseClass, DetectionConfidence};
+
         KeyDecision {
             key: make_key(ip),
             stats: AggregatedStats {
@@ -202,6 +206,8 @@ mod tests {
                 Decision::Allow
             },
             allowlisted,
+            abuse_class: if blocked { Some(AbuseClass::SynFloodLike) } else { None },
+            confidence: DetectionConfidence::High,
         }
     }
 
@@ -533,6 +539,7 @@ mod tests {
         let offenders = vec![
             Offender {
                 key: make_key(1),
+                abuse_class: "SYN_FLOOD_LIKE".to_string(),
                 syn_rate: 100.0,
                 success_ratio: 0.05,
                 would_block_packets: 100,
@@ -541,6 +548,7 @@ mod tests {
             },
             Offender {
                 key: make_key(2),
+                abuse_class: "SYN_FLOOD_LIKE".to_string(),
                 syn_rate: 200.0,
                 success_ratio: 0.05,
                 would_block_packets: 200,

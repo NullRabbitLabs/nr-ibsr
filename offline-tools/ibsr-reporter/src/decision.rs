@@ -1,5 +1,6 @@
 //! Decision engine - trigger logic and allowlist bypass.
 
+use crate::abuse::{detect_abuse, AbuseClass, DetectionConfidence, ExtendedStats, VolumetricThresholds};
 use crate::config::ReporterConfig;
 use crate::types::{AggregatedKey, AggregatedStats};
 use serde::{Deserialize, Serialize};
@@ -18,13 +19,17 @@ pub struct KeyDecision {
     pub stats: AggregatedStats,
     pub decision: Decision,
     pub allowlisted: bool,
+    /// Abuse class that triggered (if any).
+    pub abuse_class: Option<AbuseClass>,
+    /// Detection confidence.
+    pub confidence: DetectionConfidence,
 }
 
-/// Evaluate a single key against the trigger condition.
+/// Evaluate a single key against abuse detection.
 ///
-/// Trigger fires when:
-/// - `syn_rate >= syn_rate_threshold`
-/// - AND `success_ratio <= success_ratio_threshold`
+/// Triggers on:
+/// - SYN_FLOOD_LIKE: `syn_rate >= threshold` AND `success_ratio <= threshold`
+/// - VOLUMETRIC_TCP_ABUSE: at least 2 of 3 volumetric metrics exceed thresholds
 ///
 /// If allowlisted, always returns Allow.
 pub fn evaluate_key(
@@ -35,14 +40,33 @@ pub fn evaluate_key(
 ) -> KeyDecision {
     let allowlisted = config.allowlist.contains(key.key_value);
 
-    let decision = if allowlisted {
-        Decision::Allow
-    } else if should_trigger(&stats, config) {
-        Decision::Block {
-            until_ts: current_ts + config.block_duration_sec,
-        }
+    // Build extended stats for abuse detection
+    let ext_stats = ExtendedStats::from_aggregated(&stats, config.window_sec);
+    let vol_thresholds = VolumetricThresholds {
+        syn_rate: config.vol_syn_rate,
+        pkt_rate: config.vol_pkt_rate,
+        byte_rate: config.vol_byte_rate,
+    };
+
+    // Run abuse detection
+    let detection = detect_abuse(
+        &ext_stats,
+        config.syn_rate_threshold,
+        config.success_ratio_threshold,
+        &vol_thresholds,
+    );
+
+    let (decision, abuse_class) = if allowlisted {
+        (Decision::Allow, None)
+    } else if let Some(abuse) = detection.abuse_class {
+        (
+            Decision::Block {
+                until_ts: current_ts + config.block_duration_sec,
+            },
+            Some(abuse),
+        )
     } else {
-        Decision::Allow
+        (Decision::Allow, None)
     };
 
     KeyDecision {
@@ -50,13 +74,9 @@ pub fn evaluate_key(
         stats,
         decision,
         allowlisted,
+        abuse_class,
+        confidence: detection.confidence,
     }
-}
-
-/// Check if trigger condition is met.
-fn should_trigger(stats: &AggregatedStats, config: &ReporterConfig) -> bool {
-    stats.syn_rate >= config.syn_rate_threshold
-        && stats.success_ratio <= config.success_ratio_threshold
 }
 
 /// Evaluate all keys and return decisions.

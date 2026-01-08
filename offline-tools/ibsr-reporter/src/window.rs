@@ -130,6 +130,74 @@ pub fn sorted_aggregated(
     entries
 }
 
+/// Aggregate counters from multiple snapshots, skipping the first interval for each key.
+///
+/// Snapshots MUST be sorted by timestamp (ascending). This function computes
+/// deltas between consecutive snapshots. The first appearance of each key
+/// establishes a baseline but does NOT contribute to the delta sum.
+///
+/// This is the corrected behavior for cumulative BPF counters.
+pub fn aggregate_snapshots_v2(
+    snapshots: &[&Snapshot],
+    window_sec: u64,
+) -> HashMap<AggregatedKey, AggregatedStats> {
+    let mut aggregated: HashMap<AggregatedKey, RawCounters> = HashMap::new();
+
+    // Track previous values for each key to compute deltas
+    // Also track if we've seen this key before (to skip first interval)
+    let mut prev_values: HashMap<AggregatedKey, BucketCounters> = HashMap::new();
+
+    for snapshot in snapshots {
+        for bucket in &snapshot.buckets {
+            let key = AggregatedKey::new(bucket.key_type, bucket.key_value, bucket.dst_port);
+            let current = BucketCounters::from_bucket(bucket);
+
+            // Compute delta from previous snapshot, but skip first appearance
+            if let Some(prev) = prev_values.get(&key) {
+                let delta = current.delta_from(prev);
+
+                // Accumulate the delta
+                let entry = aggregated.entry(key).or_default();
+                entry.syn += delta.syn;
+                entry.ack += delta.ack;
+                entry.handshake_ack += delta.handshake_ack;
+                entry.rst += delta.rst;
+                entry.packets += delta.packets;
+                entry.bytes += delta.bytes;
+            }
+            // First appearance: just record baseline, don't add to aggregated
+
+            // Update previous value for next iteration
+            prev_values.insert(key, current);
+        }
+    }
+
+    // Convert raw counters to stats with derived metrics
+    aggregated
+        .into_iter()
+        .map(|(key, raw)| {
+            let stats = AggregatedStats {
+                total_syn: raw.syn,
+                total_ack: raw.ack,
+                total_rst: raw.rst,
+                total_packets: raw.packets,
+                total_bytes: raw.bytes,
+                syn_rate: if window_sec > 0 {
+                    raw.syn as f64 / window_sec as f64
+                } else {
+                    0.0
+                },
+                success_ratio: if raw.syn > 0 {
+                    raw.handshake_ack as f64 / raw.syn as f64
+                } else {
+                    0.0
+                },
+            };
+            (key, stats)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -590,5 +658,178 @@ mod tests {
 
         assert!(result.contains_key(&ip_key));
         assert!(result.contains_key(&cidr_key));
+    }
+
+    // ===========================================
+    // Delta computation with first-interval skip (new behavior)
+    // ===========================================
+    // These tests verify the corrected delta computation where first interval
+    // is SKIPPED (not using raw cumulative values as delta).
+
+    #[test]
+    fn test_aggregate_skips_first_interval_for_key() {
+        // Single snapshot means no delta can be computed - should skip this key entirely
+        // or report zero deltas (depending on implementation choice)
+        let s = make_snapshot(1000, &[8080], vec![
+            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
+        ]);
+
+        let result = aggregate_snapshots_v2(&[&s], 10);
+
+        // With skip-first-interval, a single snapshot produces no valid deltas
+        // The key should either not appear or have zero values
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        if let Some(stats) = result.get(&key) {
+            // If key is present, it should have zero counters
+            assert_eq!(stats.total_syn, 0);
+            assert_eq!(stats.total_packets, 0);
+        }
+        // Or key may not be present at all - either is acceptable
+    }
+
+    #[test]
+    fn test_aggregate_two_snapshots_computes_delta_correctly() {
+        // With skip-first-interval, first snapshot establishes baseline,
+        // second snapshot provides the first actual delta
+        let s1 = make_snapshot(1000, &[8080], vec![
+            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
+        ]);
+        let s2 = make_snapshot(1001, &[8080], vec![
+            make_bucket(0x0A000001, 8080, 200, 100, 100, 300, 30000),
+        ]);
+
+        let result = aggregate_snapshots_v2(&[&s1, &s2], 10);
+
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let stats = result.get(&key).unwrap();
+
+        // Only the delta from s1->s2 is counted: 200-100=100 SYN
+        assert_eq!(stats.total_syn, 100);
+        assert_eq!(stats.total_ack, 50);      // 100-50 = 50
+        assert_eq!(stats.total_packets, 150); // 300-150 = 150
+        assert_eq!(stats.total_bytes, 15000); // 30000-15000 = 15000
+    }
+
+    #[test]
+    fn test_aggregate_constant_counters_yields_zero_delta() {
+        // Cumulative counters that don't change should yield zero delta
+        let s1 = make_snapshot(1000, &[8080], vec![
+            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
+        ]);
+        let s2 = make_snapshot(1001, &[8080], vec![
+            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000), // Same values!
+        ]);
+
+        let result = aggregate_snapshots_v2(&[&s1, &s2], 10);
+
+        let key = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        let stats = result.get(&key).unwrap();
+
+        // Delta = 0 when counters don't change
+        assert_eq!(stats.total_syn, 0);
+        assert_eq!(stats.total_packets, 0);
+    }
+
+    #[test]
+    fn test_aggregate_key_appearing_midstream_skips_first() {
+        // A key that appears in s2 but not s1 should have its first appearance skipped
+        let s1 = make_snapshot(1000, &[8080], vec![
+            make_bucket(0x0A000001, 8080, 100, 50, 50, 150, 15000),
+        ]);
+        let s2 = make_snapshot(1001, &[8080], vec![
+            make_bucket(0x0A000001, 8080, 200, 100, 100, 300, 30000),
+            make_bucket(0x0A000002, 8080, 50, 25, 25, 75, 7500), // New key
+        ]);
+        let s3 = make_snapshot(1002, &[8080], vec![
+            make_bucket(0x0A000001, 8080, 300, 150, 150, 450, 45000),
+            make_bucket(0x0A000002, 8080, 100, 50, 50, 150, 15000), // Second appearance
+        ]);
+
+        let result = aggregate_snapshots_v2(&[&s1, &s2, &s3], 10);
+
+        // Key 0x0A000001: delta from s1->s2 (100) + delta from s2->s3 (100) = 200
+        let key1 = AggregatedKey::new(KeyType::SrcIp, 0x0A000001, Some(8080));
+        assert_eq!(result.get(&key1).unwrap().total_syn, 200);
+
+        // Key 0x0A000002: first seen in s2 (skipped), delta from s2->s3 only = 50
+        let key2 = AggregatedKey::new(KeyType::SrcIp, 0x0A000002, Some(8080));
+        assert_eq!(result.get(&key2).unwrap().total_syn, 50);
+    }
+
+    #[test]
+    fn test_aggregate_three_snapshots_monotonic() {
+        // Cumulative counters growing: 10, 20, 30
+        // Deltas (skipping first): 10, 10
+        // Total: 20
+        let s1 = make_snapshot(1000, &[8080], vec![make_bucket(1, 8080, 10, 5, 5, 15, 1500)]);
+        let s2 = make_snapshot(1001, &[8080], vec![make_bucket(1, 8080, 20, 10, 10, 30, 3000)]);
+        let s3 = make_snapshot(1002, &[8080], vec![make_bucket(1, 8080, 30, 15, 15, 45, 4500)]);
+
+        let result = aggregate_snapshots_v2(&[&s1, &s2, &s3], 10);
+
+        let key = AggregatedKey::new(KeyType::SrcIp, 1, Some(8080));
+        let stats = result.get(&key).unwrap();
+
+        // s1->s2 delta: 10, s2->s3 delta: 10. Total: 20
+        assert_eq!(stats.total_syn, 20);
+        assert_eq!(stats.total_ack, 10);      // 5 + 5
+        assert_eq!(stats.total_packets, 30);  // 15 + 15
+        assert_eq!(stats.total_bytes, 3000);  // 1500 + 1500
+    }
+
+    #[test]
+    fn test_aggregate_rates_based_on_delta_only() {
+        // With skip-first-interval, syn_rate = total_delta_syn / window_sec
+        let s1 = make_snapshot(1000, &[8080], vec![make_bucket(1, 8080, 100, 50, 50, 150, 15000)]);
+        let s2 = make_snapshot(1001, &[8080], vec![make_bucket(1, 8080, 200, 100, 100, 300, 30000)]);
+
+        // window_sec = 10
+        let result = aggregate_snapshots_v2(&[&s1, &s2], 10);
+
+        let key = AggregatedKey::new(KeyType::SrcIp, 1, Some(8080));
+        let stats = result.get(&key).unwrap();
+
+        // total_syn delta = 100, window = 10 => syn_rate = 10.0
+        assert!((stats.syn_rate - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_aggregate_success_ratio_from_deltas() {
+        // success_ratio = handshake_ack_delta / syn_delta
+        let s1 = make_snapshot(1000, &[8080], vec![
+            BucketEntry {
+                key_type: KeyType::SrcIp,
+                key_value: 1,
+                dst_port: Some(8080),
+                syn: 100,
+                ack: 80,
+                handshake_ack: 50,
+                rst: 0,
+                packets: 180,
+                bytes: 18000,
+            },
+        ]);
+        let s2 = make_snapshot(1001, &[8080], vec![
+            BucketEntry {
+                key_type: KeyType::SrcIp,
+                key_value: 1,
+                dst_port: Some(8080),
+                syn: 200,
+                ack: 160,
+                handshake_ack: 150,
+                rst: 0,
+                packets: 360,
+                bytes: 36000,
+            },
+        ]);
+
+        let result = aggregate_snapshots_v2(&[&s1, &s2], 10);
+
+        let key = AggregatedKey::new(KeyType::SrcIp, 1, Some(8080));
+        let stats = result.get(&key).unwrap();
+
+        // syn delta = 100, handshake_ack delta = 100
+        // success_ratio = 100 / 100 = 1.0
+        assert!((stats.success_ratio - 1.0).abs() < 0.001);
     }
 }

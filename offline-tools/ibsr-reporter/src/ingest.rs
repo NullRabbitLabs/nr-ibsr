@@ -90,6 +90,54 @@ impl SnapshotStream {
     pub fn iter(&self) -> impl Iterator<Item = &Snapshot> {
         self.snapshots.iter()
     }
+
+    /// Infer destination ports from all snapshots.
+    ///
+    /// Returns the union of:
+    /// - dst_ports from snapshot headers
+    /// - dst_port values from bucket entries
+    ///
+    /// Result is sorted and deduplicated.
+    pub fn inferred_dst_ports(&self) -> Vec<u16> {
+        use std::collections::BTreeSet;
+
+        let mut ports = BTreeSet::new();
+
+        for snapshot in &self.snapshots {
+            // Add ports from snapshot header
+            for &port in &snapshot.dst_ports {
+                ports.insert(port);
+            }
+
+            // Add ports from bucket entries
+            for bucket in &snapshot.buckets {
+                if let Some(port) = bucket.dst_port {
+                    ports.insert(port);
+                }
+            }
+        }
+
+        ports.into_iter().collect()
+    }
+
+    /// Infer run_id from snapshots.
+    ///
+    /// Returns the run_id from the first snapshot, or None if no snapshots.
+    pub fn inferred_run_id(&self) -> Option<u64> {
+        self.snapshots.first().map(|s| s.run_id)
+    }
+
+    /// Get the schema version range (min, max) from all snapshots.
+    pub fn schema_version_range(&self) -> (u32, u32) {
+        if self.snapshots.is_empty() {
+            return (0, 0);
+        }
+
+        let min = self.snapshots.iter().map(|s| s.version).min().unwrap_or(0);
+        let max = self.snapshots.iter().map(|s| s.version).max().unwrap_or(0);
+
+        (min, max)
+    }
 }
 
 /// Parse a single snapshot from JSON string.
@@ -643,5 +691,107 @@ invalid json line
 
         assert_eq!(stream.len(), 1);
         assert_eq!(warnings.len(), 1);
+    }
+
+    // ===========================================
+    // dst_ports inference tests
+    // ===========================================
+
+    #[test]
+    fn test_infer_dst_ports_from_snapshots() {
+        let s1 = make_snapshot(1000, &[8080, 443], vec![]);
+        let s2 = make_snapshot(1001, &[8080, 443], vec![]);
+
+        let stream = SnapshotStream::from_ordered(vec![s1, s2]).unwrap();
+        let ports = stream.inferred_dst_ports();
+
+        assert_eq!(ports, vec![443, 8080]); // Sorted
+    }
+
+    #[test]
+    fn test_infer_dst_ports_union_across_snapshots() {
+        // Different snapshots have different ports
+        let s1 = make_snapshot(1000, &[8080], vec![]);
+        let s2 = make_snapshot(1001, &[443], vec![]);
+        let s3 = make_snapshot(1002, &[8080, 8443], vec![]);
+
+        let stream = SnapshotStream::from_ordered(vec![s1, s2, s3]).unwrap();
+        let ports = stream.inferred_dst_ports();
+
+        // Union of all ports, sorted
+        assert_eq!(ports, vec![443, 8080, 8443]);
+    }
+
+    #[test]
+    fn test_infer_dst_ports_from_bucket_dst_ports() {
+        // Even if snapshot header has no ports, infer from bucket dst_port values
+        let s = Snapshot::new(
+            1000,
+            &[], // Empty in header
+            vec![
+                make_bucket(1, 100, 50), // dst_port = Some(8080) from make_bucket
+            ],
+            60,
+            1000,
+            1000,
+        );
+
+        let stream = SnapshotStream::from_ordered(vec![s]).unwrap();
+        let ports = stream.inferred_dst_ports();
+
+        assert_eq!(ports, vec![8080]);
+    }
+
+    #[test]
+    fn test_infer_dst_ports_combines_header_and_buckets() {
+        let s = Snapshot::new(
+            1000,
+            &[443], // Header has 443
+            vec![
+                BucketEntry {
+                    key_type: KeyType::SrcIp,
+                    key_value: 1,
+                    dst_port: Some(8080), // Bucket has 8080
+                    syn: 100,
+                    ack: 50,
+                    handshake_ack: 50,
+                    rst: 0,
+                    packets: 150,
+                    bytes: 15000,
+                },
+            ],
+            60,
+            1000,
+            1000,
+        );
+
+        let stream = SnapshotStream::from_ordered(vec![s]).unwrap();
+        let ports = stream.inferred_dst_ports();
+
+        assert_eq!(ports, vec![443, 8080]);
+    }
+
+    #[test]
+    fn test_infer_run_id_from_snapshots() {
+        let s1 = make_snapshot(1000, &[8080], vec![]);
+        let s2 = make_snapshot(1001, &[8080], vec![]);
+
+        let stream = SnapshotStream::from_ordered(vec![s1, s2]).unwrap();
+        let run_id = stream.inferred_run_id();
+
+        // run_id from make_snapshot uses ts as run_id
+        assert_eq!(run_id, Some(1000));
+    }
+
+    #[test]
+    fn test_infer_schema_version_range() {
+        let s1 = make_snapshot(1000, &[8080], vec![]);
+        let s2 = make_snapshot(1001, &[8080], vec![]);
+
+        let stream = SnapshotStream::from_ordered(vec![s1, s2]).unwrap();
+        let (min, max) = stream.schema_version_range();
+
+        assert_eq!(min, 5);
+        assert_eq!(max, 5);
     }
 }

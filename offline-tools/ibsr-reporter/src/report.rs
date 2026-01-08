@@ -240,6 +240,7 @@ mod tests {
     fn make_offender(ip: u32, syn_rate: f64) -> Offender {
         Offender {
             key: AggregatedKey::new(KeyType::SrcIp, ip, Some(8080)),
+            abuse_class: "SYN_FLOOD_LIKE".to_string(),
             syn_rate,
             success_ratio: 0.05,
             would_block_packets: 100,

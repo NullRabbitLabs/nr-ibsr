@@ -29,6 +29,7 @@ pub struct MatchCriteria {
 pub struct TriggerRule {
     pub key_type: String,
     pub key_value: String,
+    pub abuse_class: String,
     pub window_sec: u64,
     pub syn_rate_threshold: f64,
     pub success_ratio_threshold: f64,
@@ -50,7 +51,7 @@ pub struct Exception {
 }
 
 /// Current rules schema version.
-pub const RULES_VERSION: u32 = 1;
+pub const RULES_VERSION: u32 = 2;
 
 /// Generate enforcement rules from offenders.
 pub fn generate(
@@ -69,6 +70,7 @@ pub fn generate(
         .map(|o| TriggerRule {
             key_type: key_type_to_string(o.key.key_type),
             key_value: key_to_string(&o.key),
+            abuse_class: o.abuse_class.clone(),
             window_sec: config.window_sec,
             syn_rate_threshold: config.syn_rate_threshold,
             success_ratio_threshold: config.success_ratio_threshold,
@@ -181,6 +183,7 @@ mod tests {
         };
         Offender {
             key: AggregatedKey::new(key_type, ip, dst_port),
+            abuse_class: "SYN_FLOOD_LIKE".to_string(),
             syn_rate,
             success_ratio: 0.05,
             would_block_packets: 100,

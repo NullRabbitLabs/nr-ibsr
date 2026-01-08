@@ -24,6 +24,15 @@ pub const DEFAULT_MIN_SAMPLES_FOR_FP: usize = 10;
 /// Default number of top offenders to report.
 pub const DEFAULT_TOP_OFFENDERS_COUNT: usize = 10;
 
+/// Default volumetric SYN rate threshold.
+pub const DEFAULT_VOL_SYN_RATE: f64 = 500.0;
+
+/// Default volumetric packet rate threshold.
+pub const DEFAULT_VOL_PKT_RATE: f64 = 1000.0;
+
+/// Default volumetric byte rate threshold.
+pub const DEFAULT_VOL_BYTE_RATE: f64 = 1_000_000.0;
+
 /// Reporter configuration.
 #[derive(Debug, Clone)]
 pub struct ReporterConfig {
@@ -36,6 +45,12 @@ pub struct ReporterConfig {
     pub min_samples_for_fp: usize,
     pub top_offenders_count: usize,
     pub allowlist: Allowlist,
+    /// Volumetric abuse: SYN rate threshold.
+    pub vol_syn_rate: f64,
+    /// Volumetric abuse: packet rate threshold.
+    pub vol_pkt_rate: f64,
+    /// Volumetric abuse: byte rate threshold.
+    pub vol_byte_rate: f64,
 }
 
 impl ReporterConfig {
@@ -51,6 +66,9 @@ impl ReporterConfig {
             min_samples_for_fp: DEFAULT_MIN_SAMPLES_FOR_FP,
             top_offenders_count: DEFAULT_TOP_OFFENDERS_COUNT,
             allowlist: Allowlist::empty(),
+            vol_syn_rate: DEFAULT_VOL_SYN_RATE,
+            vol_pkt_rate: DEFAULT_VOL_PKT_RATE,
+            vol_byte_rate: DEFAULT_VOL_BYTE_RATE,
         }
     }
 
@@ -93,6 +111,24 @@ impl ReporterConfig {
     /// Builder: set min_samples_for_fp.
     pub fn with_min_samples_for_fp(mut self, min_samples: usize) -> Self {
         self.min_samples_for_fp = min_samples;
+        self
+    }
+
+    /// Builder: set volumetric SYN rate threshold.
+    pub fn with_vol_syn_rate(mut self, rate: f64) -> Self {
+        self.vol_syn_rate = rate;
+        self
+    }
+
+    /// Builder: set volumetric packet rate threshold.
+    pub fn with_vol_pkt_rate(mut self, rate: f64) -> Self {
+        self.vol_pkt_rate = rate;
+        self
+    }
+
+    /// Builder: set volumetric byte rate threshold.
+    pub fn with_vol_byte_rate(mut self, rate: f64) -> Self {
+        self.vol_byte_rate = rate;
         self
     }
 }
