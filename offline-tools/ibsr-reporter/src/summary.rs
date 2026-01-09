@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 /// Current report schema version.
 /// v3: Added episodes array for temporal episode detection.
 /// v4: Added episode_type field (single_window or multi_window).
-pub const REPORT_VERSION: u32 = 4;
+/// v5: Triggers use episode rates (unified rate computation).
+pub const REPORT_VERSION: u32 = 5;
 
 /// Machine-readable summary for comparing reports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,8 +388,8 @@ mod tests {
     // ===========================================
 
     #[test]
-    fn test_report_version_is_4() {
-        assert_eq!(REPORT_VERSION, 4);
+    fn test_report_version_is_5() {
+        assert_eq!(REPORT_VERSION, 5);
     }
 
     #[test]

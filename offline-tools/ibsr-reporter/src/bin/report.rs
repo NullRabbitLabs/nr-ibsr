@@ -4,6 +4,7 @@ use clap::Parser;
 use ibsr_clock::{Clock, SystemClock};
 use ibsr_reporter::config::{Allowlist, ReporterConfig};
 use ibsr_reporter::counterfactual;
+use ibsr_reporter::abuse::DetectionConfidence;
 use ibsr_reporter::decision::{evaluate_key, Decision, KeyDecision};
 use ibsr_reporter::episode::{self, EpisodeConfig, EpisodeType};
 use ibsr_reporter::ingest::{load_snapshots_from_dir, IngestError, SnapshotStream};
@@ -365,18 +366,18 @@ fn execute_pipeline(
     };
     let mut summary_builder = summary_builder.with_enforcement(enforcement_safe, enforcement_reasons);
 
-    // Add triggers from decisions that triggered abuse detection
-    for decision in &decisions {
-        if let Some(abuse_class) = decision.abuse_class {
+    // Add triggers from episodes (episodes are the single source of truth for rates)
+    for ep in &episodes {
+        if let Some(abuse_class) = ep.abuse_class {
             summary_builder.add_trigger(
                 abuse_class,
-                decision.key.to_display_string(),
-                decision.key.dst_port,
-                decision.stats.syn_rate,
-                0.0, // pkt_rate not in AggregatedStats
-                0.0, // byte_rate not in AggregatedStats
-                decision.stats.success_ratio,
-                decision.confidence,
+                ep.src_ip.clone(),
+                ep.dst_port,
+                ep.max_syn_rate,
+                ep.max_pkt_rate,
+                ep.max_byte_rate,
+                ep.min_success_ratio,
+                DetectionConfidence::High, // Episodes represent confirmed detection
             );
         }
     }

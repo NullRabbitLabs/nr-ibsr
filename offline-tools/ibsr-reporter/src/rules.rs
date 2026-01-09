@@ -31,6 +31,8 @@ pub struct MatchCriteria {
 pub struct TriggerRule {
     pub key_type: String,
     pub key_value: String,
+    /// Port where abuse was detected (rule is scoped to this port).
+    pub dst_port: Option<u16>,
     pub abuse_class: String,
     pub window_sec: u64,
     pub syn_rate_threshold: f64,
@@ -53,7 +55,7 @@ pub struct Exception {
 }
 
 /// Current rules schema version.
-pub const RULES_VERSION: u32 = 2;
+pub const RULES_VERSION: u32 = 3;
 
 /// Generate enforcement rules from offenders.
 pub fn generate(
@@ -72,6 +74,7 @@ pub fn generate(
         .map(|o| TriggerRule {
             key_type: key_type_to_string(o.key.key_type),
             key_value: key_to_string(&o.key),
+            dst_port: o.key.dst_port,
             abuse_class: o.abuse_class.clone(),
             window_sec: config.window_sec,
             syn_rate_threshold: config.syn_rate_threshold,
@@ -83,11 +86,12 @@ pub fn generate(
         })
         .collect();
 
-    // Sort for deterministic output (by key_type, then key_value)
+    // Sort for deterministic output (by key_type, then key_value, then dst_port)
     triggers.sort_by(|a, b| {
         a.key_type
             .cmp(&b.key_type)
             .then_with(|| a.key_value.cmp(&b.key_value))
+            .then_with(|| a.dst_port.cmp(&b.dst_port))
     });
 
     // Generate exceptions from allowlist
@@ -163,6 +167,7 @@ pub fn generate_from_episodes(
         triggers.push(TriggerRule {
             key_type: "src_ip".to_string(),
             key_value: ep.src_ip.clone(),
+            dst_port: ep.dst_port,
             abuse_class,
             window_sec: config.window_sec,
             syn_rate_threshold: config.syn_rate_threshold,
@@ -174,11 +179,12 @@ pub fn generate_from_episodes(
         });
     }
 
-    // Sort for deterministic output (by key_type, then key_value)
+    // Sort for deterministic output (by key_type, then key_value, then dst_port)
     triggers.sort_by(|a, b| {
         a.key_type
             .cmp(&b.key_type)
             .then_with(|| a.key_value.cmp(&b.key_value))
+            .then_with(|| a.dst_port.cmp(&b.dst_port))
     });
 
     // Generate exceptions from allowlist

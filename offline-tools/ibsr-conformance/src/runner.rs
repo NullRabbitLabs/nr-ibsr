@@ -5,6 +5,7 @@ use crate::types::{ConformanceResult, FileDiff, Fixture, FixtureConfig};
 use ibsr_clock::{Clock, MockClock};
 use ibsr_reporter::config::{Allowlist, ReporterConfig};
 use ibsr_reporter::counterfactual;
+use ibsr_reporter::abuse::DetectionConfidence;
 use ibsr_reporter::decision::{evaluate_key, Decision, KeyDecision};
 use ibsr_reporter::episode::{self, Episode, EpisodeConfig, EpisodeType};
 use ibsr_reporter::ingest::SnapshotStream;
@@ -235,18 +236,18 @@ fn execute_pipeline(
     };
     let mut summary_builder = summary_builder.with_enforcement(enforcement_safe, enforcement_reasons);
 
-    // Add triggers from decisions that triggered abuse detection
-    for decision in &decisions {
-        if let Some(abuse_class) = decision.abuse_class {
+    // Add triggers from episodes (episodes are the single source of truth for rates)
+    for ep in &episodes {
+        if let Some(abuse_class) = ep.abuse_class {
             summary_builder.add_trigger(
                 abuse_class,
-                decision.key.to_display_string(),
-                decision.key.dst_port,
-                decision.stats.syn_rate,
-                0.0, // pkt_rate not in AggregatedStats
-                0.0, // byte_rate not in AggregatedStats
-                decision.stats.success_ratio,
-                decision.confidence,
+                ep.src_ip.clone(),
+                ep.dst_port,
+                ep.max_syn_rate,
+                ep.max_pkt_rate,
+                ep.max_byte_rate,
+                ep.min_success_ratio,
+                DetectionConfidence::High, // Episodes represent confirmed detection
             );
         }
     }
@@ -846,5 +847,138 @@ mod tests {
             output1.summary_json, output2.summary_json,
             "summary.json differs between runs"
         );
+    }
+
+    // ===========================================
+    // Rate consistency tests (Issue: rate mismatch)
+    // ===========================================
+
+    #[test]
+    fn test_trigger_rates_match_episode_rates() {
+        // Trigger rates must exactly match episode max rates
+        use crate::loader::load_fixture;
+
+        let fixture = load_fixture("syn_churn_attacker").expect("load fixture");
+        let output = run_pipeline(&fixture).expect("run pipeline");
+
+        let summary: serde_json::Value =
+            serde_json::from_str(&output.summary_json).expect("parse summary");
+
+        let episodes = summary["episodes"].as_array().expect("episodes array");
+        let triggers = summary["triggers"].as_array().expect("triggers array");
+
+        // For each episode with abuse_class, there should be a matching trigger
+        for episode in episodes {
+            let ep_src = episode["src_ip"].as_str().unwrap();
+            let ep_port = episode["dst_port"].as_u64();
+            let ep_syn_rate = episode["max_syn_rate"].as_f64().unwrap();
+            let ep_pkt_rate = episode["max_pkt_rate"].as_f64().unwrap();
+            let ep_byte_rate = episode["max_byte_rate"].as_f64().unwrap();
+            let ep_abuse_class = episode["abuse_class"].as_str().unwrap_or("");
+
+            if ep_abuse_class.is_empty() {
+                continue; // No trigger expected for episodes without abuse_class
+            }
+
+            // Find matching trigger
+            let matching_trigger = triggers.iter().find(|t| {
+                t["src"].as_str() == Some(ep_src)
+                    && t["dst_port"].as_u64() == ep_port
+            });
+
+            assert!(
+                matching_trigger.is_some(),
+                "No trigger found for episode {}:{:?}",
+                ep_src,
+                ep_port
+            );
+
+            let trigger = matching_trigger.unwrap();
+            let rates = &trigger["rates"];
+            let t_syn_rate = rates["syn_rate"].as_f64().unwrap();
+            let t_pkt_rate = rates["pkt_rate"].as_f64().unwrap();
+            let t_byte_rate = rates["byte_rate"].as_f64().unwrap();
+
+            assert!(
+                (t_syn_rate - ep_syn_rate).abs() < 0.01,
+                "syn_rate mismatch: trigger={} episode={}",
+                t_syn_rate,
+                ep_syn_rate
+            );
+            assert!(
+                (t_pkt_rate - ep_pkt_rate).abs() < 0.01,
+                "pkt_rate mismatch: trigger={} episode={}",
+                t_pkt_rate,
+                ep_pkt_rate
+            );
+            assert!(
+                (t_byte_rate - ep_byte_rate).abs() < 0.01,
+                "byte_rate mismatch: trigger={} episode={}",
+                t_byte_rate,
+                ep_byte_rate
+            );
+        }
+    }
+
+    #[test]
+    fn test_trigger_pkt_byte_rates_nonzero() {
+        // pkt_rate and byte_rate must be non-zero when traffic exists
+        use crate::loader::load_fixture;
+
+        let fixture = load_fixture("syn_churn_attacker").expect("load fixture");
+        let output = run_pipeline(&fixture).expect("run pipeline");
+
+        let summary: serde_json::Value =
+            serde_json::from_str(&output.summary_json).expect("parse summary");
+        let triggers = summary["triggers"].as_array().expect("triggers array");
+
+        for trigger in triggers {
+            let rates = &trigger["rates"];
+            let pkt_rate = rates["pkt_rate"].as_f64().unwrap();
+            let byte_rate = rates["byte_rate"].as_f64().unwrap();
+
+            assert!(
+                pkt_rate > 0.0,
+                "pkt_rate must be > 0 for trigger {:?}",
+                trigger["src"]
+            );
+            assert!(
+                byte_rate > 0.0,
+                "byte_rate must be > 0 for trigger {:?}",
+                trigger["src"]
+            );
+        }
+    }
+
+    // ===========================================
+    // Port-scoped rules tests (Issue: rules not port-scoped)
+    // ===========================================
+
+    #[test]
+    fn test_rules_include_dst_port() {
+        // Each trigger in rules.json must include dst_port
+        use crate::loader::load_fixture;
+
+        let fixture = load_fixture("syn_churn_attacker").expect("load fixture");
+        let output = run_pipeline(&fixture).expect("run pipeline");
+
+        let rules: serde_json::Value =
+            serde_json::from_str(&output.rules_json).expect("parse rules");
+        let triggers = rules["triggers"].as_array().expect("triggers array");
+
+        for trigger in triggers {
+            assert!(
+                trigger.get("dst_port").is_some(),
+                "trigger missing dst_port field: {:?}",
+                trigger
+            );
+            // dst_port should be 8080 for the syn_churn_attacker fixture
+            let dst_port = trigger["dst_port"].as_u64();
+            assert!(
+                dst_port.is_some(),
+                "dst_port should be a valid port number, got: {:?}",
+                trigger["dst_port"]
+            );
+        }
     }
 }
