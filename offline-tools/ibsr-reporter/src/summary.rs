@@ -8,7 +8,9 @@ use crate::types::WindowBounds;
 use serde::{Deserialize, Serialize};
 
 /// Current report schema version.
-pub const REPORT_VERSION: u32 = 2;
+/// v3: Added episodes array for temporal episode detection.
+/// v4: Added episode_type field (single_window or multi_window).
+pub const REPORT_VERSION: u32 = 4;
 
 /// Machine-readable summary for comparing reports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +31,8 @@ pub struct Summary {
     pub config: AnalysisConfig,
     /// List of triggered abuse detections.
     pub triggers: Vec<Trigger>,
+    /// Detected abuse episodes (v3+).
+    pub episodes: Vec<EpisodeSummary>,
     /// Blocked traffic estimates.
     pub blocked_traffic: BlockedTraffic,
     /// False positive bound.
@@ -37,6 +41,37 @@ pub struct Summary {
     pub enforcement_safe: bool,
     /// Reasons if not safe.
     pub enforcement_reasons: Vec<String>,
+}
+
+/// Summary of a detected abuse episode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpisodeSummary {
+    /// Source IP address.
+    pub src_ip: String,
+    /// Destination port.
+    pub dst_port: Option<u16>,
+    /// Start timestamp.
+    pub start_ts: u64,
+    /// End timestamp.
+    pub end_ts: u64,
+    /// Duration in seconds.
+    pub duration_sec: u64,
+    /// Number of intervals in the episode.
+    pub interval_count: u32,
+    /// Interval duration in seconds.
+    pub interval_sec: u32,
+    /// Episode type: "single_window" or "multi_window".
+    pub episode_type: String,
+    /// Peak SYN rate.
+    pub max_syn_rate: f64,
+    /// Peak packet rate.
+    pub max_pkt_rate: f64,
+    /// Peak byte rate.
+    pub max_byte_rate: f64,
+    /// Abuse classification.
+    pub abuse_class: String,
+    /// Human-readable trigger reason.
+    pub trigger_reason: String,
 }
 
 /// Time range of analyzed data.
@@ -159,6 +194,7 @@ pub struct SummaryBuilder {
     vol_pkt_rate: f64,
     vol_byte_rate: f64,
     triggers: Vec<Trigger>,
+    episodes: Vec<EpisodeSummary>,
     counterfactual: Option<CounterfactualResult>,
     enforcement_safe: bool,
     enforcement_reasons: Vec<String>,
@@ -180,6 +216,7 @@ impl SummaryBuilder {
             vol_pkt_rate: 1000.0,
             vol_byte_rate: 1_000_000.0,
             triggers: Vec::new(),
+            episodes: Vec::new(),
             counterfactual: None,
             enforcement_safe: false,
             enforcement_reasons: Vec::new(),
@@ -250,6 +287,11 @@ impl SummaryBuilder {
         self
     }
 
+    pub fn with_episodes(mut self, episodes: Vec<EpisodeSummary>) -> Self {
+        self.episodes = episodes;
+        self
+    }
+
     pub fn with_enforcement(mut self, safe: bool, reasons: Vec<String>) -> Self {
         self.enforcement_safe = safe;
         self.enforcement_reasons = reasons;
@@ -262,9 +304,9 @@ impl SummaryBuilder {
                 packets_blocked_pct: cf.percent_packets_blocked,
                 bytes_blocked_pct: cf.percent_bytes_blocked,
                 syn_blocked_pct: cf.percent_syn_blocked,
-                packets_blocked_count: 0, // Would need to compute from percentages
-                bytes_blocked_count: 0,
-                syn_blocked_count: 0,
+                packets_blocked_count: cf.blocked_packets,
+                bytes_blocked_count: cf.blocked_bytes,
+                syn_blocked_count: cf.blocked_syn,
             }
         } else {
             BlockedTraffic {
@@ -299,6 +341,16 @@ impl SummaryBuilder {
         let mut ports = self.ports;
         ports.sort();
 
+        // Sort episodes for deterministic output (already sorted in detect_episodes,
+        // but ensure consistency)
+        let mut episodes = self.episodes;
+        episodes.sort_by(|a, b| {
+            a.start_ts
+                .cmp(&b.start_ts)
+                .then_with(|| a.src_ip.cmp(&b.src_ip))
+                .then_with(|| a.dst_port.cmp(&b.dst_port))
+        });
+
         Summary {
             report_version: REPORT_VERSION,
             run_id: self.run_id,
@@ -316,6 +368,7 @@ impl SummaryBuilder {
                 vol_byte_rate: self.vol_byte_rate,
             },
             triggers,
+            episodes,
             blocked_traffic,
             fp_bound,
             enforcement_safe: self.enforcement_safe,
@@ -334,8 +387,8 @@ mod tests {
     // ===========================================
 
     #[test]
-    fn test_report_version_is_2() {
-        assert_eq!(REPORT_VERSION, 2);
+    fn test_report_version_is_4() {
+        assert_eq!(REPORT_VERSION, 4);
     }
 
     #[test]
@@ -345,7 +398,7 @@ mod tests {
             .with_ports(vec![8080])
             .build();
 
-        assert_eq!(summary.report_version, 2);
+        assert_eq!(summary.report_version, 4);
     }
 
     #[test]
@@ -472,6 +525,9 @@ mod tests {
             total_packets: 1000,
             total_bytes: 100000,
             total_syn: 500,
+            blocked_packets: 500,
+            blocked_bytes: 45000,
+            blocked_syn: 300,
         };
 
         let summary = SummaryBuilder::new(1, bounds)
@@ -482,6 +538,9 @@ mod tests {
         assert!((summary.blocked_traffic.packets_blocked_pct - 50.0).abs() < 0.001);
         assert!((summary.blocked_traffic.bytes_blocked_pct - 45.0).abs() < 0.001);
         assert!((summary.blocked_traffic.syn_blocked_pct - 60.0).abs() < 0.001);
+        assert_eq!(summary.blocked_traffic.packets_blocked_count, 500);
+        assert_eq!(summary.blocked_traffic.bytes_blocked_count, 45000);
+        assert_eq!(summary.blocked_traffic.syn_blocked_count, 300);
     }
 
     // -------------------------------------------
@@ -500,6 +559,9 @@ mod tests {
             total_packets: 1000,
             total_bytes: 100000,
             total_syn: 500,
+            blocked_packets: 500,
+            blocked_bytes: 45000,
+            blocked_syn: 300,
         };
 
         let summary = SummaryBuilder::new(1, bounds)
@@ -524,6 +586,9 @@ mod tests {
             total_packets: 0,
             total_bytes: 0,
             total_syn: 0,
+            blocked_packets: 0,
+            blocked_bytes: 0,
+            blocked_syn: 0,
         };
 
         let summary = SummaryBuilder::new(1, bounds)
@@ -579,7 +644,7 @@ mod tests {
         let json = summary.to_json();
         let parsed = Summary::from_json(&json).unwrap();
 
-        assert_eq!(parsed.report_version, 2);
+        assert_eq!(parsed.report_version, 4);
         assert_eq!(parsed.run_id, 12345);
         assert_eq!(parsed.input_schema_version_min, 4);
         assert_eq!(parsed.input_schema_version_max, 5);

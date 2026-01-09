@@ -2,9 +2,11 @@
 
 use crate::config::ReporterConfig;
 use crate::counterfactual::Offender;
+use crate::episode::Episode;
 use crate::types::AggregatedKey;
 use ibsr_schema::KeyType;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
 
 /// Enforcement rules output.
@@ -80,6 +82,97 @@ pub fn generate(
             },
         })
         .collect();
+
+    // Sort for deterministic output (by key_type, then key_value)
+    triggers.sort_by(|a, b| {
+        a.key_type
+            .cmp(&b.key_type)
+            .then_with(|| a.key_value.cmp(&b.key_value))
+    });
+
+    // Generate exceptions from allowlist
+    let mut exceptions = Vec::new();
+
+    // Add individual IPs
+    let mut ips: Vec<u32> = config.allowlist.ips().collect();
+    ips.sort();
+    for ip in ips {
+        exceptions.push(Exception {
+            key_type: "src_ip".to_string(),
+            key_value: Ipv4Addr::from(ip).to_string(),
+        });
+    }
+
+    // Add CIDRs
+    let mut cidrs: Vec<(u32, u8)> = config.allowlist.cidrs().to_vec();
+    cidrs.sort();
+    for (network, prefix_len) in cidrs {
+        exceptions.push(Exception {
+            key_type: "src_cidr".to_string(),
+            key_value: format!("{}/{}", Ipv4Addr::from(network), prefix_len),
+        });
+    }
+
+    EnforcementRules {
+        version: RULES_VERSION,
+        generated_at,
+        match_criteria,
+        triggers,
+        exceptions,
+    }
+}
+
+/// Generate enforcement rules from detected episodes.
+///
+/// Creates one trigger rule per unique (src_ip, dst_port) that had abuse episodes.
+/// Deduplicates if the same key has multiple episodes.
+pub fn generate_from_episodes(
+    episodes: &[Episode],
+    config: &ReporterConfig,
+    generated_at: u64,
+) -> EnforcementRules {
+    let match_criteria = MatchCriteria {
+        proto: "tcp".to_string(),
+        dst_ports: config.dst_ports.clone(),
+    };
+
+    // Deduplicate episodes by (src_ip, dst_port) - take the first episode's abuse_class
+    let mut seen: HashSet<(String, Option<u16>)> = HashSet::new();
+    let mut triggers: Vec<TriggerRule> = Vec::new();
+
+    for ep in episodes {
+        // Skip allowlisted IPs
+        if let Ok(ip) = ep.src_ip.parse::<Ipv4Addr>() {
+            let ip_u32 = u32::from(ip);
+            if config.allowlist.contains(ip_u32) {
+                continue;
+            }
+        }
+
+        let key = (ep.src_ip.clone(), ep.dst_port);
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.insert(key);
+
+        let abuse_class = ep
+            .abuse_class
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "UNKNOWN".to_string());
+
+        triggers.push(TriggerRule {
+            key_type: "src_ip".to_string(),
+            key_value: ep.src_ip.clone(),
+            abuse_class,
+            window_sec: config.window_sec,
+            syn_rate_threshold: config.syn_rate_threshold,
+            success_ratio_threshold: config.success_ratio_threshold,
+            action: Action {
+                action_type: "drop".to_string(),
+                duration_sec: config.block_duration_sec,
+            },
+        });
+    }
 
     // Sort for deterministic output (by key_type, then key_value)
     triggers.sort_by(|a, b| {

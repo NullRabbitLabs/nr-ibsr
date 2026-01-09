@@ -262,6 +262,9 @@ mod tests {
             total_packets: 1000,
             total_bytes: 100000,
             total_syn: 500,
+            blocked_packets: 500,
+            blocked_bytes: 45000,
+            blocked_syn: 300,
         }
     }
 
@@ -275,6 +278,9 @@ mod tests {
             total_packets: 1000,
             total_bytes: 100000,
             total_syn: 500,
+            blocked_packets: 0,
+            blocked_bytes: 0,
+            blocked_syn: 0,
         }
     }
 
@@ -573,6 +579,9 @@ mod tests {
             total_packets: 1000,
             total_bytes: 100000,
             total_syn: 500,
+            blocked_packets: 500,
+            blocked_bytes: 50000,
+            blocked_syn: 250,
         };
 
         let readiness = compute_readiness(&cf, &config);
@@ -594,6 +603,9 @@ mod tests {
             total_packets: 1000,
             total_bytes: 100000,
             total_syn: 500,
+            blocked_packets: 5,
+            blocked_bytes: 500,
+            blocked_syn: 2,
         };
 
         let readiness = compute_readiness(&cf, &config);
@@ -615,6 +627,9 @@ mod tests {
             total_packets: 0,
             total_bytes: 0,
             total_syn: 0,
+            blocked_packets: 0,
+            blocked_bytes: 0,
+            blocked_syn: 0,
         };
 
         let readiness = compute_readiness(&cf, &config);

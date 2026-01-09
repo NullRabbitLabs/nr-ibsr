@@ -3,6 +3,7 @@
 //! BPF counters are cumulative (never reset), so we compute deltas between
 //! consecutive snapshots before aggregating to get accurate per-interval metrics.
 
+use crate::episode::IntervalStats;
 use crate::types::{AggregatedKey, AggregatedStats};
 use ibsr_schema::Snapshot;
 use std::collections::HashMap;
@@ -196,6 +197,100 @@ pub fn aggregate_snapshots_v2(
             (key, stats)
         })
         .collect()
+}
+
+/// Extract per-interval statistics for each key.
+///
+/// Snapshots MUST be sorted by timestamp (ascending). This function computes
+/// deltas between consecutive snapshots and returns per-interval stats for
+/// each key, rather than aggregating them.
+///
+/// The first appearance of each key establishes a baseline but does NOT
+/// contribute to the returned stats (skipped).
+///
+/// Returns a map of key -> Vec<IntervalStats> ordered by timestamp.
+///
+/// For multi-snapshot analysis, uses `interval_sec` for rate calculations (delta between snapshots).
+/// For single-snapshot analysis (first snapshot where base_ts == ts), uses `first_snapshot_window_sec`
+/// for rate calculations to be consistent with aggregation logic.
+pub fn extract_interval_stats(
+    snapshots: &[&Snapshot],
+    interval_sec: u64,
+    first_snapshot_window_sec: u64,
+) -> HashMap<AggregatedKey, Vec<IntervalStats>> {
+    let mut result: HashMap<AggregatedKey, Vec<IntervalStats>> = HashMap::new();
+
+    // Track previous values for each key to compute deltas
+    let mut prev_values: HashMap<AggregatedKey, BucketCounters> = HashMap::new();
+
+    for snapshot in snapshots {
+        let ts = snapshot.ts_unix_sec;
+        // First snapshot (base_ts == ts) gets raw values as interval data
+        let is_first_snapshot = snapshot.base_ts_unix_sec == ts;
+
+        for bucket in &snapshot.buckets {
+            let key = AggregatedKey::new(bucket.key_type, bucket.key_value, bucket.dst_port);
+            let current = BucketCounters::from_bucket(bucket);
+
+            // Determine the values to use for this interval and what time window to use for rates
+            let (values, rate_window) = if let Some(prev) = prev_values.get(&key) {
+                // Delta from previous snapshot: use interval_sec
+                (current.delta_from(prev), interval_sec)
+            } else if is_first_snapshot {
+                // First snapshot for this key AND first snapshot overall:
+                // use raw values as the interval values, with first_snapshot_window_sec for rates
+                (current, first_snapshot_window_sec)
+            } else {
+                // First appearance of this key but not the first snapshot:
+                // just record baseline, don't add to result
+                prev_values.insert(key, current);
+                continue;
+            };
+
+            let interval_f = rate_window as f64;
+            let syn_rate = if interval_f > 0.0 {
+                values.syn as f64 / interval_f
+            } else {
+                0.0
+            };
+            let pkt_rate = if interval_f > 0.0 {
+                values.packets as f64 / interval_f
+            } else {
+                0.0
+            };
+            let byte_rate = if interval_f > 0.0 {
+                values.bytes as f64 / interval_f
+            } else {
+                0.0
+            };
+            let success_ratio = if values.syn > 0 {
+                values.handshake_ack as f64 / values.syn as f64
+            } else {
+                0.0
+            };
+
+            let interval_stats = IntervalStats {
+                ts,
+                syn: values.syn,
+                ack: values.ack,
+                handshake_ack: values.handshake_ack,
+                rst: values.rst,
+                packets: values.packets,
+                bytes: values.bytes,
+                syn_rate,
+                pkt_rate,
+                byte_rate,
+                success_ratio,
+            };
+
+            result.entry(key).or_default().push(interval_stats);
+
+            // Update previous value for next iteration
+            prev_values.insert(key, current);
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@ pub mod abuse;
 pub mod config;
 pub mod counterfactual;
 pub mod decision;
+pub mod episode;
 pub mod ingest;
 pub mod report;
 pub mod rules;

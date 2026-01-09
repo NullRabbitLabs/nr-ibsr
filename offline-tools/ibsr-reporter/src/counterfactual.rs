@@ -16,6 +16,10 @@ pub struct CounterfactualResult {
     pub total_packets: u64,
     pub total_bytes: u64,
     pub total_syn: u64,
+    /// Absolute counts of blocked traffic
+    pub blocked_packets: u64,
+    pub blocked_bytes: u64,
+    pub blocked_syn: u64,
 }
 
 /// An offender entry for the top-N ranking.
@@ -108,6 +112,9 @@ pub fn compute(decisions: &[KeyDecision], config: &ReporterConfig) -> Counterfac
         total_packets,
         total_bytes,
         total_syn,
+        blocked_packets,
+        blocked_bytes,
+        blocked_syn,
     }
 }
 

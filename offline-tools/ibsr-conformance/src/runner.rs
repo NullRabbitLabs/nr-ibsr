@@ -6,9 +6,11 @@ use ibsr_clock::{Clock, MockClock};
 use ibsr_reporter::config::{Allowlist, ReporterConfig};
 use ibsr_reporter::counterfactual;
 use ibsr_reporter::decision::{evaluate_key, Decision, KeyDecision};
+use ibsr_reporter::episode::{self, Episode, EpisodeConfig, EpisodeType};
 use ibsr_reporter::ingest::SnapshotStream;
 use ibsr_reporter::report::{self, Report};
 use ibsr_reporter::rules::{self, EnforcementRules};
+use ibsr_reporter::summary::{EpisodeSummary, Summary, SummaryBuilder};
 use ibsr_reporter::window;
 
 /// Errors that can occur during conformance runs.
@@ -30,6 +32,7 @@ pub struct PipelineOutput {
     pub rules_json: String,
     pub report_md: String,
     pub evidence_csv: String,
+    pub summary_json: String,
 }
 
 /// Run a single fixture and return conformance result.
@@ -76,17 +79,19 @@ pub fn run_pipeline(fixture: &Fixture) -> Result<PipelineOutput, RunError> {
     let clock = MockClock::new(fixture.meta.generated_at);
 
     // Run pipeline
-    let (report, rules, decisions) = execute_pipeline(&stream, &config, &clock);
+    let (report, rules, decisions, _episodes, summary) = execute_pipeline(&stream, &config, &clock);
 
     // Generate outputs
     let rules_json = rules.to_json();
     let report_md = report.content.clone();
     let evidence_csv = generate_evidence_csv(&decisions);
+    let summary_json = summary.to_json();
 
     Ok(PipelineOutput {
         rules_json,
         report_md,
         evidence_csv,
+        summary_json,
     })
 }
 
@@ -130,8 +135,12 @@ fn execute_pipeline(
     snapshots: &SnapshotStream,
     config: &ReporterConfig,
     clock: &MockClock,
-) -> (Report, EnforcementRules, Vec<KeyDecision>) {
+) -> (Report, EnforcementRules, Vec<KeyDecision>, Vec<Episode>, Summary) {
     let bounds = snapshots.bounds();
+
+    // Get run_id and schema versions from snapshots
+    let run_id = snapshots.inferred_run_id().unwrap_or(0);
+    let (schema_min, schema_max) = snapshots.schema_version_range();
 
     // Extract dst_ports from first snapshot
     let dst_ports = snapshots
@@ -139,6 +148,13 @@ fn execute_pipeline(
         .first()
         .map(|s| s.dst_ports.clone())
         .unwrap_or_else(|| config.dst_ports.clone());
+
+    // Get interval_sec from first snapshot (default 60)
+    let interval_sec = snapshots
+        .snapshots()
+        .first()
+        .map(|s| s.interval_sec as u32)
+        .unwrap_or(60);
 
     // Create config with correct dst_ports
     let mut config = config.clone();
@@ -159,11 +175,85 @@ fn execute_pipeline(
     // Compute counterfactual
     let counterfactual = counterfactual::compute(&decisions, &config);
 
-    // Generate rules and report
-    let rules = rules::generate(&counterfactual.top_offenders, &config, current_ts);
+    // Episode detection
+    let episode_config = EpisodeConfig {
+        syn_rate_threshold: config.syn_rate_threshold,
+        vol_syn_rate: config.vol_syn_rate,
+        vol_pkt_rate: config.vol_pkt_rate,
+        vol_byte_rate: config.vol_byte_rate,
+        success_ratio_threshold: config.success_ratio_threshold,
+        min_episode_intervals: 1, // Allow single-window episodes
+    };
+    let interval_stats = window::extract_interval_stats(&snapshot_refs, interval_sec as u64, config.window_sec);
+    let episodes = episode::detect_episodes(&interval_stats, &episode_config, interval_sec);
+
+    // Generate rules from episodes (episodes are the single source of truth)
+    let rules = rules::generate_from_episodes(&episodes, &config, current_ts);
     let report = report::generate(&bounds, &config, &counterfactual, &rules);
 
-    (report, rules, decisions)
+    // Build summary with episodes
+    let episode_summaries: Vec<EpisodeSummary> = episodes
+        .iter()
+        .map(|ep| EpisodeSummary {
+            src_ip: ep.src_ip.clone(),
+            dst_port: ep.dst_port,
+            start_ts: ep.start_ts,
+            end_ts: ep.end_ts,
+            duration_sec: ep.duration_sec,
+            interval_count: ep.interval_count,
+            interval_sec: ep.interval_sec,
+            episode_type: match ep.episode_type {
+                EpisodeType::SingleWindow => "single_window".to_string(),
+                EpisodeType::MultiWindow => "multi_window".to_string(),
+            },
+            max_syn_rate: ep.max_syn_rate,
+            max_pkt_rate: ep.max_pkt_rate,
+            max_byte_rate: ep.max_byte_rate,
+            abuse_class: ep.abuse_class.map(|c| c.to_string()).unwrap_or_default(),
+            trigger_reason: ep.trigger_reason.clone(),
+        })
+        .collect();
+
+    let summary_builder = SummaryBuilder::new(run_id, bounds)
+        .with_schema_versions(schema_min, schema_max)
+        .with_ports(config.dst_ports.clone())
+        .with_window_sec(config.window_sec)
+        .with_syn_thresholds(config.syn_rate_threshold, config.success_ratio_threshold)
+        .with_block_duration(config.block_duration_sec)
+        .with_volumetric_thresholds(config.vol_syn_rate, config.vol_pkt_rate, config.vol_byte_rate)
+        .with_counterfactual(counterfactual)
+        .with_episodes(episode_summaries);
+
+    // Gate enforcement: single-window episodes require manual review
+    let has_single_window = episodes.iter().any(|ep| ep.episode_type == EpisodeType::SingleWindow);
+    let mut enforcement_reasons = report.readiness.reasons.clone();
+    let enforcement_safe = if has_single_window {
+        enforcement_reasons.push("Single-window episode requires manual review".to_string());
+        false
+    } else {
+        report.readiness.is_safe
+    };
+    let mut summary_builder = summary_builder.with_enforcement(enforcement_safe, enforcement_reasons);
+
+    // Add triggers from decisions that triggered abuse detection
+    for decision in &decisions {
+        if let Some(abuse_class) = decision.abuse_class {
+            summary_builder.add_trigger(
+                abuse_class,
+                decision.key.to_display_string(),
+                decision.key.dst_port,
+                decision.stats.syn_rate,
+                0.0, // pkt_rate not in AggregatedStats
+                0.0, // byte_rate not in AggregatedStats
+                decision.stats.success_ratio,
+                decision.confidence,
+            );
+        }
+    }
+
+    let summary = summary_builder.build();
+
+    (report, rules, decisions, episodes, summary)
 }
 
 /// Generate expected outputs for a fixture and write to files.
@@ -529,6 +619,7 @@ mod tests {
             rules_json: "{}".to_string(),
             report_md: "# Report".to_string(),
             evidence_csv: "header".to_string(),
+            summary_json: "{}".to_string(),
         };
         let debug = format!("{:?}", output);
         assert!(debug.contains("PipelineOutput"));
@@ -673,5 +764,87 @@ mod tests {
         sorted_ips.sort();
 
         assert_eq!(ips, sorted_ips, "Evidence CSV not sorted by source");
+    }
+
+    // ===========================================
+    // Summary.json consistency tests (Issue: wiring bug)
+    // ===========================================
+
+    #[test]
+    fn test_summary_triggers_populated_when_rules_exist() {
+        // If rules.json contains triggers, summary.json.triggers must also be non-empty
+        use crate::loader::load_fixture;
+
+        let fixture = load_fixture("syn_churn_attacker").expect("load fixture");
+        let output = run_pipeline(&fixture).expect("run pipeline");
+
+        // Parse rules.json to check if triggers exist
+        let rules: serde_json::Value = serde_json::from_str(&output.rules_json).expect("parse rules");
+        let rules_triggers = rules["triggers"].as_array().expect("triggers array");
+
+        if !rules_triggers.is_empty() {
+            // Parse summary.json
+            let summary: serde_json::Value = serde_json::from_str(&output.summary_json).expect("parse summary");
+            let summary_triggers = summary["triggers"].as_array().expect("triggers array");
+
+            assert!(
+                !summary_triggers.is_empty(),
+                "summary.json.triggers must be non-empty when rules.json has triggers.\n\
+                 rules.json triggers: {}\n\
+                 summary.json triggers: {}",
+                rules_triggers.len(),
+                summary_triggers.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_summary_blocked_count_nonzero_when_pct_nonzero() {
+        // If blocked_traffic_pct > 0, then blocked_traffic_count must also be > 0
+        use crate::loader::load_fixture;
+
+        let fixture = load_fixture("syn_churn_attacker").expect("load fixture");
+        let output = run_pipeline(&fixture).expect("run pipeline");
+
+        let summary: serde_json::Value = serde_json::from_str(&output.summary_json).expect("parse summary");
+        let blocked = &summary["blocked_traffic"];
+
+        let pct = blocked["packets_blocked_pct"].as_f64().unwrap_or(0.0);
+        let count = blocked["packets_blocked_count"].as_u64().unwrap_or(0);
+
+        if pct > 0.0 {
+            assert!(
+                count > 0,
+                "blocked_traffic.packets_blocked_count must be > 0 when packets_blocked_pct is {:.2}%",
+                pct
+            );
+        }
+
+        let syn_pct = blocked["syn_blocked_pct"].as_f64().unwrap_or(0.0);
+        let syn_count = blocked["syn_blocked_count"].as_u64().unwrap_or(0);
+
+        if syn_pct > 0.0 {
+            assert!(
+                syn_count > 0,
+                "blocked_traffic.syn_blocked_count must be > 0 when syn_blocked_pct is {:.2}%",
+                syn_pct
+            );
+        }
+    }
+
+    #[test]
+    fn test_summary_determinism() {
+        // Verify summary.json is deterministic across runs
+        use crate::loader::load_fixture;
+
+        let fixture = load_fixture("syn_churn_attacker").expect("load fixture");
+
+        let output1 = run_pipeline(&fixture).expect("run pipeline 1");
+        let output2 = run_pipeline(&fixture).expect("run pipeline 2");
+
+        assert_eq!(
+            output1.summary_json, output2.summary_json,
+            "summary.json differs between runs"
+        );
     }
 }
