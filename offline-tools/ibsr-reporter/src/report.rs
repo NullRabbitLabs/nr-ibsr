@@ -2,6 +2,7 @@
 
 use crate::config::ReporterConfig;
 use crate::counterfactual::{CounterfactualResult, FpBound};
+use crate::episode::Episode;
 use crate::rules::EnforcementRules;
 use crate::types::WindowBounds;
 use serde::{Deserialize, Serialize};
@@ -21,14 +22,18 @@ pub struct Report {
 }
 
 /// Generate the IBSR report.
+///
+/// Episodes are used for rate display (single source of truth for rates).
+/// Counterfactual is used for impact statistics (would_block_packets, etc.).
 pub fn generate(
     bounds: &WindowBounds,
     config: &ReporterConfig,
     counterfactual: &CounterfactualResult,
     rules: &EnforcementRules,
+    episodes: &[Episode],
 ) -> Report {
     let readiness = compute_readiness(counterfactual, config);
-    let content = build_report(bounds, config, counterfactual, rules, &readiness);
+    let content = build_report(bounds, config, counterfactual, rules, &readiness, episodes);
 
     Report { content, readiness }
 }
@@ -76,6 +81,7 @@ fn build_report(
     counterfactual: &CounterfactualResult,
     rules: &EnforcementRules,
     readiness: &ReadinessJudgment,
+    episodes: &[Episode],
 ) -> String {
     let mut report = String::new();
 
@@ -120,11 +126,19 @@ fn build_report(
         report.push_str("|--------|----------|---------------|---------------------|------------------|\n");
 
         for offender in &counterfactual.top_offenders {
+            // Look up episode rates (single source of truth for rate display)
+            let offender_display = offender.key.to_display_string();
+            let (syn_rate, success_ratio) = find_episode_rates(
+                episodes,
+                &offender_display,
+                offender.key.dst_port,
+            ).unwrap_or((offender.syn_rate, offender.success_ratio));
+
             report.push_str(&format!(
                 "| {} | {:.1}/sec | {:.2} | {} | {} |\n",
-                offender.key.to_display_string(),
-                offender.syn_rate,
-                offender.success_ratio,
+                offender_display,
+                syn_rate,
+                success_ratio,
                 offender.would_block_packets,
                 offender.would_block_syn,
             ));
@@ -197,6 +211,27 @@ fn build_report(
     report.push('\n');
 
     report
+}
+
+/// Find episode rates for an offender by matching source IP and port.
+///
+/// Returns (max_syn_rate, min_success_ratio) from the matching episode,
+/// or None if no matching episode is found.
+fn find_episode_rates(
+    episodes: &[Episode],
+    offender_display: &str,
+    dst_port: Option<u16>,
+) -> Option<(f64, f64)> {
+    // The offender_display is in format "ip:port" (e.g., "10.0.0.1:8080")
+    // Episode src_ip is just the IP without port
+    let offender_ip = offender_display
+        .split(':')
+        .next()
+        .unwrap_or(offender_display);
+
+    episodes.iter()
+        .find(|ep| ep.src_ip == offender_ip && ep.dst_port == dst_port)
+        .map(|ep| (ep.max_syn_rate, ep.min_success_ratio))
 }
 
 impl Report {
@@ -295,7 +330,7 @@ mod tests {
         let cf = make_counterfactual_with_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.has_section(1, "Scope & Configuration"));
     }
@@ -307,7 +342,7 @@ mod tests {
         let cf = make_counterfactual_with_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.contains("Time window start"));
         assert!(report.contains("1000"));
@@ -322,7 +357,7 @@ mod tests {
         let cf = make_counterfactual_with_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.contains("Destination ports"));
         assert!(report.contains("8080"));
@@ -335,7 +370,7 @@ mod tests {
         let cf = make_counterfactual_with_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.contains("SYN rate threshold"));
         assert!(report.contains("100.0"));
@@ -350,7 +385,7 @@ mod tests {
         let cf = make_counterfactual_with_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.contains("Allowlist"));
     }
@@ -366,7 +401,7 @@ mod tests {
         let cf = make_counterfactual_with_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.has_section(2, "Abuse Pattern Observed"));
     }
@@ -378,7 +413,7 @@ mod tests {
         let cf = make_counterfactual_with_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.contains("Top Offenders"));
         assert!(report.contains("10.0.0.1")); // First offender IP
@@ -392,7 +427,7 @@ mod tests {
         let cf = make_counterfactual_no_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.contains("No abuse pattern detected"));
     }
@@ -408,7 +443,7 @@ mod tests {
         let cf = make_counterfactual_with_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.has_section(3, "Counterfactual Enforcement Impact"));
     }
@@ -420,7 +455,7 @@ mod tests {
         let cf = make_counterfactual_with_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.contains("Packets blocked"));
         assert!(report.contains("50.0%"));
@@ -435,7 +470,7 @@ mod tests {
         let cf = make_counterfactual_with_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.contains("FP bound"));
         assert!(report.contains("2.5%"));
@@ -451,7 +486,7 @@ mod tests {
         };
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.contains("UNKNOWN"));
         assert!(report.contains("Insufficient data"));
@@ -468,7 +503,7 @@ mod tests {
         let cf = make_counterfactual_with_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.has_section(4, "Candidate Enforcement Rules"));
     }
@@ -480,7 +515,7 @@ mod tests {
         let cf = make_counterfactual_with_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.contains("```json"));
         assert!(report.contains("\"version\""));
@@ -498,7 +533,7 @@ mod tests {
         let cf = make_counterfactual_with_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.has_section(5, "Readiness Judgment"));
     }
@@ -510,7 +545,7 @@ mod tests {
         let cf = make_counterfactual_with_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(report.readiness.is_safe);
         assert!(report.contains("IS safe for autonomous enforcement"));
@@ -523,7 +558,7 @@ mod tests {
         let cf = make_counterfactual_no_offenders();
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(!report.readiness.is_safe);
         assert!(report.contains("IS NOT safe for autonomous enforcement"));
@@ -538,7 +573,7 @@ mod tests {
         cf.fp_bound = FpBound::Computed(10.0); // High FP
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(!report.readiness.is_safe);
         assert!(report.contains("IS NOT safe"));
@@ -555,7 +590,7 @@ mod tests {
         };
         let rules = generate_rules(&cf.top_offenders, &config, 1000);
 
-        let report = generate(&bounds, &config, &cf, &rules);
+        let report = generate(&bounds, &config, &cf, &rules, &[]);
 
         assert!(!report.readiness.is_safe);
         assert!(report.readiness.reasons.iter().any(|r| r.contains("False positive bound unknown")));

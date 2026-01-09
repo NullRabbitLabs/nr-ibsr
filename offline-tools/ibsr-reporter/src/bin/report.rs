@@ -320,7 +320,7 @@ fn execute_pipeline(
 
     // Generate rules from episodes (episodes are the single source of truth)
     let rules = rules::generate_from_episodes(&episodes, config, current_ts);
-    let report = report::generate(&bounds, config, &counterfactual, &rules);
+    let report = report::generate(&bounds, config, &counterfactual, &rules, &episodes);
 
     // Build summary with episodes
     let episode_summaries: Vec<EpisodeSummary> = episodes

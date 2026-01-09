@@ -190,7 +190,7 @@ fn execute_pipeline(
 
     // Generate rules from episodes (episodes are the single source of truth)
     let rules = rules::generate_from_episodes(&episodes, &config, current_ts);
-    let report = report::generate(&bounds, &config, &counterfactual, &rules);
+    let report = report::generate(&bounds, &config, &counterfactual, &rules, &episodes);
 
     // Build summary with episodes
     let episode_summaries: Vec<EpisodeSummary> = episodes
@@ -980,5 +980,142 @@ mod tests {
                 trigger["dst_port"]
             );
         }
+    }
+
+    // ===========================================
+    // Report.md rate consistency tests (Issue: markdown re-computes rates)
+    // ===========================================
+
+    #[test]
+    fn test_report_rates_match_summary_rates_multi_snapshot() {
+        // This test verifies that report.md rates match summary.json trigger rates
+        // when using multi-snapshot data (where episode rates differ from decision rates).
+        //
+        // The bug: report.md uses counterfactual offenders (rate = syn/window_sec)
+        //          summary.json uses episode rates (rate = delta_syn/interval_sec)
+        //          For window_sec=10 and interval_sec=60, this is a 6x difference.
+        use crate::types::{Fixture, FixtureConfig, ScenarioMeta};
+        use regex::Regex;
+
+        // Create multi-snapshot fixture with cumulative counters
+        // Snapshot 1: baseline (1000)
+        // Snapshot 2: cumulative values (1060)
+        // Delta should be computed as (snapshot2 - snapshot1) / interval_sec
+        let snapshot1 = Snapshot::new(
+            1000,
+            &[8080],
+            vec![BucketEntry {
+                key_type: KeyType::SrcIp,
+                key_value: 0x0A000001, // 10.0.0.1
+                dst_port: Some(8080),
+                syn: 100,      // baseline
+                ack: 10,
+                handshake_ack: 5,
+                rst: 0,
+                packets: 110,
+                bytes: 11000,
+            }],
+            60,  // interval_sec
+            1000,
+            1000,
+        );
+
+        let snapshot2 = Snapshot::new(
+            1060,
+            &[8080],
+            vec![BucketEntry {
+                key_type: KeyType::SrcIp,
+                key_value: 0x0A000001, // 10.0.0.1
+                dst_port: Some(8080),
+                syn: 6100,     // cumulative: +6000 delta
+                ack: 110,
+                handshake_ack: 55,
+                rst: 0,
+                packets: 6210,
+                bytes: 621000,
+            }],
+            60,  // interval_sec
+            1000,
+            1060,
+        );
+
+        let fixture = Fixture {
+            meta: ScenarioMeta {
+                name: "multi_snap_rate_test".to_string(),
+                description: "Test rate consistency with multi-snapshot".to_string(),
+                generated_at: 1100,
+            },
+            config: FixtureConfig {
+                dst_ports: vec![8080],
+                window_sec: 10,  // Decision rates use this
+                syn_rate_threshold: 50.0,
+                success_ratio_threshold: 0.1,
+                block_duration_sec: 300,
+                fp_safe_ratio: 0.5,
+                min_samples_for_fp: 1,
+            },
+            allowlist: None,
+            snapshots: vec![snapshot1, snapshot2],
+            expected_rules: String::new(),
+            expected_report: String::new(),
+            expected_evidence: String::new(),
+        };
+
+        let output = run_pipeline(&fixture).expect("run pipeline");
+
+        // Parse summary.json
+        let summary: serde_json::Value =
+            serde_json::from_str(&output.summary_json).expect("parse summary");
+        let triggers = summary["triggers"].as_array().expect("triggers array");
+        let episodes = summary["episodes"].as_array().expect("episodes array");
+
+        // Expected episode rate: delta(6000) / interval_sec(60) = 100.0/sec
+        // Buggy decision rate: total(6100) / window_sec(10) = 610.0/sec
+        // (or: delta/window_sec = 6000/10 = 600.0/sec depending on aggregation)
+
+        eprintln!("\n=== Multi-snapshot rate test ===");
+        for episode in episodes {
+            eprintln!(
+                "episode: max_syn_rate={}",
+                episode["max_syn_rate"]
+            );
+        }
+        for trigger in triggers {
+            eprintln!(
+                "trigger: syn_rate={}",
+                trigger["rates"]["syn_rate"]
+            );
+        }
+
+        // Extract rates from report.md
+        let table_row_re = Regex::new(r"\| ([0-9.]+:[0-9]+) \| ([0-9.]+)/sec").expect("regex");
+        for cap in table_row_re.captures_iter(&output.report_md) {
+            let source = cap.get(1).unwrap().as_str();
+            let rate: f64 = cap.get(2).unwrap().as_str().parse().expect("parse rate");
+            eprintln!("report.md: source={} rate={}/sec", source, rate);
+        }
+        eprintln!("=== END ===\n");
+
+        // Verify triggers exist (attack should be detected)
+        assert!(
+            !triggers.is_empty(),
+            "Expected triggers in multi-snapshot test"
+        );
+
+        // Verify report.md rates match summary trigger rates
+        let trigger_rate = triggers[0]["rates"]["syn_rate"].as_f64().unwrap();
+        let report_rate_re = Regex::new(r"\| 10\.0\.0\.1:8080 \| ([0-9.]+)/sec").expect("regex");
+        let cap = report_rate_re.captures(&output.report_md).expect("find rate in report");
+        let report_rate: f64 = cap.get(1).unwrap().as_str().parse().expect("parse rate");
+
+        assert!(
+            (report_rate - trigger_rate).abs() < 1.0,
+            "Rate mismatch: report.md shows {}/sec but summary.json trigger has {}/sec\n\
+             This indicates markdown is re-computing rates instead of using summary values.\n\
+             Ratio: {:.1}x",
+            report_rate,
+            trigger_rate,
+            report_rate / trigger_rate
+        );
     }
 }
