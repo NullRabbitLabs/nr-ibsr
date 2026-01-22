@@ -1,3 +1,8 @@
+---
+title: Operations
+nav_order: 6
+---
+
 # Operations Guide
 
 Monitoring, troubleshooting, and maintaining IBSR in production.

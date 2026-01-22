@@ -1,3 +1,8 @@
+---
+title: Configuration
+nav_order: 4
+---
+
 # Configuration Reference
 
 Complete reference for `ibsr collect` command options and tuning.

@@ -1,3 +1,8 @@
+---
+title: Safety
+nav_order: 9
+---
+
 # Safety Model
 
 IBSR is designed to be safe for deployment on production systems, including high-throughput validators and edge infrastructure.

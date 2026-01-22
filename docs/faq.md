@@ -1,3 +1,8 @@
+---
+title: FAQ
+nav_order: 11
+---
+
 # Frequently Asked Questions
 
 Common questions about IBSR deployment and operation.

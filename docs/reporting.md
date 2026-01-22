@@ -1,3 +1,8 @@
+---
+title: Reporting
+nav_order: 7
+---
+
 # Offline Reporting
 
 Generate analysis reports from IBSR snapshots using `ibsr-report`.

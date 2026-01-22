@@ -1,3 +1,8 @@
+---
+title: How It Works
+nav_order: 8
+---
+
 # How IBSR Works
 
 Technical deep dive into IBSR's architecture and data model.

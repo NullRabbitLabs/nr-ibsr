@@ -1,3 +1,8 @@
+---
+title: Home
+nav_order: 1
+---
+
 # IBSR - Inline Block Simulation Report
 
 IBSR is a **kernel-level shadow-mode security validation system** for network traffic.

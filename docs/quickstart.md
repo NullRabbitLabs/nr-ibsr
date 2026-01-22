@@ -1,3 +1,8 @@
+---
+title: Quick Start
+nav_order: 2
+---
+
 # Quick Start
 
 Get IBSR collecting traffic in 5 minutes.

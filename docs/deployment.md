@@ -1,3 +1,8 @@
+---
+title: Deployment
+nav_order: 5
+---
+
 # Production Deployment
 
 Deploy IBSR as a managed systemd service for continuous traffic collection.

@@ -1,3 +1,8 @@
+---
+title: Upgrading
+nav_order: 10
+---
+
 # Upgrading Guide
 
 How to upgrade IBSR to a new version safely.
