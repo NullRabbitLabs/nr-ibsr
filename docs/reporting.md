@@ -2,8 +2,6 @@
 
 Generate analysis reports from IBSR snapshots using `ibsr-report`.
 
----
-
 ## Overview
 
 The reporting pipeline is intentionally **offline**:
@@ -17,8 +15,6 @@ This separation ensures:
 - No real-time decisions on production systems
 - Reports can be regenerated with different parameters
 - Analysis is reproducible and auditable
-
----
 
 ## Building ibsr-report
 
@@ -50,8 +46,6 @@ ls -la target/release/ibsr-report
 sudo install -m 755 target/release/ibsr-report /usr/local/bin/
 ```
 
----
-
 ## Transferring Snapshots
 
 Copy snapshots from the collector host to the analysis host:
@@ -65,8 +59,6 @@ scp -r user@collector:/var/lib/ibsr/snapshots/ ./snapshots/
 ```
 
 **Tip**: Only transfer what you need. The reporter processes all `.jsonl` files in the input directory.
-
----
 
 ## Running ibsr-report
 
@@ -98,8 +90,6 @@ ibsr-report \
   --allowlist ./known-good-ips.txt
 ```
 
----
-
 ## CLI Reference
 
 ```
@@ -129,8 +119,6 @@ ibsr-report [OPTIONS] --in <DIR> --out <DIR>
 | `--vol-pkt-rate` | 1000.0 | Volumetric packet threshold (pkt/sec) |
 | `--vol-byte-rate` | 1000000.0 | Volumetric byte threshold (byte/sec) |
 | `-v, --verbose` | (quiet) | Show warnings during parsing |
-
----
 
 ## Output Files
 
@@ -224,8 +212,6 @@ Machine-readable summary (schema v5):
 }
 ```
 
----
-
 ## Allowlist Format
 
 Create a file with trusted IPs or CIDRs, one per line:
@@ -247,8 +233,6 @@ Create a file with trusted IPs or CIDRs, one per line:
 
 Allowlisted sources are never flagged as abuse, regardless of their traffic pattern.
 
----
-
 ## Abuse Detection
 
 ### SYN Flood Detection
@@ -268,8 +252,6 @@ Triggered when **2 or more** of these thresholds are exceeded:
 
 This detects high-volume traffic that may exhaust resources.
 
----
-
 ## Episode Detection
 
 The reporter identifies **episodes** — contiguous time windows where a source exhibits abusive patterns.
@@ -279,8 +261,6 @@ Episode types:
 - **multi_window**: Abuse detected across multiple consecutive windows
 
 **Important**: Single-window episodes require manual review before enforcement. The report marks `enforcement_safe: false` if only single-window episodes are detected.
-
----
 
 ## Interpreting Results
 
@@ -306,8 +286,6 @@ Manual review required. Common reasons:
 - Only single-window episodes (could be transient)
 - Insufficient data (false positive bound unknown)
 - Low impact (may not be worth the risk)
-
----
 
 ## Example Workflow
 
@@ -349,8 +327,6 @@ cat ./report/report.md
 sort -t, -k3 -rn ./report/evidence.csv | head -20
 ```
 
----
-
 ## Threshold Tuning
 
 ### Stricter Detection (More Alerts)
@@ -379,8 +355,6 @@ Start with defaults, then adjust based on:
 - Normal traffic patterns in your environment
 - False positive rate in reports
 - Severity of abuse you want to detect
-
----
 
 ## Next Steps
 

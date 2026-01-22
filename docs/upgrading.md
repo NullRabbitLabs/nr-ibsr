@@ -2,8 +2,6 @@
 
 How to upgrade IBSR to a new version safely.
 
----
-
 ## Before Upgrading
 
 ### Check Current Version
@@ -31,8 +29,6 @@ sudo cp /usr/local/bin/ibsr /usr/local/bin/ibsr.bak
 # Backup recent snapshots (recommended)
 tar -czvf ibsr-backup-$(date +%Y%m%d).tar.gz /var/lib/ibsr/snapshots/
 ```
-
----
 
 ## Upgrade Procedure
 
@@ -108,8 +104,6 @@ ls -la /var/lib/ibsr/snapshots/
 tail -1 /var/lib/ibsr/snapshots/status.jsonl
 ```
 
----
-
 ## Upgrade from Source
 
 If building from source:
@@ -133,8 +127,6 @@ sudo install -m 755 dist/ibsr-* /usr/local/bin/ibsr
 sudo systemctl start ibsr
 ```
 
----
-
 ## Schema Compatibility
 
 ### Snapshot Schema Versions
@@ -153,8 +145,6 @@ sudo systemctl start ibsr
 
 - Older reporters may not understand newer schema versions
 - Always upgrade the reporter when upgrading the collector
-
----
 
 ## Rollback Procedure
 
@@ -196,8 +186,6 @@ ibsr --version
 sudo systemctl status ibsr
 ```
 
----
-
 ## Upgrading Multiple Hosts
 
 For fleet upgrades:
@@ -218,8 +206,6 @@ pssh -h hosts.txt -i 'sudo systemctl stop ibsr && \
   sudo systemctl start ibsr'
 ```
 
----
-
 ## Post-Upgrade Checklist
 
 - [ ] Service is running (`systemctl is-active ibsr`)
@@ -228,8 +214,6 @@ pssh -h hosts.txt -i 'sudo systemctl stop ibsr && \
 - [ ] Snapshots being written
 - [ ] Status file updating
 - [ ] Correct version reported (`ibsr --version`)
-
----
 
 ## Troubleshooting Upgrades
 
@@ -262,8 +246,6 @@ uname -r
 
 # May need kernel upgrade for new XDP features
 ```
-
----
 
 ## Next Steps
 

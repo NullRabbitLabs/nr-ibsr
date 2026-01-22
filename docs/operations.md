@@ -2,8 +2,6 @@
 
 Monitoring, troubleshooting, and maintaining IBSR in production.
 
----
-
 ## Monitoring IBSR Health
 
 ### Status File Heartbeat
@@ -67,8 +65,6 @@ Add to `/etc/cron.d/ibsr-monitor`:
 */5 * * * * root /usr/local/bin/check-ibsr-health || echo "IBSR health check failed" | mail -s "IBSR Alert" ops@example.com
 ```
 
----
-
 ## Disk Space Monitoring
 
 ### Check Snapshot Directory Size
@@ -96,8 +92,6 @@ if [ "$DISK_USAGE" -gt 80 ]; then
     exit 1
 fi
 ```
-
----
 
 ## Troubleshooting
 
@@ -198,8 +192,6 @@ sudo systemctl edit ibsr --full
 # --map-size 50000
 ```
 
----
-
 ## Log Analysis
 
 ### View Recent Logs
@@ -238,8 +230,6 @@ journalctl -u ibsr --since "1 hour ago" > ibsr-logs.txt
 # Export as JSON
 journalctl -u ibsr -o json --since "1 hour ago" > ibsr-logs.json
 ```
-
----
 
 ## Snapshot Management
 
@@ -281,8 +271,6 @@ mv snapshots-*.tar.gz /archive/ibsr/
 find /var/lib/ibsr/snapshots -name "snapshot_*.jsonl" -mtime +7 -delete
 ```
 
----
-
 ## Transferring Data
 
 ### Rsync (Recommended)
@@ -309,8 +297,6 @@ Add to `/etc/cron.d/ibsr-transfer`:
 # Copy specific time range
 scp /var/lib/ibsr/snapshots/snapshot_2025011*.jsonl user@server:/data/
 ```
-
----
 
 ## Performance Tuning
 
@@ -342,8 +328,6 @@ scp /var/lib/ibsr/snapshots/snapshot_2025011*.jsonl user@server:/data/
 --max-age 43200  # 12 hours
 ```
 
----
-
 ## Maintenance Tasks
 
 ### Daily
@@ -363,8 +347,6 @@ scp /var/lib/ibsr/snapshots/snapshot_2025011*.jsonl user@server:/data/
 - Review and tune thresholds
 - Generate and review reports
 - Update IBSR if new version available
-
----
 
 ## Next Steps
 

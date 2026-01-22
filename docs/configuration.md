@@ -2,8 +2,6 @@
 
 Complete reference for `ibsr collect` command options and tuning.
 
----
-
 ## Command Synopsis
 
 ```
@@ -12,8 +10,6 @@ ibsr collect [OPTIONS] --dst-ports <PORTS>
 ```
 
 At least one destination port is required.
-
----
 
 ## CLI Options
 
@@ -37,8 +33,6 @@ ibsr collect -p 22 --dst-ports 80,443
 
 **Maximum**: 8 ports total across both options.
 
----
-
 ### Optional: Duration
 
 | Option | Description | Default |
@@ -56,8 +50,6 @@ ibsr collect -p 8899 --duration-sec 86400
 ibsr collect -p 8899
 # Press Ctrl+C to stop
 ```
-
----
 
 ### Optional: Network Interface
 
@@ -77,8 +69,6 @@ ibsr collect -p 8899
 
 **Auto-detection**: IBSR reads `/proc/net/route` and selects the interface with the default route (`0.0.0.0/0`).
 
----
-
 ### Optional: Output Directory
 
 | Option | Description | Default |
@@ -94,8 +84,6 @@ ibsr collect -p 8899 --out-dir ./output
 ```
 
 The directory must exist before starting. IBSR does not create it.
-
----
 
 ### Optional: File Rotation
 
@@ -118,8 +106,6 @@ ibsr collect -p 8899 --max-files 10 --max-age 600
 - 1-minute snapshot interval = 60 snapshots/hour
 - 24 hours retention = 1440 files
 - Default `--max-files 3600` covers 60 hours at 1-minute intervals
-
----
 
 ### Optional: BPF Map Size
 
@@ -145,8 +131,6 @@ ibsr collect -p 8899 --map-size 50000
 
 When the map is full, the LRU algorithm evicts the least-recently-updated entries.
 
----
-
 ### Optional: Intervals
 
 | Option | Description | Default |
@@ -163,8 +147,6 @@ ibsr collect -p 8899 --status-interval-sec 300
 ```
 
 **Note**: Snapshot and status intervals are independent. Each snapshot creates one JSONL line in the hourly snapshot file.
-
----
 
 ### Optional: Verbosity
 
@@ -185,8 +167,6 @@ ibsr collect -p 8899 -v
 # Debug level
 ibsr collect -p 8899 -vv
 ```
-
----
 
 ## Example Configurations
 
@@ -240,8 +220,6 @@ sudo ibsr collect \
   -vv
 ```
 
----
-
 ## Output Directory Structure
 
 After running, the output directory contains:
@@ -266,13 +244,9 @@ After running, the output directory contains:
 - **Format**: JSONL (one JSON object per line)
 - **Content**: Heartbeat with cycle count and IPs collected
 
----
-
 ## Environment Variables
 
 IBSR does not read environment variables. All configuration is via CLI flags.
-
----
 
 ## Validation Rules
 
@@ -285,8 +259,6 @@ The CLI validates inputs before starting:
 | Port range 1-65535 | "Invalid port number" |
 | Output directory exists | "Output directory does not exist" |
 | Interface exists | "Interface not found" |
-
----
 
 ## Next Steps
 

@@ -2,8 +2,6 @@
 
 Common questions about IBSR deployment and operation.
 
----
-
 ## General
 
 ### Does IBSR block traffic?
@@ -45,8 +43,6 @@ IBSR generates evidence purely from observed traffic patterns.
 
 See [Safety Model](safety.md) for details.
 
----
-
 ## Installation & Requirements
 
 ### What kernel version do I need?
@@ -84,8 +80,6 @@ ethtool -i eth0 | grep driver
 
 See [Installation](install.md) for capability setup.
 
----
-
 ## Configuration
 
 ### How many ports can I monitor?
@@ -111,8 +105,6 @@ Change with `--snapshot-interval-sec`.
 The **LRU (Least Recently Used)** algorithm evicts old entries. The oldest entries (by last update time) are removed to make room for new source IPs.
 
 If you see many unique IPs, increase `--map-size`.
-
----
 
 ## Disk Space
 
@@ -148,8 +140,6 @@ You can compress archived snapshots:
 gzip /archive/ibsr/snapshot_*.jsonl
 ```
 
----
-
 ## Performance
 
 ### What's the CPU overhead?
@@ -172,8 +162,6 @@ Total: ~16-26 MB with defaults.
 ### Will IBSR drop packets under load?
 
 **No.** IBSR always returns `XDP_PASS`. Packets continue through the stack normally regardless of load.
-
----
 
 ## Troubleshooting
 
@@ -208,8 +196,6 @@ ip link show eth0 | grep xdp
 sudo bpftool prog list | grep xdp
 # Lists attached XDP programs
 ```
-
----
 
 ## Data & Reporting
 
@@ -249,8 +235,6 @@ Use the `ts_unix_sec` field to join with other time-series data:
 grep '"ts_unix_sec":1705312920' /var/lib/ibsr/snapshots/*.jsonl
 ```
 
----
-
 ## Security
 
 ### What data does IBSR collect?
@@ -282,8 +266,6 @@ IBSR's attack surface is minimal:
 
 The primary risk is data exfiltration if an attacker gains access to snapshot files.
 
----
-
 ## Comparison
 
 ### How is IBSR different from tcpdump?
@@ -309,8 +291,6 @@ The primary risk is data exfiltration if an attacker gains access to snapshot fi
 ### How is IBSR different from a firewall?
 
 IBSR does not enforce anything. It generates evidence about what *would* happen if enforcement were enabled.
-
----
 
 ## Next Steps
 

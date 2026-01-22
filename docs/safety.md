@@ -2,8 +2,6 @@
 
 IBSR is designed to be safe for deployment on production systems, including high-throughput validators and edge infrastructure.
 
----
-
 ## Hard Guarantees
 
 IBSR provides structural guarantees that cannot be violated:
@@ -16,8 +14,6 @@ IBSR provides structural guarantees that cannot be violated:
 | **Cannot emit per-packet events** | No ringbuf, perf_event, or bpf_trace_printk; counters only |
 | **Cannot consume unbounded memory** | Uses LRU hash map with configurable max entries |
 | **Cannot block packet processing** | O(1) counter increment per packet; no loops |
-
----
 
 ## Safety Verification
 
@@ -50,8 +46,6 @@ Both analyses run automatically:
 
 If any safety check fails, the build fails.
 
----
-
 ## Performance Characteristics
 
 IBSR is designed for minimal performance impact:
@@ -77,8 +71,6 @@ The XDP program performs:
 
 No loops, no dynamic allocation, no blocking.
 
----
-
 ## Memory Bounds
 
 ### BPF Map
@@ -102,8 +94,6 @@ The collector process uses:
 - Fixed-size buffers for snapshot serialization
 - No unbounded allocations
 - Memory usage scales with snapshot size, not traffic volume
-
----
 
 ## Failure Modes
 
@@ -139,8 +129,6 @@ If more unique IPs are seen than `--map-size`:
 - Traffic unaffected
 - Consider increasing `--map-size`
 
----
-
 ## Risk Comparison
 
 IBSR's risk profile is comparable to standard observability tools:
@@ -158,8 +146,6 @@ IBSR is **lower risk** than tcpdump because:
 - Bounded memory usage
 - Compile-time safety guarantees
 
----
-
 ## What IBSR Cannot Do
 
 Explicitly excluded capabilities:
@@ -171,8 +157,6 @@ Explicitly excluded capabilities:
 | Real-time alerting | Offline analysis avoids false urgency |
 | Threat intelligence | External feeds introduce bias |
 | Autonomous action | Human review required |
-
----
 
 ## Operational Risk
 
@@ -199,8 +183,6 @@ Even in the worst failure scenario:
 - System returns to baseline automatically
 - No persistent state changes
 - No data corruption
-
----
 
 ## Verification Commands
 
@@ -237,8 +219,6 @@ ps aux | grep ibsr
 # Disk usage
 du -sh /var/lib/ibsr/snapshots/
 ```
-
----
 
 ## Next Steps
 

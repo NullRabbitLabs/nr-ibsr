@@ -6,8 +6,6 @@ It runs at the XDP/eBPF layer and observes live TCP traffic, collecting metrics 
 
 IBSR exists to generate **evidence** that inline enforcement could be safe *before* it is allowed to act.
 
----
-
 ## What IBSR Does
 
 - Attaches an XDP/eBPF program to a network interface
@@ -15,8 +13,6 @@ IBSR exists to generate **evidence** that inline enforcement could be safe *befo
 - Aggregates per-source-IP metrics (SYN, ACK, RST, packets, bytes)
 - Writes structured snapshots to disk for offline analysis
 - **Always passes traffic** (`XDP_PASS` only)
-
----
 
 ## What IBSR Is Not
 
@@ -29,8 +25,6 @@ IBSR exists to generate **evidence** that inline enforcement could be safe *befo
 
 IBSR does not protect systems.
 It validates whether protection *could* be safely applied.
-
----
 
 ## Why IBSR Exists
 
@@ -48,8 +42,6 @@ By running in shadow mode on production traffic, IBSR generates evidence for:
 - **Candidate block rules** — sources exhibiting abusive patterns
 - **Counterfactual impact** — percentage of traffic affected
 
----
-
 ## Intended Use Cases
 
 | Use Case | Description |
@@ -58,8 +50,6 @@ By running in shadow mode on production traffic, IBSR generates evidence for:
 | Validator infrastructure | Monitor RPC endpoints for abuse patterns |
 | Edge/ingress systems | Pre-enforcement validation on load balancers |
 | Safety case generation | Document enforcement impact for review |
-
----
 
 ## Architecture Overview
 
@@ -96,8 +86,6 @@ By running in shadow mode on production traffic, IBSR generates evidence for:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
----
-
 ## Documentation
 
 | Document | Description |
@@ -112,8 +100,6 @@ By running in shadow mode on production traffic, IBSR generates evidence for:
 | [Operations](operations.md) | Monitoring, troubleshooting, maintenance |
 | [Upgrading](upgrading.md) | Version upgrades and rollback |
 | [FAQ](faq.md) | Frequently asked questions |
-
----
 
 ## Design Principles
 

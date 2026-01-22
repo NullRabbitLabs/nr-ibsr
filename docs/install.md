@@ -2,8 +2,6 @@
 
 This guide covers installing IBSR on a Linux host.
 
----
-
 ## System Requirements
 
 | Requirement | Minimum | Notes |
@@ -29,8 +27,6 @@ uname -r
 ip link show | grep xdp
 # No output is normal - XDP programs attach on demand
 ```
-
----
 
 ## Option 1: Pre-built Binary (Recommended)
 
@@ -99,8 +95,6 @@ echo "Installed ibsr ${VERSION}"
 ibsr --version
 ```
 
----
-
 ## Option 2: Build from Source
 
 Building from source requires Docker with BuildKit support.
@@ -146,8 +140,6 @@ The build script:
 - Produces a statically-linked binary with embedded BPF bytecode
 - Embeds git commit hash and build timestamp
 
----
-
 ## Post-Installation Verification
 
 ### Check Binary
@@ -183,8 +175,6 @@ cat /tmp/ibsr-test/status.jsonl
 rm -rf /tmp/ibsr-test
 ```
 
----
-
 ## Permissions
 
 IBSR requires elevated privileges to attach XDP programs.
@@ -213,8 +203,6 @@ ibsr collect -p 8899 --out-dir /var/lib/ibsr/snapshots
 
 **Note**: After reinstalling or upgrading the binary, capabilities must be re-applied.
 
----
-
 ## Output Directory Setup
 
 Create the default output directory:
@@ -226,8 +214,6 @@ sudo mkdir -p /var/lib/ibsr/snapshots
 # If running as non-root with capabilities, set ownership
 sudo chown $(whoami):$(whoami) /var/lib/ibsr/snapshots
 ```
-
----
 
 ## Uninstallation
 
@@ -247,8 +233,6 @@ sudo rm -rf /var/lib/ibsr
 ### Remove Systemd Service (If Installed)
 
 See [Deployment](deployment.md) for systemd uninstall instructions.
-
----
 
 ## Next Steps
 

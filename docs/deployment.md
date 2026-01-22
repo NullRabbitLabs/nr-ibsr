@@ -2,15 +2,11 @@
 
 Deploy IBSR as a managed systemd service for continuous traffic collection.
 
----
-
 ## Prerequisites
 
 - IBSR installed at `/usr/local/bin/ibsr` (see [Installation](install.md))
 - Root access for systemd configuration
 - Target network interface identified
-
----
 
 ## Systemd Service Setup
 
@@ -75,8 +71,6 @@ sudo systemctl start ibsr
 sudo systemctl status ibsr
 ```
 
----
-
 ## Multi-Port Configuration
 
 For monitoring multiple ports, edit the `ExecStart` line:
@@ -97,8 +91,6 @@ ExecStart=/usr/local/bin/ibsr collect \
     --dst-ports 22,80,443,8899 \
     --out-dir /var/lib/ibsr/snapshots
 ```
-
----
 
 ## Service Management
 
@@ -135,8 +127,6 @@ sudo systemctl stop ibsr
 
 This gracefully detaches the XDP program and writes a final snapshot.
 
----
-
 ## Logrotate Configuration
 
 The `status.jsonl` file grows continuously. Configure logrotate to manage it.
@@ -159,8 +149,6 @@ Create `/etc/logrotate.d/ibsr`:
 - `copytruncate` avoids service restart during rotation
 - Snapshot files (*.jsonl) are managed by IBSR's `--max-files` and `--max-age` options
 
----
-
 ## Directory Permissions
 
 For production deployments:
@@ -174,8 +162,6 @@ sudo chmod 755 /var/lib/ibsr/snapshots
 # Restrict read access (optional)
 sudo chmod 750 /var/lib/ibsr/snapshots
 ```
-
----
 
 ## Resource Usage
 
@@ -198,8 +184,6 @@ Estimate disk usage based on traffic volume:
 | Low traffic (< 1K IPs) | 60 | ~10 KB | ~15 MB |
 | Medium traffic (10K IPs) | 60 | ~100 KB | ~150 MB |
 | High traffic (100K IPs) | 60 | ~1 MB | ~1.5 GB |
-
----
 
 ## Multi-Interface Deployments
 
@@ -255,8 +239,6 @@ sudo systemctl start ibsr@eth0
 sudo systemctl start ibsr@eth1
 ```
 
----
-
 ## Verification Checklist
 
 After deployment, verify:
@@ -283,8 +265,6 @@ journalctl -u ibsr -p err -n 10
 # Expected: no output
 ```
 
----
-
 ## Uninstalling the Service
 
 ```bash
@@ -299,8 +279,6 @@ sudo systemctl daemon-reload
 # Optionally remove data
 sudo rm -rf /var/lib/ibsr
 ```
-
----
 
 ## Next Steps
 

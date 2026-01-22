@@ -2,8 +2,6 @@
 
 Technical deep dive into IBSR's architecture and data model.
 
----
-
 ## Execution Model
 
 ### XDP Hook Point
@@ -49,8 +47,6 @@ For each incoming TCP packet to a monitored port:
 
 All operations are O(1). No loops, no allocations, no blocking.
 
----
-
 ## BPF Map Structure
 
 IBSR uses a single **LRU hash map** to track per-source-IP counters:
@@ -80,8 +76,6 @@ IBSR uses a single **LRU hash map** to track per-source-IP counters:
 | `bytes` | Every matched packet (IP total length) |
 
 **Important**: Counters are **cumulative** within the map. They accumulate until the entry is evicted by LRU.
-
----
 
 ## Userspace Collector
 
@@ -114,8 +108,6 @@ The userspace `ibsr collect` process:
 │  - Exit cleanly                         │
 └─────────────────────────────────────────┘
 ```
-
----
 
 ## Snapshot Format
 
@@ -191,8 +183,6 @@ octets = [
 print(".".join(map(str, octets)))  # "192.168.1.1"
 ```
 
----
-
 ## Status File Format
 
 The `status.jsonl` file records collection heartbeats:
@@ -208,8 +198,6 @@ The `status.jsonl` file records collection heartbeats:
 | `cycle` | u64 | Collection cycle number (1-indexed) |
 | `ips_collected` | u64 | Unique source IPs in this cycle |
 | `snapshots_written` | u64 | Cumulative snapshots written |
-
----
 
 ## File Naming
 
@@ -233,8 +221,6 @@ Within each snapshot, buckets are sorted by `(key_type, key_value, dst_port)` fo
 - Stable diffs
 - Easier testing
 
----
-
 ## Failure Modes
 
 IBSR is designed to be fail-open:
@@ -255,8 +241,6 @@ On SIGINT or SIGTERM:
 2. Write final snapshot with current counters
 3. Detach XDP program from interface
 4. Exit with code 0
-
----
 
 ## Data Flow Summary
 
@@ -283,8 +267,6 @@ On SIGINT or SIGTERM:
                                    │ (snapshots)   │
                                    └───────────────┘
 ```
-
----
 
 ## Next Steps
 

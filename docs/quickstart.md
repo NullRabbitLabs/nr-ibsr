@@ -4,15 +4,11 @@ Get IBSR collecting traffic in 5 minutes.
 
 **Prerequisites**: IBSR installed (see [Installation](install.md)), root access.
 
----
-
 ## Step 1: Create Output Directory
 
 ```bash
 sudo mkdir -p /var/lib/ibsr/snapshots
 ```
-
----
 
 ## Step 2: Start Collecting
 
@@ -33,8 +29,6 @@ You should see output like:
 ```
 
 **Note**: If you don't specify `--duration-sec`, IBSR runs continuously until you press Ctrl+C.
-
----
 
 ## Step 3: Verify Output
 
@@ -89,8 +83,6 @@ tail -1 /var/lib/ibsr/snapshots/snapshot_*.jsonl | jq .
 }
 ```
 
----
-
 ## Step 4: Interpret Results
 
 ### Convert IP Addresses
@@ -128,8 +120,6 @@ Example output:
 - **High RST**: Connection failures or probing
 - **Disproportionate traffic**: Single IPs dominating volume
 
----
-
 ## Step 5: Stop Collection
 
 Press `Ctrl+C` to stop, or wait for `--duration-sec` to elapse.
@@ -139,8 +129,6 @@ Press `Ctrl+C` to stop, or wait for `--duration-sec` to elapse.
 [INFO] Final snapshot written
 [INFO] Collection complete: 3 cycles, 31 unique IPs
 ```
-
----
 
 ## Multi-Port Monitoring
 
@@ -154,8 +142,6 @@ sudo ibsr collect -p 22 -p 80 -p 443 --out-dir /var/lib/ibsr/snapshots
 sudo ibsr collect --dst-ports 22,80,443 --out-dir /var/lib/ibsr/snapshots
 ```
 
----
-
 ## Common Options
 
 | Option | Description | Example |
@@ -168,8 +154,6 @@ sudo ibsr collect --dst-ports 22,80,443 --out-dir /var/lib/ibsr/snapshots
 | `-v` | Verbose output | `-v` or `-vv` |
 
 See [Configuration](configuration.md) for the full reference.
-
----
 
 ## Next Steps
 
