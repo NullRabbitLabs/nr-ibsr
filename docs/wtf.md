@@ -26,3 +26,13 @@ Alas, 3% is more than 0% so I am giving it a shot. I don't need to invent an ant
 Which, arguably, does sound like IBS, pirate style. IBS rrrrrrrr, if you need clarification.
 
 So here we are. Install it, see what happens. Make a change - drop me a line.
+
+## Songs
+
+I vibed to the following though during this, in no order:
+
+Nina Kraviz, in a record shop.  
+https://www.youtube.com/watch?v=aI3cXBOjoOU
+
+Daria - you honestly kept me sane and alive. Thanks.
+https://www.youtube.com/watch?v=Qm7YOmGJfPk&t=3223s
