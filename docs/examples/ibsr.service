@@ -1,0 +1,49 @@
+# IBSR Systemd Service File
+# Install to: /etc/systemd/system/ibsr.service
+#
+# Usage:
+#   sudo cp ibsr.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable ibsr
+#   sudo systemctl start ibsr
+
+[Unit]
+Description=IBSR Traffic Collector
+Documentation=https://github.com/nullrabbit/nr-ibsr
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Main command - customize ports as needed
+ExecStart=/usr/local/bin/ibsr collect \
+    -p 8899 \
+    --out-dir /var/lib/ibsr/snapshots \
+    --max-files 3600 \
+    --max-age 86400 \
+    -v
+
+# Restart on failure
+Restart=on-failure
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ibsr
+
+# Security hardening
+# Note: NoNewPrivileges must be 'no' for BPF capabilities to work
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/ibsr
+PrivateTmp=yes
+
+# Resource limits (optional, uncomment to enable)
+# MemoryMax=100M
+# CPUQuota=10%
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,37 @@
+# IBSR Logrotate Configuration
+# Install to: /etc/logrotate.d/ibsr
+#
+# Usage:
+#   sudo cp ibsr-logrotate /etc/logrotate.d/ibsr
+#
+# Notes:
+# - Snapshot files (snapshot_*.jsonl) are managed by IBSR's
+#   --max-files and --max-age options, not logrotate
+# - This config only manages the status.jsonl heartbeat file
+
+/var/lib/ibsr/snapshots/status.jsonl {
+    # Rotate daily
+    daily
+
+    # Keep 7 rotated files
+    rotate 7
+
+    # Compress old files
+    compress
+
+    # Don't compress the most recent rotation (allows tailing)
+    delaycompress
+
+    # Don't error if file is missing
+    missingok
+
+    # Don't rotate empty files
+    notifempty
+
+    # Truncate in place to avoid service restart
+    # IBSR will continue appending to the truncated file
+    copytruncate
+
+    # Optional: set permissions on rotated files
+    # create 0644 root root
+}
