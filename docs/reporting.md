@@ -34,7 +34,7 @@ The reporter is built from source (not included in releases).
 
 ```bash
 # Clone repository (if not already)
-git clone https://github.com/nullrabbit/nr-ibsr.git
+git clone https://github.com/NullRabbitLabs/nr-ibsr.git
 cd nr-ibsr
 
 # Build the reporter

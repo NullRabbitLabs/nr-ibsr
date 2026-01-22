@@ -29,7 +29,7 @@ Create `/etc/systemd/system/ibsr.service`:
 ```ini
 [Unit]
 Description=IBSR Traffic Collector
-Documentation=https://github.com/nullrabbit/nr-ibsr
+Documentation=https://github.com/NullRabbitLabs/nr-ibsr
 After=network-online.target
 Wants=network-online.target
 
@@ -201,7 +201,7 @@ Create `/etc/systemd/system/ibsr@.service`:
 ```ini
 [Unit]
 Description=IBSR Traffic Collector (%i)
-Documentation=https://github.com/nullrabbit/nr-ibsr
+Documentation=https://github.com/NullRabbitLabs/nr-ibsr
 After=network-online.target
 Wants=network-online.target
 

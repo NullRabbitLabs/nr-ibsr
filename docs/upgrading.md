@@ -18,7 +18,7 @@ ibsr --version
 
 ### Review Release Notes
 
-Check the [GitHub Releases](https://github.com/nullrabbit/nr-ibsr/releases) page for:
+Check the [GitHub Releases](https://github.com/NullRabbitLabs/nr-ibsr/releases) page for:
 
 - Breaking changes
 - New features
@@ -48,8 +48,8 @@ case $ARCH in
   aarch64|arm64) BINARY="ibsr-arm64" ;;
 esac
 
-curl -LO "https://github.com/nullrabbit/nr-ibsr/releases/download/${VERSION}/${BINARY}"
-curl -LO "https://github.com/nullrabbit/nr-ibsr/releases/download/${VERSION}/checksums.txt"
+curl -LO "https://github.com/NullRabbitLabs/nr-ibsr/releases/download/${VERSION}/${BINARY}"
+curl -LO "https://github.com/NullRabbitLabs/nr-ibsr/releases/download/${VERSION}/checksums.txt"
 ```
 
 ### Step 2: Verify Checksum

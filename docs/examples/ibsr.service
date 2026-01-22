@@ -9,7 +9,7 @@
 
 [Unit]
 Description=IBSR Traffic Collector
-Documentation=https://github.com/nullrabbit/nr-ibsr
+Documentation=https://github.com/NullRabbitLabs/nr-ibsr
 After=network-online.target
 Wants=network-online.target
 

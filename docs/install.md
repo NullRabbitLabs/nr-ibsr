@@ -35,7 +35,7 @@ ip link show | grep xdp
 
 ## Option 1: Pre-built Binary (Recommended)
 
-Download the appropriate binary from [GitHub Releases](https://github.com/nullrabbit/nr-ibsr/releases).
+Download the appropriate binary from [GitHub Releases](https://github.com/NullRabbitLabs/nr-ibsr/releases).
 
 ### Detect Architecture
 
@@ -57,8 +57,8 @@ echo "Will download: $BINARY"
 VERSION="v0.1.0"
 
 # Download binary and checksums
-curl -LO "https://github.com/nullrabbit/nr-ibsr/releases/download/${VERSION}/${BINARY}"
-curl -LO "https://github.com/nullrabbit/nr-ibsr/releases/download/${VERSION}/checksums.txt"
+curl -LO "https://github.com/NullRabbitLabs/nr-ibsr/releases/download/${VERSION}/${BINARY}"
+curl -LO "https://github.com/NullRabbitLabs/nr-ibsr/releases/download/${VERSION}/checksums.txt"
 
 # Verify checksum
 grep "${BINARY}" checksums.txt | sha256sum -c -
@@ -88,7 +88,7 @@ case $ARCH in
   *) echo "Unsupported: $ARCH"; exit 1 ;;
 esac
 
-BASE_URL="https://github.com/nullrabbit/nr-ibsr/releases/download/${VERSION}"
+BASE_URL="https://github.com/NullRabbitLabs/nr-ibsr/releases/download/${VERSION}"
 
 curl -LO "${BASE_URL}/${BINARY}"
 curl -LO "${BASE_URL}/checksums.txt"
@@ -114,7 +114,7 @@ Building from source requires Docker with BuildKit support.
 
 ```bash
 # Clone the repository
-git clone https://github.com/nullrabbit/nr-ibsr.git
+git clone https://github.com/NullRabbitLabs/nr-ibsr.git
 cd nr-ibsr
 
 # Build for the target architecture
