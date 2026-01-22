@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="null_rabbit_logo.webp" alt="Null Rabbit" width="200">
+</p>
+
 # IBSR - Inline Block Simulation Report
 
 IBSR is a **kernel-level shadow-mode security validation system** for network traffic.
