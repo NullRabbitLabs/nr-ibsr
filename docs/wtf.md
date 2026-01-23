@@ -32,8 +32,17 @@ So here we are. Install it, see what happens. Make a change - drop me a line.
 I 'vibed' to the following though during this, in no order:
 
 Daria - you honestly keep me sane and alive. Thanks.
+
 [https://www.youtube.com/watch?v=Qm7YOmGJfPk&t=3223s](https://www.youtube.com/watch?v=Qm7YOmGJfPk&t=3223s)
 
 Nina Kraviz, in a record shop.  
+
 [https://www.youtube.com/watch?v=aI3cXBOjoOU](https://www.youtube.com/watch?v=aI3cXBOjoOU)
 
+Ben And Marcel:
+
+[https://www.youtube.com/watch?v=v-ftN3srbZQ](https://www.youtube.com/watch?v=v-ftN3srbZQ)
+
+Beyonce, just because:
+
+[https://www.youtube.com/watch?v=K4r4lysSgLE](https://www.youtube.com/watch?v=K4r4lysSgLE)

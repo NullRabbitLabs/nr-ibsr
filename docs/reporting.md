@@ -365,6 +365,47 @@ Start with defaults, then adjust based on:
 
 Use `ibsr-export` to upload report artefacts to S3 or S3-compatible storage (MinIO, Cloudflare R2).
 
+### Access Model
+
+IBSR does not implement custom authentication or token systems. It relies entirely on standard cloud credential mechanisms.
+
+#### Option A — Customer-Owned Bucket (Recommended)
+
+The customer creates and owns the S3 bucket. The IBSR host is granted **write-only** access to a designated prefix. The customer reads artefacts using their existing AWS access.
+
+Benefits:
+- Best trust posture — customer controls the bucket
+- Simplest compliance story — data never leaves customer infrastructure
+- Customer controls retention and access policies
+
+IBSR does not require read access in this model.
+
+#### Option B — Vendor-Owned Bucket with Presigned URLs
+
+The vendor uploads artefacts to their own bucket. The customer retrieves artefacts via time-limited presigned URLs.
+
+This model is intended for **pilots only**:
+- URLs are read-only and expire after a configured duration
+- No long-lived credentials are issued to the customer
+- The vendor controls retention
+
+#### Option C — Dual Delivery (Optional)
+
+Upload to both customer and vendor buckets. This requires explicit agreement and is not the default behaviour.
+
+### Credentials
+
+`ibsr-export` uses the standard AWS credential provider chain:
+- Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
+- AWS profiles (`~/.aws/credentials`)
+- Instance/workload roles (EC2, ECS, Lambda)
+- Optional AssumeRole for cross-account access
+
+Credentials are **never**:
+- Passed via CLI flags
+- Written to disk by `ibsr-export`
+- Logged or printed to stdout
+
 ### Getting ibsr-export
 
 **Download pre-built binary (recommended):**
@@ -484,15 +525,6 @@ ibsr-export s3 [OPTIONS] --input <PATH> --bucket <NAME>
 | `--overwrite` | false | Allow overwriting existing objects |
 | `--output` | `text` | Output format: `text` or `json` |
 
-### Authentication
-
-`ibsr-export` uses the standard AWS credential chain:
-- Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
-- AWS profiles (`~/.aws/credentials`)
-- Instance/workload roles (EC2, ECS, Lambda)
-
-Credentials are never passed via CLI flags or logged.
-
 ## Unattended Execution
 
 IBSR is designed to run unattended. The collector captures data continuously, and the reporting pipeline runs on a schedule. Humans interact only with the final artefacts—reports in S3 or on disk. There are no dashboards to watch, no logs to tail.
@@ -594,15 +626,9 @@ PATH=/usr/local/bin:/usr/bin:/bin
 
 Failures result in non-zero exit. Configure your cron daemon or log monitoring to alert on errors in `/var/log/ibsr-report.log`.
 
-### Authentication
+### Authentication for Unattended Execution
 
-Both approaches assume AWS credentials are available through standard mechanisms:
-
-- Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
-- Instance role (EC2, ECS)
-- AWS profile (`~/.aws/credentials`)
-
-Do not embed credentials in unit files or cron entries.
+Both approaches require AWS credentials to be available via the standard credential chain (see [Credentials](#credentials) above). Do not embed credentials in unit files or cron entries.
 
 ## Next Steps
 
