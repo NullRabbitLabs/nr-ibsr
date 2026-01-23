@@ -1,6 +1,6 @@
 ---
 title: How It Works
-nav_order: 8
+nav_order: 5
 ---
 
 # How IBSR Works
