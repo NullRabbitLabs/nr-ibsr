@@ -6,8 +6,6 @@ It runs in **shadow mode** at the XDP/eBPF layer, observing live network traffic
 
 IBSR is designed to run **unattended** and produce **post-run reports**, not live alerts or dashboards.
 
----
-
 ## What This Repository Contains
 
 | Component | Description |
@@ -16,8 +14,6 @@ IBSR is designed to run **unattended** and produce **post-run reports**, not liv
 | `ibsr-report` | Offline report generator (in `offline-tools/`) |
 
 The components are intentionally separated to keep the collector minimal and safe.
-
----
 
 ## What IBSR Does
 
@@ -28,8 +24,6 @@ The components are intentionally separated to keep the collector minimal and saf
 
 **All packets are passed. IBSR never blocks traffic.**
 
----
-
 ## What IBSR Does Not Do
 
 - It does not enforce security policy
@@ -39,8 +33,6 @@ The components are intentionally separated to keep the collector minimal and saf
 - It is not a SIEM, firewall, or IPS
 
 IBSR exists to validate whether inline enforcement *could* be safe — not to provide protection.
-
----
 
 ## Safety Model
 
@@ -55,8 +47,6 @@ If IBSR fails or is removed, the system returns to baseline behaviour.
 
 Safety invariants are verified through compile-time static analysis of both BPF source and compiled ELF.
 
----
-
 ## Usage Model
 
 IBSR follows a simple, unattended workflow:
@@ -68,8 +58,6 @@ IBSR follows a simple, unattended workflow:
 ```
 
 Humans interact only with the final report.
-
----
 
 ## Quick Start
 
@@ -89,8 +77,6 @@ cd offline-tools && cargo build --release
 ./target/release/ibsr-report --in /var/lib/ibsr/snapshots --out ./report
 ```
 
----
-
 ## Documentation
 
 Full documentation lives in [`/docs`](docs/):
@@ -107,16 +93,12 @@ Full documentation lives in [`/docs`](docs/):
 | [Operations](docs/operations.md) | Monitoring and troubleshooting |
 | [FAQ](docs/faq.md) | Common questions |
 
----
-
 ## Requirements
 
 - **OS**: Debian 12+ / Ubuntu 22.04+ (kernel 6.1+)
 - **Arch**: arm64 or x86_64
 - **Privileges**: root or CAP_BPF
 - **NIC**: XDP-capable network interface
-
----
 
 ## Build from Source
 
@@ -130,15 +112,11 @@ docker compose run --rm test
 # Output: ./dist/ibsr-<arch>
 ```
 
----
-
 ## Status
 
 IBSR is provided for controlled pilots and evaluation.
 
 It is intentionally limited and conservative by design.
-
----
 
 ## License
 
