@@ -66,89 +66,9 @@ Example transfer:
 rsync -avz user@collector:/var/lib/ibsr/snapshots/ ./snapshots/
 ```
 
-## Uploading to S3 (Required for Pilots)
+## Uploading Snapshots
 
-Raw snapshot data (or report artefacts, if agreed) is uploaded using **`ibsr-export`**.
-
-### Basic S3 Upload (Snapshots)
-
-```bash
-ibsr-export s3 \
-  --input /var/lib/ibsr/snapshots \
-  --bucket <customer-bucket-name> \
-  --prefix ibsr/<host-id>/snapshots
-```
-
-This command:
-- uploads snapshot `.jsonl` files
-- preserves directory structure
-- exits non-zero on failure
-
-### Scheduled Upload (systemd — recommended)
-
-Uploads are typically run on a schedule using systemd.
-
-**Service unit** (`/etc/systemd/system/ibsr-upload.service`):
-
-```ini
-[Unit]
-Description=IBSR snapshot upload
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-User=root
-ExecStart=/usr/local/bin/ibsr-export s3 \
-  --input /var/lib/ibsr/snapshots \
-  --bucket <customer-bucket-name> \
-  --prefix ibsr/<host-id>/snapshots
-```
-
-**Timer unit** (`/etc/systemd/system/ibsr-upload.timer`):
-
-```ini
-[Timer]
-OnCalendar=hourly
-Persistent=true
-RandomizedDelaySec=300
-
-[Install]
-WantedBy=timers.target
-```
-
-Enable:
-
-```bash
-systemctl daemon-reload
-systemctl enable --now ibsr-upload.timer
-```
-
-### cron (fallback)
-
-```cron
-0 * * * * /usr/local/bin/ibsr-export s3 --input /var/lib/ibsr/snapshots --bucket <customer-bucket-name> --prefix ibsr/<host-id>/snapshots >> /var/log/ibsr-upload.log 2>&1
-```
-
-## Upload Authentication
-
-`ibsr-export` authenticates using the **standard AWS credential chain** available on the host.
-
-In pilot deployments this is typically:
-- an instance or workload role (preferred), or
-- static access keys provided via environment variables
-
-IBSR does not implement custom authentication, token management, or user access controls.
-
-## Access Model (Pilot Default)
-
-For pilots, data is uploaded to a **customer-owned S3 bucket**.
-
-- The customer creates and owns the bucket
-- The IBSR host is granted **write-only** access to a dedicated prefix
-- The customer accesses data using existing AWS IAM permissions
-
-IBSR does not require read access to the bucket.
+See [S3 Upload](s3-upload.md) for installation and usage of `ibsr-export`.
 
 ## Unattended Execution
 
