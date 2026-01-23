@@ -61,16 +61,25 @@ Interfaces, outputs, and tooling may change as the system evolves.
 
 It is **not** a general-purpose security product and should not be relied on for protection.
 
-We're on the way to full-enforcement, and you're on the journey!
-
 ## Intended Use Cases
 
 | Use Case | Description |
 |----------|-------------|
-| Pilot deployments | Validate enforcement rules before enabling |
-| Validator infrastructure | Monitor RPC endpoints for abuse patterns |
-| Edge/ingress systems | Pre-enforcement validation on load balancers |
-| Safety case generation | Document enforcement impact for review |
+| Pilot deployments | Observe traffic patterns before considering enforcement |
+| Validator infrastructure | Collect RPC endpoint traffic data for analysis |
+| Edge/ingress systems | Shadow-mode observation on load balancers |
+| Baseline establishment | Generate evidence for future enforcement decisions |
+
+## Pilot Workflow
+
+In pilot deployments, the workflow is:
+
+1. **Collect**: IBSR runs on your infrastructure, collecting traffic snapshots
+2. **Upload**: Scheduled uploads send snapshots to your S3 bucket using `ibsr-export`
+3. **Report**: The IBSR team generates reports from uploaded data
+4. **Review**: You receive finished reports — no analysis required on your end
+
+The collector runs unattended once configured. There are no dashboards to watch and no logs to tail.
 
 ## Architecture Overview
 
@@ -88,23 +97,33 @@ We're on the way to full-enforcement, and you're on the journey!
 │                     ┌──────▼──────┐         ┌────▼────┐        │
 │                     │ BPF LRU Map │         │ Disk    │        │
 │                     │ (per-IP)    │         │ JSONL   │        │
-│                     └─────────────┘         └─────────┘        │
-└─────────────────────────────────────────────────────────────────┘
-                                                    │
+│                     └─────────────┘         └────┬────┘        │
+└──────────────────────────────────────────────────┼──────────────┘
+                                                   │
                               ┌─────────────────────┘
                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Offline Analysis Host                        │
-│                                                                 │
-│  ┌──────────────┐    ┌──────────────────────────────────────┐  │
-│  │ Snapshots    │───▶│ ibsr-report                          │  │
-│  │ (JSONL)      │    │                                      │  │
-│  └──────────────┘    │  ├─ rules.json (enforcement rules)   │  │
-│                      │  ├─ report.md  (human-readable)      │  │
-│                      │  ├─ evidence.csv (per-source)        │  │
-│                      │  └─ summary.json (machine-readable)  │  │
-│                      └──────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+                   ┌────────────────────┐
+                   │ ibsr-export s3     │
+                   │ (scheduled upload) │
+                   └─────────┬──────────┘
+                             │
+                             ▼
+                   ┌────────────────────┐
+                   │ Customer S3 Bucket │
+                   │ (snapshots)        │
+                   └─────────┬──────────┘
+                             │
+                             ▼
+                   ┌────────────────────┐
+                   │ IBSR Team          │
+                   │ (report generation)│
+                   └─────────┬──────────┘
+                             │
+                             ▼
+                   ┌────────────────────┐
+                   │ Customer receives  │
+                   │ final reports      │
+                   └────────────────────┘
 ```
 
 ## Documentation
@@ -117,7 +136,7 @@ We're on the way to full-enforcement, and you're on the journey!
 | [Deployment](deployment.md) | Production deployment with systemd |
 | [How It Works](how-it-works.md) | Technical deep dive |
 | [Safety Model](safety.md) | Safety guarantees and risk profile |
-| [Reporting](reporting.md) | Offline analysis with ibsr-report |
+| [Reporting](reporting.md) | S3 upload and report delivery |
 | [Operations](operations.md) | Monitoring, troubleshooting, maintenance |
 | [Upgrading](upgrading.md) | Version upgrades and rollback |
 | [FAQ](faq.md) | Frequently asked questions |

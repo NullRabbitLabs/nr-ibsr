@@ -276,32 +276,34 @@ mv snapshots-*.tar.gz /archive/ibsr/
 find /var/lib/ibsr/snapshots -name "snapshot_*.jsonl" -mtime +7 -delete
 ```
 
-## Transferring Data
+## Data Upload
 
-### Rsync (Recommended)
+In pilot deployments, snapshots are uploaded to your S3 bucket using `ibsr-export`.
+
+### Using ibsr-export (Pilots)
 
 ```bash
-# Incremental sync to analysis server
+# Upload snapshots to S3
+ibsr-export s3 \
+  --input /var/lib/ibsr/snapshots \
+  --bucket <your-bucket-name> \
+  --prefix ibsr/<host-id>/snapshots
+```
+
+For scheduled uploads, see the systemd timer configuration in [Deployment](deployment.md#scheduled-s3-upload-required-for-pilots).
+
+### Alternative: Manual Transfer
+
+For non-pilot or offline scenarios, snapshots can be transferred manually:
+
+```bash
+# Rsync to another system
 rsync -avz --progress \
   /var/lib/ibsr/snapshots/ \
-  user@analysis-server:/data/ibsr/$(hostname)/
+  user@server:/data/ibsr/$(hostname)/
 ```
 
-### Automated Transfer via Cron
-
-Add to `/etc/cron.d/ibsr-transfer`:
-
-```
-# Transfer snapshots every hour
-0 * * * * root rsync -avz /var/lib/ibsr/snapshots/ user@analysis:/data/ibsr/$(hostname)/ >> /var/log/ibsr-transfer.log 2>&1
-```
-
-### Using SCP
-
-```bash
-# Copy specific time range
-scp /var/lib/ibsr/snapshots/snapshot_2025011*.jsonl user@server:/data/
-```
+This is not the primary workflow for pilots.
 
 ## Performance Tuning
 
@@ -349,12 +351,12 @@ scp /var/lib/ibsr/snapshots/snapshot_2025011*.jsonl user@server:/data/
 
 ### Monthly
 
-- Review and tune thresholds
-- Generate and review reports
+- Review disk usage trends and adjust rotation settings if needed
+- Verify S3 uploads are succeeding (check timer logs)
 - Update IBSR if new version available
 
 ## Next Steps
 
+- [Reporting](reporting.md) — S3 upload configuration for pilots
 - [Upgrading](upgrading.md) — Version upgrades
-- [Deployment](deployment.md) — Service configuration
 - [FAQ](faq.md) — Common questions

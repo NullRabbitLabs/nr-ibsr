@@ -60,7 +60,9 @@ tail /var/lib/ibsr/snapshots/status.jsonl
 {"timestamp":1705312920,"cycle":3,"ips_collected":31,"snapshots_written":3}
 ```
 
-### View Snapshot Data
+### View Snapshot Data (Optional)
+
+Local inspection is for diagnostics only. In pilot deployments, the IBSR team handles analysis.
 
 ```bash
 # Pretty-print the last snapshot entry
@@ -88,42 +90,13 @@ tail -1 /var/lib/ibsr/snapshots/snapshot_*.jsonl | jq .
 }
 ```
 
-## Step 4: Interpret Results
+## Step 4: Upload to S3 (Pilots)
 
-### Convert IP Addresses
+For pilot deployments, snapshots are uploaded to your S3 bucket on a schedule using `ibsr-export`.
 
-The `key_value` field is an IPv4 address as a 32-bit integer. To convert:
+The IBSR team generates reports from uploaded data — you don't need to analyze snapshots yourself.
 
-```bash
-# Using jq
-cat /var/lib/ibsr/snapshots/snapshot_*.jsonl | jq -r '
-  .buckets[] |
-  "\((.key_value / 16777216 | floor)).\(((.key_value / 65536) % 256) | floor).\(((.key_value / 256) % 256) | floor).\(.key_value % 256) syn=\(.syn) ack=\(.ack)"
-'
-```
-
-Example output:
-```
-192.168.1.1 syn=42 ack=156
-10.0.0.5 syn=12 ack=48
-```
-
-### Key Metrics
-
-| Metric | What It Means |
-|--------|---------------|
-| `syn` | TCP connection initiation attempts |
-| `ack` | Acknowledgment packets (includes data ACKs) |
-| `handshake_ack` | ACKs that completed TCP handshake (no payload) |
-| `rst` | Connection resets |
-| `packets` | Total TCP packets from this source |
-| `bytes` | Total bytes from this source |
-
-### What to Look For
-
-- **High SYN, low ACK**: Potential SYN flood or port scanning
-- **High RST**: Connection failures or probing
-- **Disproportionate traffic**: Single IPs dominating volume
+See [Reporting](reporting.md) for upload configuration with `ibsr-export s3`.
 
 ## Step 5: Stop Collection
 
@@ -162,6 +135,6 @@ See [Configuration](configuration.md) for the full reference.
 
 ## Next Steps
 
+- [Deployment](deployment.md) — Run as a systemd service for continuous collection
+- [Reporting](reporting.md) — Configure S3 uploads for pilot workflows
 - [Configuration](configuration.md) — All CLI options and tuning
-- [Deployment](deployment.md) — Run as a systemd service
-- [Reporting](reporting.md) — Generate analysis reports with ibsr-report

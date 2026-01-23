@@ -270,6 +270,64 @@ journalctl -u ibsr -p err -n 10
 # Expected: no output
 ```
 
+## Scheduled S3 Upload (Required for Pilots)
+
+In pilot deployments, snapshots must be uploaded to your S3 bucket on a schedule using `ibsr-export`.
+
+This enables the IBSR team to generate reports from your collected data.
+
+### Install ibsr-export
+
+Download from [GitHub Releases](https://github.com/NullRabbitLabs/nr-ibsr/releases):
+
+```bash
+curl -Lo /usr/local/bin/ibsr-export https://github.com/NullRabbitLabs/nr-ibsr/releases/latest/download/ibsr-export
+chmod +x /usr/local/bin/ibsr-export
+```
+
+### Configure Upload Service
+
+**Service unit** (`/etc/systemd/system/ibsr-upload.service`):
+
+```ini
+[Unit]
+Description=IBSR snapshot upload
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/ibsr-export s3 \
+  --input /var/lib/ibsr/snapshots \
+  --bucket <your-bucket-name> \
+  --prefix ibsr/<host-id>/snapshots
+```
+
+**Timer unit** (`/etc/systemd/system/ibsr-upload.timer`):
+
+```ini
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
+```
+
+### Enable Upload Timer
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ibsr-upload.timer
+
+# Verify timer is active
+sudo systemctl list-timers | grep ibsr
+```
+
+See [Reporting](reporting.md) for full upload configuration details, including authentication.
+
 ## Uninstalling the Service
 
 ```bash
@@ -287,6 +345,6 @@ sudo rm -rf /var/lib/ibsr
 
 ## Next Steps
 
+- [Reporting](reporting.md) — S3 upload details and pilot workflow
 - [Operations](operations.md) — Monitoring and troubleshooting
 - [Upgrading](upgrading.md) — Version upgrades
-- [Reporting](reporting.md) — Generate analysis reports

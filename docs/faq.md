@@ -15,12 +15,12 @@ Common questions about IBSR deployment and operation.
 
 ### Can IBSR detect attacks?
 
-**Yes.** IBSR collects metrics that reveal attack patterns:
+IBSR collects metrics that reveal attack patterns:
 - SYN floods (high SYN count, low ACK count)
 - Port scanning (many IPs, few packets each)
 - Volumetric attacks (high packet/byte rates)
 
-The `ibsr-report` tool analyzes these patterns and generates candidate enforcement rules.
+In pilot deployments, the IBSR team analyzes these patterns and generates reports. You do not need to interpret the data yourself.
 
 ### Does IBSR integrate with threat intelligence feeds?
 
@@ -38,15 +38,15 @@ IBSR generates evidence purely from observed traffic patterns.
 - Batch analysis allows careful review
 - Reports are auditable artifacts
 
-### Is IBSR production-safe?
+### Is IBSR safe to run on production systems?
 
-**Yes.** IBSR is designed for production systems:
-- Shadow-only (no enforcement)
+IBSR is designed to be non-disruptive:
+- Shadow-only (never drops packets)
 - Fail-open by design
 - Bounded memory usage
 - Compile-time safety verification
 
-See [Safety Model](safety.md) for details.
+However, IBSR is **early-stage software** currently used in controlled pilots and evaluation environments. It is not a mature, general-purpose security product. See [Safety Model](safety.md) for technical details.
 
 ## Installation & Requirements
 
@@ -204,6 +204,21 @@ sudo bpftool prog list | grep xdp
 
 ## Data & Reporting
 
+### Do I need to run ibsr-report?
+
+**No.** In pilot deployments, the IBSR team generates reports from your uploaded snapshots. You do not need to run `ibsr-report` or interpret raw data yourself.
+
+The reporting tool is available for advanced users who want to self-serve, but this is optional.
+
+### How do I get reports?
+
+1. Run the IBSR collector on your infrastructure
+2. Configure scheduled S3 uploads using `ibsr-export` (see [Reporting](reporting.md))
+3. The IBSR team generates reports from uploaded data
+4. You receive finished reports
+
+There are no dashboards to watch and no logs to tail during normal operation.
+
 ### Why are counters cumulative?
 
 BPF maps persist counters across snapshots. This means:
@@ -300,5 +315,6 @@ IBSR does not enforce anything. It generates evidence about what *would* happen 
 ## Next Steps
 
 - [Installation](install.md) — Get started
+- [Deployment](deployment.md) — Production deployment with S3 upload
 - [Safety Model](safety.md) — Understand guarantees
-- [Reporting](reporting.md) — Analyze collected data
+- [Reporting](reporting.md) — S3 upload and pilot workflow
