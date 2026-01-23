@@ -1,4 +1,4 @@
-# IBSR Report
+# IBSR Sample Report
 
 ## 1. Scope & Configuration
 
