@@ -22,6 +22,11 @@ Analysis and report generation happen offline using tools in `offline-tools/`.
 - **ibsr-reporter**: Consumes snapshots and produces reports, rules, and evidence
 - **ibsr-conformance**: Golden fixtures and conformance testing harness
 
+### Export Tool (`ibsr-export/`)
+- **ibsr-export**: Uploads report artefacts to S3 or S3-compatible storage (MinIO, R2)
+- Standalone crate (excluded from main workspace to keep AWS deps separate)
+- Features: concurrent uploads, retries, SSE encryption, presigned URLs
+
 ## Current State
 
 - XDP/eBPF traffic collection is complete
@@ -44,11 +49,16 @@ docker compose run --rm test
 
 # Build release binary (in Docker, for deployment)
 ./build.sh
+
+# Build ibsr-export (S3 uploader)
+./build-export.sh
 ```
 
 Development on macOS; all tests run in Docker (Linux container with BPF toolchain).
 
 **IMPORTANT:** Always run both `test` AND `./build.sh` before considering a task complete. Tests passing does not guarantee the release build succeeds - always verify with `./build.sh` after tests pass.
+
+Pre-built binaries for both `ibsr` and `ibsr-export` are available from [GitHub Releases](https://github.com/NullRabbitLabs/nr-ibsr/releases).
 
 ## CLI Synopsis
 
@@ -115,3 +125,22 @@ Fields:
 - No deeply nested conditionals (max 2 levels)
 - Extract complex conditions into named boolean variables or functions
 - Prefer switch/match statements over long if/else chains when appropriate
+
+## Documentation Policy
+
+**Always update documentation when:**
+- Adding new features or tools
+- Changing CLI interfaces or flags
+- Modifying build/deployment processes
+- Changing configuration options
+
+**Documentation locations:**
+- `docs/` - User-facing documentation (Jekyll site)
+- `CLAUDE.md` - Developer guidance and architecture overview
+- Code comments - Implementation details only
+
+**When adding a new tool or feature:**
+1. Update `CLAUDE.md` architecture section
+2. Add/update relevant page in `docs/`
+3. Update CLI synopsis if applicable
+4. Ensure build commands are documented

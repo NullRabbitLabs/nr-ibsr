@@ -365,9 +365,22 @@ Start with defaults, then adjust based on:
 
 Use `ibsr-export` to upload report artefacts to S3 or S3-compatible storage (MinIO, Cloudflare R2).
 
-### Building ibsr-export
+### Getting ibsr-export
 
-**Using Docker (recommended):**
+**Download pre-built binary (recommended):**
+
+Download from [GitHub Releases](https://github.com/NullRabbitLabs/nr-ibsr/releases):
+- `ibsr-export-arm64` for ARM64 (Apple Silicon, AWS Graviton)
+- `ibsr-export-x86_64` for Intel/AMD
+
+```bash
+# Example: download and install
+curl -L -o ibsr-export https://github.com/NullRabbitLabs/nr-ibsr/releases/latest/download/ibsr-export-x86_64
+chmod +x ibsr-export
+sudo mv ibsr-export /usr/local/bin/
+```
+
+**Build with Docker:**
 
 ```bash
 # Build for arm64 (default)
@@ -379,18 +392,12 @@ Use `ibsr-export` to upload report artefacts to S3 or S3-compatible storage (Min
 # Output: ./dist/ibsr-export-<arch>
 ```
 
-**From source (requires Rust):**
+**Build from source (requires Rust):**
 
 ```bash
 cd nr-ibsr/ibsr-export
 cargo build --release
-# Binary: target/release/ibsr-export
-```
-
-**Install:**
-
-```bash
-sudo install -m 755 ./dist/ibsr-export-arm64 /usr/local/bin/ibsr-export
+sudo install -m 755 target/release/ibsr-export /usr/local/bin/
 ```
 
 ### Basic Usage
