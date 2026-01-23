@@ -361,6 +361,131 @@ Start with defaults, then adjust based on:
 - False positive rate in reports
 - Severity of abuse you want to detect
 
+## Delivering Reports to S3
+
+Use `ibsr-export` to upload report artefacts to S3 or S3-compatible storage (MinIO, Cloudflare R2).
+
+### Building ibsr-export
+
+**Using Docker (recommended):**
+
+```bash
+# Build for arm64 (default)
+./build-export.sh
+
+# Build for x86_64
+./build-export.sh --arch x86_64
+
+# Output: ./dist/ibsr-export-<arch>
+```
+
+**From source (requires Rust):**
+
+```bash
+cd nr-ibsr/ibsr-export
+cargo build --release
+# Binary: target/release/ibsr-export
+```
+
+**Install:**
+
+```bash
+sudo install -m 755 ./dist/ibsr-export-arm64 /usr/local/bin/ibsr-export
+```
+
+### Basic Usage
+
+```bash
+ibsr-export s3 \
+  --input ./reports \
+  --bucket my-ibsr-reports \
+  --region us-west-2
+```
+
+### With Presigned URLs
+
+Generate presigned GET URLs for easy sharing:
+
+```bash
+ibsr-export s3 \
+  --input ./reports \
+  --bucket my-ibsr-reports \
+  --presign 7d
+```
+
+### With KMS Encryption
+
+```bash
+ibsr-export s3 \
+  --input ./reports \
+  --bucket my-ibsr-reports \
+  --sse kms \
+  --kms-key-id alias/nr-ibsr
+```
+
+### Using MinIO/R2
+
+For S3-compatible storage:
+
+```bash
+ibsr-export s3 \
+  --input ./reports \
+  --bucket ibsr \
+  --endpoint http://localhost:9000 \
+  --force-path-style \
+  --sse none
+```
+
+### Output Manifest
+
+After upload, `ibsr-export` writes `upload-manifest.json` to the input directory:
+
+```json
+{
+  "version": 1,
+  "tool": "ibsr-export",
+  "run_id": "2026-01-22T10:15:00Z",
+  "objects": [
+    {
+      "path": "report.md",
+      "key": "ibsr/host-y/2026-01-22T10:15:00Z/report.md",
+      "sha256": "...",
+      "presigned_get_url": "https://..."
+    }
+  ]
+}
+```
+
+### CLI Reference
+
+```
+ibsr-export s3 [OPTIONS] --input <PATH> --bucket <NAME>
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--input` | (required) | Input directory with artefacts |
+| `--bucket` | (required) | S3 bucket name |
+| `--prefix` | `ibsr/<hostname>/<run-id>` | Object key prefix |
+| `--region` | (SDK default) | AWS region |
+| `--endpoint` | (none) | S3-compatible endpoint URL |
+| `--force-path-style` | false | Use path-style URLs (for MinIO) |
+| `--sse` | `s3` | Encryption: `none`, `s3`, `kms` |
+| `--kms-key-id` | (none) | KMS key ID or alias |
+| `--presign` | (none) | Generate presigned URLs (`7d`, `24h`) |
+| `--dry-run` | false | Print planned uploads only |
+| `--overwrite` | false | Allow overwriting existing objects |
+| `--output` | `text` | Output format: `text` or `json` |
+
+### Authentication
+
+`ibsr-export` uses the standard AWS credential chain:
+- Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
+- AWS profiles (`~/.aws/credentials`)
+- Instance/workload roles (EC2, ECS, Lambda)
+
+Credentials are never passed via CLI flags or logged.
+
 ## Next Steps
 
 - [Operations](operations.md) — Monitoring and troubleshooting

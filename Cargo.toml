@@ -7,7 +7,7 @@ members = [
     "ibsr-bpf",
     "ibsr-collector",
 ]
-exclude = ["offline-tools"]
+exclude = ["offline-tools", "ibsr-export"]
 
 [workspace.package]
 version = "0.1.0"

@@ -36,16 +36,24 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build arm64
+      # Build ibsr collector
+      - name: Build ibsr arm64
         run: ./build.sh --arch arm64
 
-      - name: Build x86_64
+      - name: Build ibsr x86_64
         run: ./build.sh --arch x86_64
+
+      # Build ibsr-export
+      - name: Build ibsr-export arm64
+        run: ./build-export.sh --arch arm64
+
+      - name: Build ibsr-export x86_64
+        run: ./build-export.sh --arch x86_64
 
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum ibsr-* > checksums.txt
+          sha256sum ibsr-* ibsr-export-* > checksums.txt
           cat checksums.txt
 
       - name: Create Release
@@ -54,5 +62,7 @@ jobs:
           files: |
             dist/ibsr-arm64
             dist/ibsr-x86_64
+            dist/ibsr-export-arm64
+            dist/ibsr-export-x86_64
             dist/checksums.txt
           generate_release_notes: true
