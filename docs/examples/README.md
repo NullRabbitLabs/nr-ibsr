@@ -115,7 +115,6 @@ When abuse is detected, the report includes specific trigger rules, episode deta
 
 ## See Also
 
-- [Reporting](../reporting.md) — S3 upload and pilot workflow
-- [Deployment Guide](../deployment.md) — Full deployment instructions
-- [Configuration Reference](../configuration.md) — All CLI options
-- [Operations Guide](../operations.md) — Monitoring and maintenance
+- [Reporting](../reporting.md) — Offline reporting workflow
+- [S3 Upload](../s3-upload.md) — Configure snapshot uploads
+- [Installation](../installation.md) — System requirements and setup

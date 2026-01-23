@@ -314,7 +314,7 @@ IBSR does not enforce anything. It generates evidence about what *would* happen 
 
 ## Next Steps
 
-- [Installation](install.md) — Get started
-- [Deployment](deployment.md) — Production deployment with S3 upload
+- [Installation](installation.md) — Get started
+- [S3 Upload](s3-upload.md) — Configure snapshot uploads
 - [Safety Model](safety.md) — Understand guarantees
-- [Reporting](reporting.md) — S3 upload and pilot workflow
+- [Reporting](reporting.md) — Offline reporting workflow

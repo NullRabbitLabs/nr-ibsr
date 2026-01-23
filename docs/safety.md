@@ -228,5 +228,5 @@ du -sh /var/lib/ibsr/snapshots/
 ## Next Steps
 
 - [How It Works](how-it-works.md) — Technical architecture
-- [Operations](operations.md) — Monitoring and troubleshooting
+- [Reporting](reporting.md) — Offline reporting workflow
 - [FAQ](faq.md) — Common questions

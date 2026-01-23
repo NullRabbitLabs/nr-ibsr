@@ -276,5 +276,5 @@ On SIGINT or SIGTERM:
 ## Next Steps
 
 - [Safety Model](safety.md) — Safety guarantees and verification
-- [Configuration](configuration.md) — Tuning options
 - [Reporting](reporting.md) — Offline analysis
+- [FAQ](faq.md) — Common questions

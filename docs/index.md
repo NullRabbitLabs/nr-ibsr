@@ -130,15 +130,11 @@ The collector runs unattended once configured. There are no dashboards to watch 
 
 | Document | Description |
 |----------|-------------|
-| [Installation](install.md) | System requirements and installation methods |
-| [Quick Start](quickstart.md) | Get running in 5 minutes |
-| [Configuration](configuration.md) | CLI reference and tuning options |
-| [Deployment](deployment.md) | Production deployment with systemd |
+| [Installation](installation.md) | System requirements and installation methods |
+| [S3 Upload](s3-upload.md) | Upload snapshots using ibsr-export |
+| [Reporting](reporting.md) | Offline reporting workflow |
 | [How It Works](how-it-works.md) | Technical deep dive |
 | [Safety Model](safety.md) | Safety guarantees and risk profile |
-| [Reporting](reporting.md) | S3 upload and report delivery |
-| [Operations](operations.md) | Monitoring, troubleshooting, maintenance |
-| [Upgrading](upgrading.md) | Version upgrades and rollback |
 | [FAQ](faq.md) | Frequently asked questions |
 
 ## Design Principles

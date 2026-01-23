@@ -237,10 +237,15 @@ sudo rm -rf /var/lib/ibsr
 
 ### Remove Systemd Service (If Installed)
 
-See [Deployment](deployment.md) for systemd uninstall instructions.
+```bash
+sudo systemctl stop ibsr
+sudo systemctl disable ibsr
+sudo rm /etc/systemd/system/ibsr.service
+sudo systemctl daemon-reload
+```
 
 ## Next Steps
 
-- [Quick Start](quickstart.md) — Get running in 5 minutes
-- [Configuration](configuration.md) — CLI options and tuning
-- [Deployment](deployment.md) — Production deployment with systemd
+- [S3 Upload](s3-upload.md) — Configure snapshot uploads
+- [How It Works](how-it-works.md) — Technical architecture
+- [Safety Model](safety.md) — Safety guarantees
