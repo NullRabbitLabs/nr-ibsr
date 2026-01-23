@@ -20,7 +20,7 @@ IBSR collects metrics that reveal attack patterns:
 - Port scanning (many IPs, few packets each)
 - Volumetric attacks (high packet/byte rates)
 
-In pilot deployments, the IBSR team analyzes these patterns and generates reports. You do not need to interpret the data yourself.
+In pilot deployments, NullRabbit analyzes these patterns and generates reports. You do not need to interpret the data yourself.
 
 ### Does IBSR integrate with threat intelligence feeds?
 
@@ -83,7 +83,7 @@ ethtool -i eth0 | grep driver
 - Run as root (simplest)
 - Grant CAP_BPF, CAP_NET_ADMIN, CAP_SYS_ADMIN capabilities
 
-See [Installation](install.md) for capability setup.
+See [Installation](installation.md) for capability setup.
 
 ## Configuration
 
@@ -206,7 +206,7 @@ sudo bpftool prog list | grep xdp
 
 ### Do I need to run ibsr-report?
 
-**No.** In pilot deployments, the IBSR team generates reports from your uploaded snapshots. You do not need to run `ibsr-report` or interpret raw data yourself.
+**No.** In pilot deployments, NullRabbit generates reports from your uploaded snapshots. You do not need to run `ibsr-report` or interpret raw data yourself.
 
 The reporting tool is available for advanced users who want to self-serve, but this is optional.
 

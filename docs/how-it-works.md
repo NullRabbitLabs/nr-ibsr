@@ -97,14 +97,14 @@ The userspace `ibsr collect` process:
 │          ibsr collect (userspace)       │
 │                                         │
 │  ┌───────────────────────────────────┐  │
-│  │  Main Loop (every snapshot_sec)  │  │
+│  │  Main Loop (every snapshot_sec)   │  │
 │  │                                   │  │
-│  │  1. Read BPF map entries         │  │
-│  │  2. Build Snapshot struct        │  │
-│  │  3. Serialize to JSONL           │  │
-│  │  4. Append to hourly file        │  │
-│  │  5. Update status.jsonl          │  │
-│  │  6. Rotate old files if needed   │  │
+│  │  1. Read BPF map entries          │  │
+│  │  2. Build Snapshot struct         │  │
+│  │  3. Serialize to JSONL            │  │
+│  │  4. Append to hourly file         │  │
+│  │  5. Update status.jsonl           │  │
+│  │  6. Rotate old files if needed    │  │
 │  └───────────────────────────────────┘  │
 │                                         │
 │  Signal Handler: SIGINT/SIGTERM         │

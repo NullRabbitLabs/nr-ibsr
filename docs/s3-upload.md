@@ -9,6 +9,8 @@ nav_order: 3
 
 For pilots, uploading raw snapshot data to S3 is **required**.
 
+**Prerequisite:** The IBSR collector must be running and producing snapshots. See [Installation](installation.md) for setup instructions.
+
 ## Installation
 
 ### Pre-built Binary (Recommended)

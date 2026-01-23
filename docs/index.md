@@ -76,7 +76,7 @@ In pilot deployments, the workflow is:
 
 1. **Collect**: IBSR runs on your infrastructure, collecting traffic snapshots
 2. **Upload**: Scheduled uploads send snapshots to your S3 bucket using `ibsr-export`
-3. **Report**: The IBSR team generates reports from uploaded data
+3. **Report**: NullRabbit generates reports from uploaded data
 4. **Review**: You receive finished reports — no analysis required on your end
 
 The collector runs unattended once configured. There are no dashboards to watch and no logs to tail.
@@ -115,7 +115,7 @@ The collector runs unattended once configured. There are no dashboards to watch 
                              │
                              ▼
                    ┌────────────────────┐
-                   │ IBSR Team          │
+                   │ NullRabbit         │
                    │ (report generation)│
                    └─────────┬──────────┘
                              │

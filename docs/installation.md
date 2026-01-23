@@ -220,6 +220,32 @@ sudo mkdir -p /var/lib/ibsr/snapshots
 sudo chown $(whoami):$(whoami) /var/lib/ibsr/snapshots
 ```
 
+## Running as a Service
+
+For unattended operation, run IBSR as a systemd service.
+
+### Install Service File
+
+An example service file is provided in the repository:
+
+```bash
+# Download example service file
+curl -LO https://raw.githubusercontent.com/NullRabbitLabs/nr-ibsr/main/docs/examples/ibsr.service
+
+# Edit to customize ports and options
+nano ibsr.service
+
+# Install and enable
+sudo cp ibsr.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ibsr
+
+# Verify running
+sudo systemctl status ibsr
+```
+
+See [examples/](examples/) for additional configuration options including logrotate.
+
 ## Uninstallation
 
 ### Remove Binary
