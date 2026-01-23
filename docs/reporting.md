@@ -493,6 +493,117 @@ ibsr-export s3 [OPTIONS] --input <PATH> --bucket <NAME>
 
 Credentials are never passed via CLI flags or logged.
 
+## Unattended Execution
+
+IBSR is designed to run unattended. The collector captures data continuously, and the reporting pipeline runs on a schedule. Humans interact only with the final artefacts—reports in S3 or on disk. There are no dashboards to watch, no logs to tail.
+
+### systemd Timer (Recommended)
+
+Use a systemd timer to run the reporting pipeline on a schedule.
+
+#### Service Unit
+
+Create `/etc/systemd/system/ibsr-report.service`:
+
+```ini
+[Unit]
+Description=IBSR Report Generation and Upload
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/var/lib/ibsr
+
+# Generate report from snapshots
+ExecStart=/usr/local/bin/ibsr-report \
+    --in /var/lib/ibsr/snapshots \
+    --out /var/lib/ibsr/reports
+
+# Upload to S3
+ExecStartPost=/usr/local/bin/ibsr-export s3 \
+    --input /var/lib/ibsr/reports \
+    --bucket my-ibsr-reports \
+    --region us-west-2
+
+# Non-zero exit on failure
+StandardOutput=journal
+StandardError=journal
+```
+
+#### Timer Unit
+
+Create `/etc/systemd/system/ibsr-report.timer`:
+
+```ini
+[Unit]
+Description=Run IBSR reporting pipeline hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
+```
+
+#### Enable and Start
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable ibsr-report.timer
+sudo systemctl start ibsr-report.timer
+```
+
+#### Verify Timer Status
+
+```bash
+# Check timer is active
+systemctl status ibsr-report.timer
+
+# See next scheduled run
+systemctl list-timers ibsr-report.timer
+
+# View logs from last run
+journalctl -u ibsr-report.service -n 50
+```
+
+#### Manual Trigger
+
+```bash
+sudo systemctl start ibsr-report.service
+```
+
+If the service exits non-zero, the failure is recorded in the journal. Use your existing monitoring to alert on failed systemd units.
+
+### cron (Fallback)
+
+Use cron if systemd timers are unavailable. Note that systemd timers are preferred where available—they provide better logging, dependency handling, and failure tracking.
+
+Add to `/etc/cron.d/ibsr-report`:
+
+```
+# IBSR reporting pipeline - runs hourly
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+
+0 * * * * root /usr/local/bin/ibsr-report --in /var/lib/ibsr/snapshots --out /var/lib/ibsr/reports && /usr/local/bin/ibsr-export s3 --input /var/lib/ibsr/reports --bucket my-ibsr-reports --region us-west-2 >> /var/log/ibsr-report.log 2>&1
+```
+
+Failures result in non-zero exit. Configure your cron daemon or log monitoring to alert on errors in `/var/log/ibsr-report.log`.
+
+### Authentication
+
+Both approaches assume AWS credentials are available through standard mechanisms:
+
+- Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
+- Instance role (EC2, ECS)
+- AWS profile (`~/.aws/credentials`)
+
+Do not embed credentials in unit files or cron entries.
+
 ## Next Steps
 
 - [Operations](operations.md) — Monitoring and troubleshooting

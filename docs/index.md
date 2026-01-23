@@ -47,6 +47,22 @@ By running in shadow mode on production traffic, IBSR generates evidence for:
 - **Candidate block rules** — sources exhibiting abusive patterns
 - **Counterfactual impact** — percentage of traffic affected
 
+## Status & Maturity
+
+IBSR is **early-stage software**.
+
+It is currently used in:
+- controlled pilots
+- evaluation environments
+- safety and feasibility testing
+
+IBSR is intentionally limited in scope and functionality.  
+Interfaces, outputs, and tooling may change as the system evolves.
+
+It is **not** a general-purpose security product and should not be relied on for protection.
+
+We're on the way to full-enforcement, and you're on the journey!
+
 ## Intended Use Cases
 
 | Use Case | Description |
