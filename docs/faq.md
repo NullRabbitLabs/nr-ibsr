@@ -156,7 +156,7 @@ Userspace CPU usage is typically < 1%.
 ### What's the memory usage?
 
 - **Userspace process**: ~10-20 MB
-- **BPF map**: `--map-size × 64 bytes` (default: ~6 MB)
+- **BPF map**: `--map-size * 64 bytes` (default: ~6 MB)
 
 Total: ~16-26 MB with defaults.
 
@@ -314,7 +314,7 @@ IBSR does not enforce anything. It generates evidence about what *would* happen 
 
 ## Next Steps
 
-- [Installation](installation.md) — Get started
-- [S3 Upload](s3-upload.md) — Configure snapshot uploads
-- [Safety Model](safety.md) — Understand guarantees
-- [Reporting](reporting.md) — Offline reporting workflow
+- [Installation](installation.md) - Get started
+- [S3 Upload](s3-upload.md) - Configure snapshot uploads
+- [Safety Model](safety.md) - Understand guarantees
+- [Reporting](reporting.md) - Offline reporting workflow

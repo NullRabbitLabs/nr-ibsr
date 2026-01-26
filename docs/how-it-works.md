@@ -15,22 +15,22 @@ IBSR attaches at the **XDP (eXpress Data Path)** hook, the earliest point a pack
 
 ```
 Network Interface
-       │
-       ▼
-┌──────────────┐
-│  XDP Hook    │ ◄── IBSR attaches here
-│  (kernel)    │
-└──────┬───────┘
-       │ XDP_PASS (always)
-       ▼
-┌──────────────┐
-│  tc ingress  │
-└──────┬───────┘
-       ▼
-┌──────────────┐
-│  netfilter   │
-└──────┬───────┘
-       ▼
+       |
+       v
++--------------+
+|  XDP Hook    | <-- IBSR attaches here
+|  (kernel)    |
++------+-------+
+       | XDP_PASS (always)
+       v
++--------------+
+|  tc ingress  |
++------+-------+
+       v
++--------------+
+|  netfilter   |
++------+-------+
+       v
    Application
 ```
 
@@ -44,7 +44,7 @@ XDP runs before:
 
 For each incoming TCP packet to a monitored port:
 
-1. **Parse headers**: Ethernet → IP → TCP
+1. **Parse headers**: Ethernet -> IP -> TCP
 2. **Check destination port**: Skip if not in monitored list
 3. **Extract source IP**: 32-bit IPv4 address
 4. **Update counters**: Increment appropriate metrics in BPF map
@@ -57,16 +57,16 @@ All operations are O(1). No loops, no allocations, no blocking.
 IBSR uses a single **LRU hash map** to track per-source-IP counters:
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    BPF LRU Hash Map                     │
-├─────────────────────────────────────────────────────────┤
-│  Key: (src_ip: u32, dst_port: u16)                      │
-│  Value: Counters { syn, ack, handshake_ack, rst,        │
-│                    packets, bytes }                     │
-├─────────────────────────────────────────────────────────┤
-│  Max entries: --map-size (default 100,000)              │
-│  Eviction: LRU (least recently updated)                 │
-└─────────────────────────────────────────────────────────┘
++---------------------------------------------------------+
+|                    BPF LRU Hash Map                     |
++---------------------------------------------------------+
+|  Key: (src_ip: u32, dst_port: u16)                      |
+|  Value: Counters { syn, ack, handshake_ack, rst,        |
+|                    packets, bytes }                     |
++---------------------------------------------------------+
+|  Max entries: --map-size (default 100,000)              |
+|  Eviction: LRU (least recently updated)                 |
++---------------------------------------------------------+
 ```
 
 ### Counter Semantics
@@ -93,25 +93,25 @@ The userspace `ibsr collect` process:
 5. **Handles signals** for graceful shutdown
 
 ```
-┌─────────────────────────────────────────┐
-│          ibsr collect (userspace)       │
-│                                         │
-│  ┌───────────────────────────────────┐  │
-│  │  Main Loop (every snapshot_sec)   │  │
-│  │                                   │  │
-│  │  1. Read BPF map entries          │  │
-│  │  2. Build Snapshot struct         │  │
-│  │  3. Serialize to JSONL            │  │
-│  │  4. Append to hourly file         │  │
-│  │  5. Update status.jsonl           │  │
-│  │  6. Rotate old files if needed    │  │
-│  └───────────────────────────────────┘  │
-│                                         │
-│  Signal Handler: SIGINT/SIGTERM         │
-│  - Write final snapshot                 │
-│  - Detach XDP program                   │
-│  - Exit cleanly                         │
-└─────────────────────────────────────────┘
++-----------------------------------------+
+|          ibsr collect (userspace)       |
+|                                         |
+|  +-----------------------------------+  |
+|  |  Main Loop (every snapshot_sec)   |  |
+|  |                                   |  |
+|  |  1. Read BPF map entries          |  |
+|  |  2. Build Snapshot struct         |  |
+|  |  3. Serialize to JSONL            |  |
+|  |  4. Append to hourly file         |  |
+|  |  5. Update status.jsonl           |  |
+|  |  6. Rotate old files if needed    |  |
+|  +-----------------------------------+  |
+|                                         |
+|  Signal Handler: SIGINT/SIGTERM         |
+|  - Write final snapshot                 |
+|  - Detach XDP program                   |
+|  - Exit cleanly                         |
++-----------------------------------------+
 ```
 
 ## Snapshot Format
@@ -250,31 +250,31 @@ On SIGINT or SIGTERM:
 ## Data Flow Summary
 
 ```
-┌────────────┐     ┌─────────────┐     ┌──────────────┐
-│ Network    │────▶│ XDP Program │────▶│ BPF LRU Map  │
-│ Interface  │     │ (kernel)    │     │ (per-IP)     │
-└────────────┘     └─────────────┘     └──────┬───────┘
-                         │                     │
++------------+     +-------------+     +--------------+
+| Network    |---->| XDP Program |---->| BPF LRU Map  |
+| Interface  |     | (kernel)    |     | (per-IP)     |
++------------+     +-------------+     +------+-------+
+                         |                    |
                    XDP_PASS               Map read
                    (always)             (userspace)
-                         │                     │
-                         ▼                     ▼
-                   ┌─────────┐     ┌────────────────┐
-                   │ Network │     │ ibsr collect   │
-                   │ Stack   │     │ (serialize)    │
-                   └─────────┘     └───────┬────────┘
-                                           │
+                         |                    |
+                         v                    v
+                   +---------+     +----------------+
+                   | Network |     | ibsr collect   |
+                   | Stack   |     | (serialize)    |
+                   +---------+     +-------+--------+
+                                           |
                                      JSONL write
-                                           │
-                                           ▼
-                                   ┌───────────────┐
-                                   │ Disk          │
-                                   │ (snapshots)   │
-                                   └───────────────┘
+                                           |
+                                           v
+                                   +---------------+
+                                   | Disk          |
+                                   | (snapshots)   |
+                                   +---------------+
 ```
 
 ## Next Steps
 
-- [Safety Model](safety.md) — Safety guarantees and verification
-- [Reporting](reporting.md) — Offline analysis
-- [FAQ](faq.md) — Common questions
+- [Safety Model](safety.md) - Safety guarantees and verification
+- [Reporting](reporting.md) - Offline analysis
+- [FAQ](faq.md) - Common questions

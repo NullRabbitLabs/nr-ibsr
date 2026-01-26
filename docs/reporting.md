@@ -18,15 +18,21 @@ It is currently intended for:
 - validating whether inline enforcement *could* be safe
 
 The reporting pipeline, outputs, and responsibilities may change as the system evolves.
-IBSR should not be relied on for protection.
+IBSR is not something you can rely on for protection.
 
 ## Overview
 
 The reporting pipeline is intentionally **offline and unattended**.
 
-Two reporting workflows are supported. For pilots, **vendor-generated reporting is the default**.
+Two reporting workflows are supported. For pilots, **vendor-generated reporting is the default**. What does this mean? It means, you upload your jsonl files to a shared drive, like S3 and we'll run the reports.
 
-At no point are humans expected to monitor live output.
+It will require some teamwork, co-ordination and solid communications between us. At no point are humans expected to monitor live output - no late nights!
+
+## Privacy
+
+We don't collect sensitive data, just packet counts, ports and ip addresses (inbound). We don't share the data. And you'll be uploading it to a private S3 folder.
+
+Yes, we will delete it all after. If you don't mind, we'll keep the report.
 
 ## Reporting Responsibility
 

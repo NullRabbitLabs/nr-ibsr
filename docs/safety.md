@@ -7,6 +7,8 @@ nav_order: 6
 
 IBSR is designed to be safe for deployment on production systems, including high-throughput validators and edge infrastructure.
 
+We've tested on a 1Gbps pipe. We've simulated on a 10Gpbs one but haven't had the chance to actually run this because of the cost. If you have one we can use, that would be swell.
+
 ## Hard Guarantees
 
 IBSR provides structural guarantees that cannot be violated:
@@ -83,11 +85,11 @@ No loops, no dynamic allocation, no blocking.
 The BPF LRU hash map is bounded by `--map-size`:
 
 ```
-Memory = map_size × entry_size
-       ≈ map_size × 64 bytes
+Memory = map_size * entry_size
+       ~ map_size * 64 bytes
 
-Default: 100,000 × 64 = 6.4 MB
-Maximum: 1,000,000 × 64 = 64 MB (practical limit)
+Default: 100,000 * 64 = 6.4 MB
+Maximum: 1,000,000 * 64 = 64 MB (practical limit)
 ```
 
 When the map is full, the kernel automatically evicts the least-recently-updated entries.
@@ -227,6 +229,6 @@ du -sh /var/lib/ibsr/snapshots/
 
 ## Next Steps
 
-- [How It Works](how-it-works.md) — Technical architecture
-- [Reporting](reporting.md) — Offline reporting workflow
-- [FAQ](faq.md) — Common questions
+- [How It Works](how-it-works.md) - Technical architecture
+- [Reporting](reporting.md) - Offline reporting workflow
+- [FAQ](faq.md) - Common questions

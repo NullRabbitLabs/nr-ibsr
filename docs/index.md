@@ -7,7 +7,7 @@ nav_order: 1
 
 IBSR is a **kernel-level shadow-mode security validation system** for network traffic.
 
-It runs at the XDP/eBPF layer and observes live TCP traffic, collecting metrics that would inform inline enforcement decisions — **without enforcing anything**.
+It runs at the XDP/eBPF layer and observes live TCP traffic, collecting metrics that would inform inline enforcement decisions - **without enforcing anything**.
 
 IBSR exists to generate **evidence** that inline enforcement could be safe *before* it is allowed to act.
 
@@ -17,7 +17,7 @@ IBSR exists to generate **evidence** that inline enforcement could be safe *befo
 - Observes TCP packets at the earliest possible point in the kernel
 - Aggregates per-source-IP metrics (SYN, ACK, RST, packets, bytes)
 - Writes structured snapshots to disk for offline analysis
-- **Always passes traffic** (`XDP_PASS` only)
+- Passes traffic on - business as usual
 
 ## What IBSR Is Not
 
@@ -43,9 +43,9 @@ IBSR answers one question:
 
 By running in shadow mode on production traffic, IBSR generates evidence for:
 
-- **False positive surface** — legitimate traffic that would be blocked
-- **Candidate block rules** — sources exhibiting abusive patterns
-- **Counterfactual impact** — percentage of traffic affected
+- **False positive surface** - legitimate traffic that would be blocked
+- **Candidate block rules** - sources exhibiting abusive patterns
+- **Counterfactual impact** - percentage of traffic affected
 
 ## Status & Maturity
 
@@ -77,53 +77,53 @@ In pilot deployments, the workflow is:
 1. **Collect**: IBSR runs on your infrastructure, collecting traffic snapshots
 2. **Upload**: Scheduled uploads send snapshots to your S3 bucket using `ibsr-export`
 3. **Report**: NullRabbit generates reports from uploaded data
-4. **Review**: You receive finished reports — no analysis required on your end
+4. **Review**: You receive finished reports - no analysis required on your end
 
 The collector runs unattended once configured. There are no dashboards to watch and no logs to tail.
 
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Target Host                             │
-│                                                                 │
-│  ┌─────────────┐    ┌──────────────┐    ┌──────────────────┐   │
-│  │ Network     │───▶│ XDP/eBPF     │───▶│ ibsr collect     │   │
-│  │ Interface   │    │ (XDP_PASS)   │    │ (userspace)      │   │
-│  └─────────────┘    └──────────────┘    └────────┬─────────┘   │
-│                            │                      │             │
-│                     Counter updates          Snapshots          │
-│                            │                      │             │
-│                     ┌──────▼──────┐         ┌────▼────┐        │
-│                     │ BPF LRU Map │         │ Disk    │        │
-│                     │ (per-IP)    │         │ JSONL   │        │
-│                     └─────────────┘         └────┬────┘        │
-└──────────────────────────────────────────────────┼──────────────┘
-                                                   │
-                              ┌─────────────────────┘
-                              ▼
-                   ┌────────────────────┐
-                   │ ibsr-export s3     │
-                   │ (scheduled upload) │
-                   └─────────┬──────────┘
-                             │
-                             ▼
-                   ┌────────────────────┐
-                   │ Customer S3 Bucket │
-                   │ (snapshots)        │
-                   └─────────┬──────────┘
-                             │
-                             ▼
-                   ┌────────────────────┐
-                   │ NullRabbit         │
-                   │ (report generation)│
-                   └─────────┬──────────┘
-                             │
-                             ▼
-                   ┌────────────────────┐
-                   │ Customer receives  │
-                   │ final reports      │
-                   └────────────────────┘
++-----------------------------------------------------------------+
+|                         Target Host                             |
+|                                                                 |
+|  +-------------+    +--------------+    +------------------+    |
+|  | Network     |--->| XDP/eBPF     |--->| ibsr collect     |    |
+|  | Interface   |    | (XDP_PASS)   |    | (userspace)      |    |
+|  +-------------+    +--------------+    +--------+---------+    |
+|                            |                     |              |
+|                     Counter updates          Snapshots          |
+|                            |                     |              |
+|                     +------v------+         +----v----+         |
+|                     | BPF LRU Map |         | Disk    |         |
+|                     | (per-IP)    |         | JSONL   |         |
+|                     +-------------+         +----+----+         |
++-------------------------------------------------|---------------+
+                                                  |
+                              +-------------------+
+                              v
+                   +--------------------+
+                   | ibsr-export s3     |
+                   | (scheduled upload) |
+                   +---------+----------+
+                             |
+                             v
+                   +--------------------+
+                   | Customer S3 Bucket |
+                   | (snapshots)        |
+                   +---------+----------+
+                             |
+                             v
+                   +--------------------+
+                   | NullRabbit         |
+                   | (report generation)|
+                   +---------+----------+
+                             |
+                             v
+                   +--------------------+
+                   | Customer receives  |
+                   | final reports      |
+                   +--------------------+
 ```
 
 ## Documentation

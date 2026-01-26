@@ -7,11 +7,13 @@ nav_order: 3
 
 `ibsr-export` uploads snapshot files to S3 or S3-compatible storage (MinIO, Cloudflare R2).
 
-For pilots, uploading raw snapshot data to S3 is **required**.
+For pilots, uploading raw snapshot data to S3 is **recommended**.
 
 **Prerequisite:** The IBSR collector must be running and producing snapshots. See [Installation](installation.md) for setup instructions.
 
-## Installation
+If you want us to add support for other object stores, drop us a note.
+
+## Installation 
 
 ### Pre-built Binary (Recommended)
 

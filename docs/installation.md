@@ -272,6 +272,6 @@ sudo systemctl daemon-reload
 
 ## Next Steps
 
-- [S3 Upload](s3-upload.md) — Configure snapshot uploads
-- [How It Works](how-it-works.md) — Technical architecture
-- [Safety Model](safety.md) — Safety guarantees
+- [S3 Upload](s3-upload.md) - Configure snapshot uploads
+- [How It Works](how-it-works.md) - Technical architecture
+- [Safety Model](safety.md) - Safety guarantees
