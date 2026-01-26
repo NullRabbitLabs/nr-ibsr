@@ -6,6 +6,15 @@ It runs in **shadow mode** at the XDP/eBPF layer, observing live network traffic
 
 IBSR is designed to run **unattended** and produce **post-run reports**, not live alerts or dashboards.
 
+> **Important**
+>
+> IBSR is a **shadow-mode XDP/eBPF experiment**.
+> It **never blocks traffic**.
+>
+> It records what *would* have been blocked under conservative inline rules and generates **offline reports only**.
+>
+> IBSR exists to test whether **kernel-level enforcement is feasible in practice**without introducing production risk.
+
 ## What This Repository Contains
 
 | Component | Description |
@@ -118,6 +127,19 @@ IBSR is provided for controlled pilots and evaluation.
 
 It is intentionally limited and conservative by design.
 
+## Scope
+
+**In scope**
+- Shadow-mode XDP / eBPF capture
+- Rule evaluation without enforcement
+- Offline report generation
+
+**Out of scope**
+- Production blocking
+- Alerts or dashboards
+- Policy management
+- SaaS deployment
+  
 ## License
 
 MIT
