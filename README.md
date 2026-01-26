@@ -1,145 +1,50 @@
 # IBSR - Inline Block Simulation Report
 
-IBSR is a **kernel-level traffic collection and analysis tool** used to generate *Inline Block Simulation Reports*.
+IBSR is a **shadow-mode XDP/eBPF traffic collector** that generates offline reports showing what *would* have been blocked under conservative security rules - **without blocking anything**.
 
-It runs in **shadow mode** at the XDP/eBPF layer, observing live network traffic and recording what *would* have been blocked under conservative security rules — **without enforcing anything**.
-
-IBSR is designed to run **unattended** and produce **post-run reports**, not live alerts or dashboards.
-
-> **Important**
->
-> IBSR is a **shadow-mode XDP/eBPF experiment**.
-> It **never blocks traffic**.
->
-> It records what *would* have been blocked under conservative inline rules and generates **offline reports only**.
->
-> IBSR exists to test whether **kernel-level enforcement is feasible in practice**without introducing production risk.
-
-## What This Repository Contains
-
-| Component | Description |
-|-----------|-------------|
-| `ibsr` | XDP/eBPF-based traffic collector (shadow mode only) |
-| `ibsr-report` | Offline report generator (in `offline-tools/`) |
-
-The components are intentionally separated to keep the collector minimal and safe.
-
-## What IBSR Does
-
-- Attaches an XDP program to a network interface
-- Aggregates per-source-IP connection metrics
-- Writes bounded, rotated snapshot files
-- Produces offline reports summarising simulated block decisions
-
-**All packets are passed. IBSR never blocks traffic.**
-
-## What IBSR Does Not Do
-
-- It does not enforce security policy
-- It does not modify or redirect traffic
-- It does not generate live alerts
-- It does not require human monitoring
-- It is not a SIEM, firewall, or IPS
-
-IBSR exists to validate whether inline enforcement *could* be safe — not to provide protection.
-
-## Safety Model
-
-- Shadow mode only (`XDP_PASS`)
-- Fail-open by design
-- No iptables or netfilter changes
-- Bounded memory (LRU map)
-- Minimal performance overhead
-- Instant detach / removal
-
-If IBSR fails or is removed, the system returns to baseline behaviour.
-
-Safety invariants are verified through compile-time static analysis of both BPF source and compiled ELF.
-
-## Usage Model
-
-IBSR follows a simple, unattended workflow:
-
-```
-1. Collect    ibsr collect -p 8899 --out-dir /var/lib/ibsr/snapshots
-2. Transfer   rsync snapshots to analysis host
-3. Report     ibsr-report --in ./snapshots --out ./report
-```
-
-Humans interact only with the final report.
+> **Shadow mode only.** IBSR never drops packets. It validates whether kernel-level enforcement *could* be safe before you commit to it.
 
 ## Quick Start
 
 ```bash
-# Install (from GitHub Releases)
-curl -LO https://github.com/NullRabbitLabs/nr-ibsr/releases/download/v0.1.0/ibsr-$(uname -m)
+# Install
+curl -LO https://github.com/NullRabbitLabs/nr-ibsr/releases/latest/download/ibsr-$(uname -m | sed 's/aarch64/arm64/')
 sudo install -m 755 ibsr-* /usr/local/bin/ibsr
 
-# Run collector
+# Run
 sudo mkdir -p /var/lib/ibsr/snapshots
 sudo ibsr collect -p 8899 --out-dir /var/lib/ibsr/snapshots
-
-# Build reporter (from source)
-cd offline-tools && cargo build --release
-
-# Generate report
-./target/release/ibsr-report --in /var/lib/ibsr/snapshots --out ./report
 ```
 
 ## Documentation
 
-Full documentation lives in [`/docs`](docs/):
-
-| Document | Description |
-|----------|-------------|
-| [Overview](docs/index.md) | What IBSR is and is not |
-| [Installation](docs/install.md) | Download or build from source |
-| [Quick Start](docs/quickstart.md) | Get running in 5 minutes |
-| [Configuration](docs/configuration.md) | CLI reference and tuning |
-| [Deployment](docs/deployment.md) | Production systemd setup |
-| [Safety](docs/safety.md) | Safety guarantees and verification |
-| [Reporting](docs/reporting.md) | Offline analysis with ibsr-report |
-| [Operations](docs/operations.md) | Monitoring and troubleshooting |
-| [FAQ](docs/faq.md) | Common questions |
+**[https://nullrabbitlabs.github.io/nr-ibsr/](https://nullrabbitlabs.github.io/nr-ibsr/)**
 
 ## Requirements
 
-- **OS**: Debian 12+ / Ubuntu 22.04+ (kernel 6.1+)
-- **Arch**: arm64 or x86_64
-- **Privileges**: root or CAP_BPF
-- **NIC**: XDP-capable network interface
+- Debian 12+ / Ubuntu 22.04+ (kernel 6.1+)
+- arm64 or x86_64
+- root or CAP_BPF
+- XDP-capable NIC
 
 ## Build from Source
 
 ```bash
-# Run tests
-docker compose run --rm test
-
-# Build release binary
-./build.sh
-
-# Output: ./dist/ibsr-<arch>
+docker compose run --rm test  # Run tests
+./build.sh                    # Build binary -> ./dist/ibsr-<arch>
 ```
+
+## Safety
+
+- `XDP_PASS` only - cannot drop packets
+- Fail-open by design
+- Bounded memory (LRU map)
+- Compile-time safety verification
 
 ## Status
 
-IBSR is provided for controlled pilots and evaluation.
+Early-stage. Provided for controlled pilots and evaluation.
 
-It is intentionally limited and conservative by design.
-
-## Scope
-
-**In scope**
-- Shadow-mode XDP / eBPF capture
-- Rule evaluation without enforcement
-- Offline report generation
-
-**Out of scope**
-- Production blocking
-- Alerts or dashboards
-- Policy management
-- SaaS deployment
-  
 ## License
 
 MIT
