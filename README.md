@@ -43,7 +43,7 @@ docker compose run --rm test  # Run tests
 
 ## Status
 
-Early-stage. Provided for controlled pilots and evaluation.
+Early-stage by design. Used for controlled pilots and feasibility evaluation.
 
 ## License
 
