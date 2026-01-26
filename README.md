@@ -1,4 +1,4 @@
-# IBSR — Inline Block Simulation Report
+# IBSR - Inline Block Simulation Report
 
 IBSR is a **kernel-level traffic collection and analysis tool** used to generate *Inline Block Simulation Reports*.
 
@@ -63,7 +63,7 @@ Humans interact only with the final report.
 
 ```bash
 # Install (from GitHub Releases)
-curl -LO https://github.com/nullrabbit/nr-ibsr/releases/download/v0.1.0/ibsr-$(uname -m)
+curl -LO https://github.com/NullRabbitLabs/nr-ibsr/releases/download/v0.1.0/ibsr-$(uname -m)
 sudo install -m 755 ibsr-* /usr/local/bin/ibsr
 
 # Run collector
