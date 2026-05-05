@@ -20,5 +20,9 @@ ibsr-bpf = { path = "../ibsr-bpf" }
 ibsr-clock = { path = "../ibsr-clock" }
 ibsr-fs = { path = "../ibsr-fs" }
 ibsr-schema = { path = "../ibsr-schema" }
+# Userspace HTTP parser for ShadowPayload-mode TCP-stream reassembly.
+# Memory-safe, no_std-friendly, parses HTTP/1.x request + response heads
+# and reports body byte length via Content-Length / chunked transfer.
+httparse = "1.9"
 
 [dev-dependencies]
