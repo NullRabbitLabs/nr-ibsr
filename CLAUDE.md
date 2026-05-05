@@ -10,13 +10,49 @@ Analysis and report generation happen offline using tools in `offline-tools/`.
 
 ## Architecture
 
-### On-Box Binary (`ibsr collect`)
+IBSR follows a hyperscaler/cloudflare-shaped operator-edge model: passive
+observation at the network boundary with one load-bearing safety
+guarantee — **shadow mode means no traffic is dropped, redirected, or
+modified**. Two operating modes share that invariant; they differ in what
+observation capability is permitted underneath. See `docs/safety.md` for
+the full safety story.
+
+### On-Box Binary
+
+`ibsr` exposes two subcommands corresponding to the two safety profiles:
+
+#### `ibsr collect` — StrictCounter mode (existing, default)
 - XDP/eBPF program for capturing unique source IPs on target ports
-- Rust userspace collector using libbpf-rs
-- JSON snapshot persistence with atomic writes
+- Counter-only — no per-packet events, no payload reads
 - LRU map for memory-bounded IP tracking
-- Append-only `status.jsonl` heartbeat for monitoring
-- Single subcommand: `collect`
+- BPF source: `ibsr-bpf/src/bpf/counter.bpf.c`
+- Snapshot schema v5 (or v6 with no `resp_aggregates`)
+- Privacy posture: payload bytes never leave the kernel
+
+#### `ibsr collect-payload` — ShadowPayload mode (in progress)
+- TC ingress/egress eBPF programs that sample TCP payload to a ringbuf
+- Userspace TCP-stream reassembler + httparse-based HTTP parser
+- Per-window `ResponseAggregates` matching offline `nr_training/features/responses.py`
+- BPF source: `ibsr-bpf/src/bpf/tc_payload.bpf.c`
+- Snapshot schema v6 with `resp_aggregates` populated
+- Mode-invariant rules still enforced: no drops/redirects/modifies; ringbuf pressure
+  cannot backpressure the network stack (event drops, packet doesn't)
+- Used for traffic-intelligence at operator-controlled boundaries (validator
+  infrastructure, edge proxies, API gateways)
+- Userspace handler in `ibsr-collector/src/payload.rs`
+
+Both subcommands share JSON snapshot persistence with atomic writes, LRU /
+window eviction discipline, and append-only `status.jsonl` heartbeats.
+
+### Safety Verification (`ibsr-bpf/src/safety.rs`)
+
+`SafetyProfile { StrictCounter | ShadowPayload }` selects which checks
+apply. Mode-invariant checks (no drops, no redirects, no packet
+modification, no DEVMAP/XSKMAP/CPUMAP) run for both. Mode-specific
+checks: StrictCounter forbids ringbuf/perf_event helpers + map types
+and requires `BPF_MAP_TYPE_LRU_HASH`; ShadowPayload permits ringbuf
+and lifts the LRU requirement (bounded-memory discipline shifts to
+userspace).
 
 ### Offline Tools (`offline-tools/`)
 - **ibsr-reporter**: Consumes snapshots and produces reports, rules, and evidence
@@ -29,11 +65,15 @@ Analysis and report generation happen offline using tools in `offline-tools/`.
 
 ## Current State
 
-- XDP/eBPF traffic collection is complete
-- Snapshot persistence with rotation is complete
-- Status heartbeat (`status.jsonl`) is implemented
-- Reporter and conformance tooling moved to `offline-tools/`
-- Comprehensive test coverage (99%+ lines)
+- StrictCounter (`ibsr collect`): complete, in production-equivalent state.
+- ShadowPayload (`ibsr collect-payload`): in progress — BPF programs +
+  safety verification + userspace HTTP parser + window aggregator + schema
+  v6 are done; remaining work is the BPF loader / TC attach / ringbuf
+  consumer wiring + the `collect-payload` subcommand CLI.
+- Snapshot persistence with rotation: complete.
+- Status heartbeat (`status.jsonl`): implemented.
+- Reporter and conformance tooling: in `offline-tools/`.
+- Comprehensive test coverage (99%+ lines).
 
 ## Deployment Target
 
@@ -62,9 +102,9 @@ Pre-built binaries for both `ibsr` and `ibsr-export` are available from [GitHub 
 
 ## CLI Synopsis
 
-### `ibsr collect`
+### `ibsr collect` — StrictCounter mode
 
-Collect traffic metrics using XDP/eBPF.
+Collect traffic counters using XDP/eBPF. Counter-only; no payload reads.
 
 ```bash
 ibsr collect --dst-port <PORT> [OPTIONS]
@@ -84,7 +124,37 @@ Optional:
   --status-interval-sec   Interval for status.jsonl updates (default: 60)
 
 Outputs:
-  snapshot_<timestamp>.jsonl   Per-cycle traffic snapshot
+  snapshot_<timestamp>.jsonl   Per-cycle traffic snapshot (schema v6 without
+                                resp_aggregates — Strict-equivalent window)
+  status.jsonl                 Append-only heartbeat/progress log
+```
+
+### `ibsr collect-payload` — ShadowPayload mode (in progress)
+
+Collect per-window response-amplification aggregates via TC ingress/egress
+eBPF + userspace HTTP-stream reassembly. Used at operator-controlled
+boundaries where payload-aware traffic intelligence is the goal.
+
+```bash
+ibsr collect-payload --dst-port <PORT> [OPTIONS]
+
+Required:
+  --dst-port, -p <PORT>   Server-side TCP port(s) to monitor (repeatable, max 8)
+                          Filters both directions: dst_port==server (request) +
+                          src_port==server (response).
+
+Optional:
+  --iface, -i <IFACE>     Network interface for TC attach (default: lo, the
+                          post-term loopback vantage)
+  --out-dir, -o <DIR>     Snapshot output directory
+  --max-flows <N>         Userspace flow-table cap (default: 8192)
+  --window-sec <SECS>     Snapshot emission interval (default: 60)
+  --ringbuf-bytes <N>     BPF ringbuf size (default: 16 MiB)
+  -v, --verbose           Increase verbosity (-v, -vv)
+
+Outputs:
+  snapshot_<timestamp>.jsonl   Per-window snapshot (schema v6 with
+                                resp_aggregates populated)
   status.jsonl                 Append-only heartbeat/progress log
 ```
 
