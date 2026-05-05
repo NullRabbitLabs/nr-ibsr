@@ -141,30 +141,82 @@ Now landed:
     aggregation, decode-error tallies, max-windows cap, end-to-end
     CLI-to-snapshot wiring.
 
-### BPF loader + TC qdisc attach + ringbuf consumer (PENDING)
+### BPF loader + TC qdisc attach + ringbuf consumer (LANDED — integration-test-pending)
 
-The kernel-attach Rust glue is the only remaining piece. Probably
-~200-300 lines:
+The kernel-attach Rust glue is now landed:
 
 - `ibsr-bpf/src/tc_payload_loader.rs`:
-  - `TcPayloadCollector::open(skel, iface, ports, max_flows)`
-  - `clsact` qdisc creation on the configured interface
-  - `bpf_tc_attach` for ingress + egress hooks
-  - Port-filter map programming
-  - Ringbuf consumer setup with a callback that decodes events,
-    bridges to `PayloadEvent`, and feeds the `PayloadHandler`
-- A `RingBufPayloadEventSource` impl of `PayloadEventSource` that
-  delegates polls to the libbpf-rs `RingBuffer::poll` API.
-- `ibsr-collector/src/commands/collect_payload.rs`:
-  - Subcommand handler — instantiate `TcPayloadCollector`, build
-    config + server-port set via `args_to_*`, run
-    `collect_payload_loop`.
+  - Pure-function scaffolding (TDD-tested):
+    - `build_port_filter_entries(ports) → Vec<(key, value)>`
+    - `InterfaceResolver` trait + `NixInterfaceResolver` /
+      `MockInterfaceResolver` impls
+    - `PendingEvents` thread-safe queue
+    - `QueueBackedEventSource` (production-shaped)
+  - Production attacher (kernel-bound):
+    - `LibbpfPayloadCollector::attach(iface, ports, resolver)`
+    - Box::leak'd OpenObject for 'static skel lifetime (matches
+      BpfMapReader pattern)
+    - clsact qdisc creation via TcHookBuilder
+    - TC ingress + egress filter attach
+    - Port-filter map programming
+    - RingBuffer consumer with callback pushing into `PendingEvents`
+    - Drop order: ringbuf → hooks → qdisc → skel (graceful detach,
+      no orphan state)
 
-The libbpf-rs API surface is well-defined (`TcHookBuilder`,
-`RingBufferBuilder`, `MapHandle::update`); the work is mechanical
-but kernel-side, so unit tests cover only the orchestration; on-box
-integration test confirms end-to-end behaviour. `ibsr collect-payload`
-currently returns `CommandError::NotImplemented` until this lands.
+- `ibsr-collector/src/payload_collector.rs`:
+  - `PayloadEventSource` impl for `LibbpfPayloadCollector`:
+    pump → drain.
+  - `PayloadEventSource` impl for `QueueBackedEventSource`: drain.
+    (Both share the orchestrator's loop; the difference is whether a
+    kernel pump runs before drain.)
+
+- `ibsr-collector/src/commands/collect_payload.rs`:
+  - `execute_collect_payload` (TDD-tested with mock attacher).
+  - `TcPayloadAttacher` trait + `AttachError` variants.
+
+- `ibsr-collector/src/main.rs`:
+  - `LibbpfTcPayloadAttacher` — production attacher.
+  - Wires `ibsr collect-payload` subcommand end-to-end.
+
+Verified non-root: `ibsr collect-payload -p 8899 -i lo` loads the
+BPF skeleton (libbpf reports the load attempt), fails cleanly with
+EPERM, exits 1, prints "BPF program load failed: Operation not
+permitted (os error 1)".
+
+### Live integration tests (TO DO with root)
+
+The 3 `#[ignore]`d tests in `ibsr-bpf::tc_payload_loader::tests`
+document the operational verification scenarios:
+
+1. `integration_attach_and_detach_on_lo`: bring up + tear down on
+   loopback without leaving an orphan clsact qdisc
+   (`tc qdisc show dev lo` clean before + after).
+2. `integration_round_trip_one_event`: drive one HTTP request through
+   localhost:8899, observe one payload event in the ringbuf.
+3. `integration_orphan_qdisc_cleanup_on_drop`: kill the binary mid-run,
+   verify Drop ran (qdisc removed).
+
+To run these:
+```
+sudo cargo test -p ibsr-bpf --lib tc_payload_loader -- --ignored --nocapture
+```
+
+### Phase 1 close-gate validation (TO DO after live integration)
+
+After the integration tests pass:
+
+1. Run a Sui F10 saturating reproducer with TLS-fronting against
+   the local validator.
+2. Concurrently run `ibsr collect-payload --iface lo
+   --dst-port <validator_port>` to capture the bundle's traffic at
+   the post-term loopback vantage.
+3. Run `phase1_cross_validate.py` (in nr-substrate) comparing the
+   IBSR-extracted feature dict against the offline `nr_training`
+   extractor's reading of the bundle's `responses.parquet`.
+4. Expected: 7/7 PASS within `PHASE_1_TOLERANCE` (cardinality +
+   max-byte exact, amp_ratio ±1e-4 absolute).
+5. `/methodology-review` at Stage B close-out — Phase 1 close-gate
+   clears empirically on the live system.
 
 ### Phase 1 close-gate validation
 
@@ -185,10 +237,11 @@ Once `ibsr collect-payload` is operational:
 
 ## Test coverage so far
 
-- `ibsr-bpf`: 97 tests (was 69 pre-Stage-B; +28).
+- `ibsr-bpf`: 111 tests (was 69 pre-Stage-B; +42; 6 marked
+  `#[ignore]` for kernel integration).
 - `ibsr-schema`: 46 tests (was 35 pre-Stage-B; +11).
-- `ibsr-collector`: 247 tests (was 182 pre-Stage-B; +65).
-- Workspace total: 482/482 passing.
+- `ibsr-collector`: 257 tests (was 182 pre-Stage-B; +75).
+- Workspace total: 506/506 passing.
 
 All Stage-B-related changes are TDD-first: tests written before
 implementation, and `cargo test` is run after every meaningful chunk.
