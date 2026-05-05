@@ -30,6 +30,10 @@ pub fn exit_code(error: &CommandError) -> i32 {
         CommandError::Collector(_) => codes::COLLECTOR_ERROR,
         CommandError::NoInterface => codes::NO_INTERFACE,
         CommandError::Bpf(_) => codes::BPF_ERROR,
+        // NotImplemented is a misuse / not-yet-wired surface (not a
+        // runtime failure of valid input). Treat as INVALID_ARGS so
+        // the caller doesn't confuse it with a recoverable error.
+        CommandError::NotImplemented(_) => codes::INVALID_ARGS,
     }
 }
 

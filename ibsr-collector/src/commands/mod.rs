@@ -30,6 +30,9 @@ pub enum CommandError {
 
     #[error("no network interface found")]
     NoInterface,
+
+    #[error("{0}")]
+    NotImplemented(String),
 }
 
 /// Result of command execution.

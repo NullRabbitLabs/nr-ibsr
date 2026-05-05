@@ -24,6 +24,20 @@ fn main() -> ExitCode {
 
     let result = match cli.command {
         Command::Collect(args) => run_collect(args, &shutdown),
+        Command::CollectPayload(_args) => {
+            // BPF loader + TC qdisc attach + ringbuf consumer wiring
+            // lands in a follow-up commit. This stub keeps the binary
+            // compiling once the new subcommand variant is in place;
+            // the orchestration logic (collect_payload_window) and
+            // CLI parsing are landed and tested ahead of the kernel
+            // glue per the TDD-first sequence.
+            Err(CommandError::NotImplemented(
+                "ibsr collect-payload: BPF loader + TC attach + ringbuf consumer \
+                 wiring is in-progress (orchestration logic + CLI parsing landed \
+                 ahead per TDD-first sequence; see docs/stage-b-status.md)"
+                    .into(),
+            ))
+        }
     };
 
     match result {
