@@ -1,13 +1,52 @@
-//! XDP Safety Invariant Verification
+//! BPF Safety Invariant Verification
 //!
-//! This module provides both source-level and ELF-level analysis to verify
-//! that the XDP program cannot drop, redirect, or emit per-packet events.
+//! This module provides source-level and ELF-level analysis to verify safety
+//! invariants on IBSR's BPF programs. IBSR follows the hyperscaler/cloudflare
+//! shadow-mode model: a single load-bearing safety guarantee — **no traffic
+//! is dropped, redirected, or modified** — with two operating modes that
+//! differ in what observation capabilities are permitted underneath.
+//!
+//! - [`SafetyProfile::StrictCounter`] (default): the original conservative
+//!   profile. XDP-only, counter-only, no per-packet events, no payload reads.
+//!   Privacy posture: payload bytes never leave the kernel.
+//!
+//! - [`SafetyProfile::ShadowPayload`] (opt-in): permits XDP for steering plus
+//!   TC ingress/egress for payload reassembly + ringbuf / perf_event output
+//!   to userspace. Application-layer parsing happens in userspace. The no-drop
+//!   guarantee is mechanically preserved: ring-buffer pressure cannot
+//!   backpressure the network stack.
+//!
+//! See `docs/safety.md` for the user-facing model description.
 
 use regex::Regex;
 use std::collections::HashSet;
 use thiserror::Error;
 
-/// Forbidden XDP return actions that could affect packet flow.
+/// Operating mode for safety verification. Selects which checks apply.
+///
+/// The mode-invariant rules (no drops / redirects / modifies, no DEVMAP /
+/// XSKMAP / CPUMAP) apply to both modes — they encode the load-bearing
+/// shadow-mode guarantee. Mode-specific rules differ:
+///
+/// - StrictCounter: forbid ringbuf / perf_event helpers + map types; require
+///   `BPF_MAP_TYPE_LRU_HASH` for bounded kernel memory.
+/// - ShadowPayload: ringbuf / perf_event permitted; `BPF_MAP_TYPE_LRU_HASH`
+///   is no longer required (bounded-memory discipline shifts to the userspace
+///   ring-buffer consumer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SafetyProfile {
+    /// XDP-only, counter-only, no per-packet events. Existing `ibsr collect`
+    /// subcommand. The default — strictest profile.
+    #[default]
+    StrictCounter,
+    /// XDP for steering + TC ingress/egress for payload reassembly +
+    /// ringbuf / perf_event for userspace handoff. New `ibsr collect-payload`
+    /// subcommand. Used when payload-aware traffic intelligence is the goal.
+    ShadowPayload,
+}
+
+/// Mode-invariant XDP actions that violate the no-drop / no-redirect / no-modify
+/// shadow guarantee. Forbidden in BOTH modes.
 const FORBIDDEN_XDP_ACTIONS: &[&str] = &[
     "XDP_DROP",
     "XDP_ABORTED",
@@ -15,34 +54,105 @@ const FORBIDDEN_XDP_ACTIONS: &[&str] = &[
     "XDP_TX",
 ];
 
-/// Forbidden BPF helper functions that could emit events or redirect.
-const FORBIDDEN_BPF_HELPERS: &[&str] = &[
+/// Mode-invariant TC actions that violate the no-drop / no-redirect / no-modify
+/// shadow guarantee. Forbidden in BOTH modes. (Only meaningful when ShadowPayload
+/// mode introduces TC programs; harmless to check for in StrictCounter source.)
+const FORBIDDEN_TC_ACTIONS: &[&str] = &[
+    "TC_ACT_SHOT",
+    "TC_ACT_REDIRECT",
+    "TC_ACT_STOLEN",
+    "TC_ACT_TRAP",
+];
+
+/// Mode-invariant BPF helpers that redirect or modify packets. Forbidden in
+/// BOTH modes. (`bpf_xdp_adjust_*` mutates packet data; `bpf_clone_redirect`
+/// would tee traffic out-of-path; `bpf_skb_change_*` rewrites headers.)
+const FORBIDDEN_BPF_HELPERS_INVARIANT: &[&str] = &[
     "bpf_redirect",
     "bpf_redirect_map",
     "bpf_xdp_redirect_map",
+    "bpf_xdp_adjust_head",
+    "bpf_xdp_adjust_tail",
+    "bpf_xdp_adjust_meta",
+    "bpf_clone_redirect",
+    "bpf_skb_change_head",
+    "bpf_skb_change_tail",
+    "bpf_skb_change_proto",
+    "bpf_skb_change_type",
+    "bpf_skb_store_bytes",
+];
+
+/// StrictCounter-only forbidden helpers. These are *permitted* under
+/// ShadowPayload (it needs ringbuf to ship events to userspace) but forbidden
+/// under StrictCounter (where payload bytes must not leave the kernel).
+const FORBIDDEN_BPF_HELPERS_STRICT_ONLY: &[&str] = &[
     "bpf_perf_event_output",
     "bpf_ringbuf_output",
     "bpf_ringbuf_reserve",
     "bpf_ringbuf_submit",
 ];
 
-/// Forbidden map types that could be used for redirection.
-const FORBIDDEN_MAP_TYPES: &[&str] = &[
+/// Mode-invariant forbidden map types — used for traffic redirection. Forbidden
+/// in BOTH modes regardless of profile.
+const FORBIDDEN_MAP_TYPES_INVARIANT: &[&str] = &[
     "BPF_MAP_TYPE_DEVMAP",
     "BPF_MAP_TYPE_DEVMAP_HASH",
     "BPF_MAP_TYPE_XSKMAP",
     "BPF_MAP_TYPE_CPUMAP",
+];
+
+/// StrictCounter-only forbidden map types. Permitted under ShadowPayload
+/// (kernel→userspace event channel), forbidden under StrictCounter.
+const FORBIDDEN_MAP_TYPES_STRICT_ONLY: &[&str] = &[
     "BPF_MAP_TYPE_PERF_EVENT_ARRAY",
     "BPF_MAP_TYPE_RINGBUF",
 ];
 
-/// Required map type for bounded memory.
+/// Required map type for bounded kernel memory in StrictCounter mode.
+/// In ShadowPayload mode, kernel maps may include flow-keyed hash maps but
+/// are not required to be LRU; the bounded-memory discipline lives in
+/// userspace (the ring-buffer consumer's flow table).
 const REQUIRED_MAP_TYPE: &str = "BPF_MAP_TYPE_LRU_HASH";
+
+impl SafetyProfile {
+    /// Helpers forbidden in this profile.
+    fn forbidden_helpers(self) -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = FORBIDDEN_BPF_HELPERS_INVARIANT.to_vec();
+        if matches!(self, SafetyProfile::StrictCounter) {
+            out.extend_from_slice(FORBIDDEN_BPF_HELPERS_STRICT_ONLY);
+        }
+        out
+    }
+
+    /// Map types forbidden in this profile.
+    fn forbidden_map_types(self) -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = FORBIDDEN_MAP_TYPES_INVARIANT.to_vec();
+        if matches!(self, SafetyProfile::StrictCounter) {
+            out.extend_from_slice(FORBIDDEN_MAP_TYPES_STRICT_ONLY);
+        }
+        out
+    }
+
+    /// Whether this profile requires `BPF_MAP_TYPE_LRU_HASH` for bounded
+    /// kernel memory. Only StrictCounter does — ShadowPayload's bounded-memory
+    /// discipline lives in userspace.
+    fn requires_lru_map(self) -> bool {
+        matches!(self, SafetyProfile::StrictCounter)
+    }
+
+    /// Forbidden return actions for this profile. Mode-invariant: includes
+    /// both XDP and TC drop/redirect/steal actions.
+    fn forbidden_actions(self) -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = FORBIDDEN_XDP_ACTIONS.to_vec();
+        out.extend_from_slice(FORBIDDEN_TC_ACTIONS);
+        out
+    }
+}
 
 /// Errors from safety verification.
 #[derive(Debug, Error)]
 pub enum SafetyError {
-    #[error("forbidden XDP action found: {0}")]
+    #[error("forbidden BPF action found: {0}")]
     ForbiddenAction(String),
 
     #[error("forbidden BPF helper found: {0}")]
@@ -61,7 +171,10 @@ pub enum SafetyError {
     SourceError(String),
 }
 
-/// Result of safety verification.
+/// Result of safety verification. The `profile` field records which profile
+/// the report was produced under so downstream consumers can interpret the
+/// `has_lru_map` flag correctly (required for StrictCounter, optional for
+/// ShadowPayload).
 #[derive(Debug, Default)]
 pub struct SafetyReport {
     pub forbidden_actions: Vec<String>,
@@ -69,10 +182,11 @@ pub struct SafetyReport {
     pub forbidden_map_types: Vec<String>,
     pub has_lru_map: bool,
     pub is_safe: bool,
+    pub profile: SafetyProfile,
 }
 
 impl SafetyReport {
-    /// Check if the program passes all safety requirements.
+    /// Check if the program passes all safety requirements for its profile.
     pub fn validate(&self) -> Result<(), SafetyError> {
         if let Some(action) = self.forbidden_actions.first() {
             return Err(SafetyError::ForbiddenAction(action.clone()));
@@ -83,90 +197,119 @@ impl SafetyReport {
         if let Some(map_type) = self.forbidden_map_types.first() {
             return Err(SafetyError::ForbiddenMapType(map_type.clone()));
         }
-        if !self.has_lru_map {
+        if self.profile.requires_lru_map() && !self.has_lru_map {
             return Err(SafetyError::MissingLruMap);
         }
         Ok(())
     }
 }
 
-/// Analyze C source code for forbidden patterns.
+/// Analyze C source code for forbidden patterns under [`SafetyProfile::StrictCounter`].
+/// Thin compatibility wrapper around [`analyze_source_with_profile`].
 pub fn analyze_source(source: &str) -> SafetyReport {
-    let mut report = SafetyReport::default();
+    analyze_source_with_profile(source, SafetyProfile::StrictCounter)
+}
 
-    // Check for forbidden XDP actions (as return values)
-    for action in FORBIDDEN_XDP_ACTIONS {
-        // Match "return XDP_DROP" or similar patterns
+/// Analyze C source code for forbidden patterns under the given safety profile.
+/// Returns a `SafetyReport` recording all violations found and the profile used.
+///
+/// Mode-invariant rules (no drops / redirects / modifies, no DEVMAP /
+/// XSKMAP / CPUMAP) apply to both modes. Mode-specific rules — ringbuf and
+/// perf_event helper / map-type forbiddenness, and the LRU-map requirement —
+/// apply only under StrictCounter.
+pub fn analyze_source_with_profile(source: &str, profile: SafetyProfile) -> SafetyReport {
+    let mut report = SafetyReport {
+        profile,
+        ..SafetyReport::default()
+    };
+
+    // Check for forbidden return actions (XDP + TC).
+    for action in profile.forbidden_actions() {
+        // Match "return XDP_DROP" / "return TC_ACT_SHOT" or similar patterns.
         let pattern = format!(r"\breturn\s+{}\b", regex::escape(action));
-        // Pattern is always valid since action is alphanumeric
+        // Pattern is always valid since action is alphanumeric.
         let re = Regex::new(&pattern).expect("valid regex pattern");
         if re.is_match(source) {
             report.forbidden_actions.push(action.to_string());
         }
     }
 
-    // Check for forbidden BPF helpers
-    for helper in FORBIDDEN_BPF_HELPERS {
+    // Check for forbidden BPF helpers (mode-aware).
+    for helper in profile.forbidden_helpers() {
         let pattern = format!(r"\b{}\s*\(", regex::escape(helper));
-        // Pattern is always valid since helper is alphanumeric
+        // Pattern is always valid since helper is alphanumeric.
         let re = Regex::new(&pattern).expect("valid regex pattern");
         if re.is_match(source) {
             report.forbidden_helpers.push(helper.to_string());
         }
     }
 
-    // Check for forbidden map types
-    for map_type in FORBIDDEN_MAP_TYPES {
+    // Check for forbidden map types (mode-aware).
+    for map_type in profile.forbidden_map_types() {
         if source.contains(map_type) {
             report.forbidden_map_types.push(map_type.to_string());
         }
     }
 
-    // Check for required LRU map
+    // Check for required LRU map (StrictCounter only).
     report.has_lru_map = source.contains(REQUIRED_MAP_TYPE);
 
-    // Determine overall safety
+    // Determine overall safety. Profile-aware: ShadowPayload doesn't require
+    // an LRU map.
+    let lru_ok = !profile.requires_lru_map() || report.has_lru_map;
     report.is_safe = report.forbidden_actions.is_empty()
         && report.forbidden_helpers.is_empty()
         && report.forbidden_map_types.is_empty()
-        && report.has_lru_map;
+        && lru_ok;
 
     report
 }
 
-/// Analyze compiled ELF for forbidden symbols.
+/// Analyze compiled ELF for forbidden symbols under [`SafetyProfile::StrictCounter`].
+/// Thin compatibility wrapper around [`analyze_elf_with_profile`].
 pub fn analyze_elf(elf_bytes: &[u8]) -> Result<SafetyReport, SafetyError> {
+    analyze_elf_with_profile(elf_bytes, SafetyProfile::StrictCounter)
+}
+
+/// Analyze compiled ELF for forbidden symbols under the given safety profile.
+pub fn analyze_elf_with_profile(
+    elf_bytes: &[u8],
+    profile: SafetyProfile,
+) -> Result<SafetyReport, SafetyError> {
     use object::{Object, ObjectSection, ObjectSymbol};
 
     let file = object::File::parse(elf_bytes)
         .map_err(|e| SafetyError::ElfError(e.to_string()))?;
 
-    let mut report = SafetyReport::default();
+    let mut report = SafetyReport {
+        profile,
+        ..SafetyReport::default()
+    };
     let mut found_symbols: HashSet<String> = HashSet::new();
 
-    // Collect all symbol names
+    // Collect all symbol names.
     for symbol in file.symbols() {
         if let Ok(name) = symbol.name() {
             found_symbols.insert(name.to_string());
         }
     }
 
-    // Check for forbidden helpers in symbols
-    for helper in FORBIDDEN_BPF_HELPERS {
-        if found_symbols.contains(*helper) {
+    // Check for forbidden helpers in symbols (mode-aware).
+    for helper in profile.forbidden_helpers() {
+        if found_symbols.contains(helper) {
             report.forbidden_helpers.push(helper.to_string());
         }
     }
 
     // For ELF analysis, we check section names for map definitions
-    // and look for specific patterns in the data
+    // and look for specific patterns in the data.
     for section in file.sections() {
         let name = match section.name() {
             Ok(n) => n,
             Err(_) => continue,
         };
 
-        // Check if this is a maps section
+        // Check if this is a maps section.
         if !name.contains("maps") && !name.contains(".rodata") {
             continue;
         }
@@ -178,26 +321,28 @@ pub fn analyze_elf(elf_bytes: &[u8]) -> Result<SafetyReport, SafetyError> {
 
         let data_str = String::from_utf8_lossy(data);
 
-        // Check for forbidden map types in section data
-        for map_type in FORBIDDEN_MAP_TYPES {
+        // Check for forbidden map types in section data (mode-aware).
+        for map_type in profile.forbidden_map_types() {
             if data_str.contains(map_type) {
                 report.forbidden_map_types.push(map_type.to_string());
             }
         }
 
-        // Check for LRU map
+        // Check for LRU map.
         if data_str.contains(REQUIRED_MAP_TYPE) {
             report.has_lru_map = true;
         }
     }
 
-    // Note: XDP actions are compile-time constants, so we can't easily detect them
-    // in the ELF without disassembling. Source analysis handles this.
-    // For ELF, we focus on helper calls and map types.
+    // Note: XDP/TC actions are compile-time constants, so we can't easily
+    // detect them in the ELF without disassembling. Source analysis handles
+    // this. For ELF, we focus on helper calls and map types.
 
+    let lru_ok = !profile.requires_lru_map() || report.has_lru_map;
     report.is_safe = report.forbidden_actions.is_empty()
         && report.forbidden_helpers.is_empty()
-        && report.forbidden_map_types.is_empty();
+        && report.forbidden_map_types.is_empty()
+        && lru_ok;
 
     Ok(report)
 }
@@ -469,6 +614,7 @@ mod tests {
             forbidden_map_types: vec![],
             has_lru_map: true,
             is_safe: true,
+            profile: SafetyProfile::StrictCounter,
         };
 
         assert!(report.validate().is_ok());
@@ -482,6 +628,7 @@ mod tests {
             forbidden_map_types: vec![],
             has_lru_map: true,
             is_safe: false,
+            profile: SafetyProfile::StrictCounter,
         };
 
         let err = report.validate().unwrap_err();
@@ -496,6 +643,7 @@ mod tests {
             forbidden_map_types: vec![],
             has_lru_map: true,
             is_safe: false,
+            profile: SafetyProfile::StrictCounter,
         };
 
         let err = report.validate().unwrap_err();
@@ -510,6 +658,7 @@ mod tests {
             forbidden_map_types: vec!["BPF_MAP_TYPE_RINGBUF".to_string()],
             has_lru_map: true,
             is_safe: false,
+            profile: SafetyProfile::StrictCounter,
         };
 
         let err = report.validate().unwrap_err();
@@ -524,6 +673,7 @@ mod tests {
             forbidden_map_types: vec![],
             has_lru_map: false,
             is_safe: false,
+            profile: SafetyProfile::StrictCounter,
         };
 
         let err = report.validate().unwrap_err();
@@ -983,5 +1133,257 @@ mod tests {
             "XDP source contains forbidden map types: {:?}",
             report.forbidden_map_types
         );
+        assert_eq!(
+            report.profile,
+            SafetyProfile::StrictCounter,
+            "default profile must be StrictCounter (back-compat)"
+        );
+    }
+
+    // ===========================================
+    // Test Category C — Per-Mode Safety Profile (ShadowPayload)
+    // ===========================================
+
+    #[test]
+    fn test_default_profile_is_strict_counter() {
+        let p: SafetyProfile = Default::default();
+        assert_eq!(p, SafetyProfile::StrictCounter);
+    }
+
+    #[test]
+    fn test_shadow_payload_permits_ringbuf_helper() {
+        let source = r#"
+            struct {
+                __uint(type, BPF_MAP_TYPE_RINGBUF);
+                __uint(max_entries, 4 * 1024 * 1024);
+            } payload_rb SEC(".maps");
+
+            SEC("tc/ingress")
+            int tc_payload(struct __sk_buff *skb) {
+                struct payload_event *ev = bpf_ringbuf_reserve(&payload_rb, sizeof(*ev), 0);
+                if (!ev) return TC_ACT_OK;
+                bpf_ringbuf_submit(ev, 0);
+                return TC_ACT_OK;
+            }
+        "#;
+        let report = analyze_source_with_profile(source, SafetyProfile::ShadowPayload);
+        assert!(
+            report.is_safe,
+            "ShadowPayload should accept ringbuf usage: {:?}", report,
+        );
+        assert!(report.forbidden_helpers.is_empty());
+        assert!(report.forbidden_map_types.is_empty());
+        assert_eq!(report.profile, SafetyProfile::ShadowPayload);
+    }
+
+    #[test]
+    fn test_shadow_payload_permits_perf_event_output() {
+        let source = r#"
+            struct {
+                __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+            } events SEC(".maps");
+
+            SEC("tc/egress")
+            int tc_handle(struct __sk_buff *skb) {
+                bpf_perf_event_output(skb, &events, BPF_F_CURRENT_CPU, &data, sizeof(data));
+                return TC_ACT_OK;
+            }
+        "#;
+        let report = analyze_source_with_profile(source, SafetyProfile::ShadowPayload);
+        assert!(report.is_safe, "ShadowPayload should accept perf_event_output: {:?}", report);
+    }
+
+    #[test]
+    fn test_shadow_payload_does_not_require_lru_map() {
+        // ShadowPayload programs may use a HASH (not LRU) map for flow state;
+        // the bounded-memory discipline lives in the userspace ring-buffer
+        // consumer.
+        let source = r#"
+            struct {
+                __uint(type, BPF_MAP_TYPE_RINGBUF);
+                __uint(max_entries, 1024 * 1024);
+            } rb SEC(".maps");
+
+            SEC("tc/ingress")
+            int p(struct __sk_buff *skb) {
+                return TC_ACT_OK;
+            }
+        "#;
+        let report = analyze_source_with_profile(source, SafetyProfile::ShadowPayload);
+        assert!(report.is_safe, "ShadowPayload should not require LRU map");
+        assert!(!report.has_lru_map);
+        assert!(report.validate().is_ok());
+    }
+
+    #[test]
+    fn test_shadow_payload_still_forbids_drops() {
+        let source = r#"
+            SEC("tc/ingress")
+            int p(struct __sk_buff *skb) {
+                return TC_ACT_SHOT;
+            }
+        "#;
+        let report = analyze_source_with_profile(source, SafetyProfile::ShadowPayload);
+        assert!(!report.is_safe, "ShadowPayload must still forbid TC_ACT_SHOT");
+        assert!(report.forbidden_actions.contains(&"TC_ACT_SHOT".to_string()));
+    }
+
+    #[test]
+    fn test_shadow_payload_still_forbids_redirects() {
+        let source = r#"
+            SEC("tc/egress")
+            int p(struct __sk_buff *skb) {
+                bpf_redirect(1, 0);
+                return TC_ACT_OK;
+            }
+        "#;
+        let report = analyze_source_with_profile(source, SafetyProfile::ShadowPayload);
+        assert!(!report.is_safe);
+        assert!(report.forbidden_helpers.contains(&"bpf_redirect".to_string()));
+    }
+
+    #[test]
+    fn test_shadow_payload_still_forbids_xdp_drop() {
+        let source = r#"
+            SEC("xdp")
+            int p(struct xdp_md *ctx) {
+                return XDP_DROP;
+            }
+        "#;
+        let report = analyze_source_with_profile(source, SafetyProfile::ShadowPayload);
+        assert!(!report.is_safe);
+        assert!(report.forbidden_actions.contains(&"XDP_DROP".to_string()));
+    }
+
+    #[test]
+    fn test_shadow_payload_still_forbids_xdp_redirect() {
+        let source = r#"
+            SEC("xdp")
+            int p(struct xdp_md *ctx) {
+                return XDP_REDIRECT;
+            }
+        "#;
+        let report = analyze_source_with_profile(source, SafetyProfile::ShadowPayload);
+        assert!(!report.is_safe);
+        assert!(report.forbidden_actions.contains(&"XDP_REDIRECT".to_string()));
+    }
+
+    #[test]
+    fn test_shadow_payload_still_forbids_devmap() {
+        let source = r#"
+            struct {
+                __uint(type, BPF_MAP_TYPE_DEVMAP);
+            } devmap SEC(".maps");
+        "#;
+        let report = analyze_source_with_profile(source, SafetyProfile::ShadowPayload);
+        assert!(!report.is_safe);
+        assert!(report.forbidden_map_types.contains(&"BPF_MAP_TYPE_DEVMAP".to_string()));
+    }
+
+    #[test]
+    fn test_shadow_payload_still_forbids_xdp_adjust_head() {
+        // bpf_xdp_adjust_head modifies packet data; mode-invariant forbidden.
+        let source = r#"
+            SEC("xdp")
+            int p(struct xdp_md *ctx) {
+                bpf_xdp_adjust_head(ctx, 16);
+                return XDP_PASS;
+            }
+        "#;
+        let report = analyze_source_with_profile(source, SafetyProfile::ShadowPayload);
+        assert!(!report.is_safe);
+        assert!(report.forbidden_helpers.contains(&"bpf_xdp_adjust_head".to_string()));
+    }
+
+    #[test]
+    fn test_strict_counter_still_forbids_ringbuf() {
+        // Regression: existing StrictCounter behavior must be preserved.
+        let source = r#"
+            struct {
+                __uint(type, BPF_MAP_TYPE_RINGBUF);
+            } rb SEC(".maps");
+        "#;
+        let report = analyze_source_with_profile(source, SafetyProfile::StrictCounter);
+        assert!(!report.is_safe);
+        assert!(report.forbidden_map_types.contains(&"BPF_MAP_TYPE_RINGBUF".to_string()));
+    }
+
+    #[test]
+    fn test_strict_counter_still_forbids_perf_event_output() {
+        // Regression: existing StrictCounter behavior must be preserved.
+        let source = r#"
+            int xdp_prog(struct xdp_md *ctx) {
+                bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &data, sizeof(data));
+                return XDP_PASS;
+            }
+        "#;
+        let report = analyze_source_with_profile(source, SafetyProfile::StrictCounter);
+        assert!(!report.is_safe);
+        assert!(report.forbidden_helpers.contains(&"bpf_perf_event_output".to_string()));
+    }
+
+    #[test]
+    fn test_tc_actions_forbidden_in_strict_counter_too() {
+        // Even though StrictCounter doesn't introduce TC programs, the
+        // mode-invariant rules still apply — a stray TC_ACT_SHOT in source
+        // analysed under StrictCounter must still trip.
+        let source = r#"
+            int p(struct __sk_buff *skb) {
+                return TC_ACT_SHOT;
+            }
+        "#;
+        let report = analyze_source_with_profile(source, SafetyProfile::StrictCounter);
+        assert!(!report.is_safe);
+        assert!(report.forbidden_actions.contains(&"TC_ACT_SHOT".to_string()));
+    }
+
+    #[test]
+    fn test_shadow_payload_validate_ok_without_lru() {
+        let report = SafetyReport {
+            forbidden_actions: vec![],
+            forbidden_helpers: vec![],
+            forbidden_map_types: vec![],
+            has_lru_map: false,
+            is_safe: true,
+            profile: SafetyProfile::ShadowPayload,
+        };
+        // ShadowPayload doesn't require LRU; validate must pass.
+        assert!(report.validate().is_ok());
+    }
+
+    #[test]
+    fn test_strict_counter_validate_fails_without_lru() {
+        let report = SafetyReport {
+            forbidden_actions: vec![],
+            forbidden_helpers: vec![],
+            forbidden_map_types: vec![],
+            has_lru_map: false,
+            is_safe: false,
+            profile: SafetyProfile::StrictCounter,
+        };
+        // StrictCounter requires LRU; validate must reject.
+        assert!(matches!(
+            report.validate().unwrap_err(),
+            SafetyError::MissingLruMap
+        ));
+    }
+
+    #[test]
+    fn test_invariant_helpers_forbidden_in_both_modes() {
+        // bpf_clone_redirect tees traffic out-of-path — never permitted.
+        for profile in [SafetyProfile::StrictCounter, SafetyProfile::ShadowPayload] {
+            let source = r#"
+                int p(struct __sk_buff *skb) {
+                    bpf_clone_redirect(skb, 1, 0);
+                    return TC_ACT_OK;
+                }
+            "#;
+            let report = analyze_source_with_profile(source, profile);
+            assert!(
+                !report.is_safe,
+                "bpf_clone_redirect must be forbidden in {:?}", profile,
+            );
+            assert!(report.forbidden_helpers.contains(&"bpf_clone_redirect".to_string()));
+        }
     }
 }
