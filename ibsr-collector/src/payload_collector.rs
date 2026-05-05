@@ -261,6 +261,29 @@ where
     })
 }
 
+/// Convert validated `CollectPayloadArgs` into the
+/// `PayloadCollectorConfig` the orchestrator consumes. Caller must
+/// have already called `args.validate()`; this conversion does NOT
+/// re-validate. `clock` provides the run_id (Unix timestamp at run
+/// start).
+pub fn args_to_config<C: Clock>(
+    args: &crate::cli::CollectPayloadArgs,
+    clock: &C,
+) -> PayloadCollectorConfig {
+    PayloadCollectorConfig {
+        server_ports: args.get_all_ports(),
+        rotation: RotationConfig::new(args.max_files, args.max_age),
+        interval_sec: args.window_sec as u32,
+        run_id: clock.now_unix_sec(),
+    }
+}
+
+/// Build a `HashSet<u16>` of server ports for the userspace direction-
+/// inference path. Pulled from validated `CollectPayloadArgs`.
+pub fn args_to_server_ports(args: &crate::cli::CollectPayloadArgs) -> HashSet<u16> {
+    args.get_all_ports().into_iter().collect()
+}
+
 /// Outcome of a multi-window collection run.
 #[derive(Debug, Default)]
 pub struct PayloadLoopResult {
@@ -1086,6 +1109,106 @@ mod tests {
             "all 3 malformed events must be counted; got {}",
             result.total_decode_errors,
         );
+    }
+
+    // ===========================================
+    // Test Category D — args_to_config / args_to_server_ports
+    // (the wiring layer between CLI parsing and the orchestrator)
+    // ===========================================
+
+    fn make_args(overrides: &[(&str, &str)]) -> crate::cli::CollectPayloadArgs {
+        let mut argv: Vec<String> = vec![
+            "ibsr".into(),
+            "collect-payload".into(),
+            "-p".into(),
+            "8899".into(),
+        ];
+        for (k, v) in overrides {
+            argv.push((*k).into());
+            argv.push((*v).into());
+        }
+        let cli = crate::cli::parse_from(argv).expect("parse");
+        match cli.command {
+            crate::cli::Command::CollectPayload(a) => a,
+            _ => unreachable!("expected CollectPayload"),
+        }
+    }
+
+    #[test]
+    fn args_to_config_pulls_server_ports() {
+        let args = make_args(&[]);
+        let clock = MockClock::new(HOUR_0);
+        let cfg = args_to_config(&args, &clock);
+        assert_eq!(cfg.server_ports, vec![8899]);
+    }
+
+    #[test]
+    fn args_to_config_uses_clock_for_run_id() {
+        let args = make_args(&[]);
+        let clock = MockClock::new(HOUR_0);
+        let cfg = args_to_config(&args, &clock);
+        assert_eq!(cfg.run_id, HOUR_0);
+    }
+
+    #[test]
+    fn args_to_config_uses_window_sec_for_interval() {
+        let args = make_args(&[("--window-sec", "30")]);
+        let clock = MockClock::new(HOUR_0);
+        let cfg = args_to_config(&args, &clock);
+        assert_eq!(cfg.interval_sec, 30);
+    }
+
+    #[test]
+    fn args_to_config_uses_max_files_and_max_age() {
+        let args = make_args(&[("--max-files", "500"), ("--max-age", "3600")]);
+        let clock = MockClock::new(HOUR_0);
+        let cfg = args_to_config(&args, &clock);
+        assert_eq!(cfg.rotation.max_files, 500);
+        assert_eq!(cfg.rotation.max_age_secs, 3600);
+    }
+
+    #[test]
+    fn args_to_server_ports_returns_dedup_set() {
+        let args = make_args(&[]); // 8899 only
+        let set = args_to_server_ports(&args);
+        assert!(set.contains(&8899));
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn args_to_config_and_server_ports_round_trip_through_orchestrator() {
+        // Pin: the wiring from CLI → config → orchestrator works
+        // end-to-end. Run a short loop and verify aggregates flow.
+        let args = make_args(&[("--window-sec", "1")]);
+        let clock = MockClock::new(HOUR_0);
+        let cfg = args_to_config(&args, &clock);
+        let server_ports = args_to_server_ports(&args);
+
+        let req = b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nbody";
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\npayload";
+        let mut src = MockPayloadEventSource::from_batches(vec![
+            vec![req_event(req)],
+            vec![resp_event(resp)],
+        ]);
+        let fs = Arc::new(MockFilesystem::new());
+        let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir());
+        let mut handler = PayloadHandler::new(args.max_flows);
+        let shutdown = crate::signal::NeverShutdown;
+
+        let result = collect_payload_loop(
+            &mut src,
+            &clock,
+            &writer,
+            &ArcFs(fs.clone()),
+            &mut handler,
+            &server_ports,
+            &cfg,
+            &shutdown,
+            &output_dir(),
+            Some(1),
+        );
+        assert_eq!(result.windows_completed, 1);
+        assert_eq!(result.total_pairs, 1);
     }
 
     #[test]
