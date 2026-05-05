@@ -4,8 +4,12 @@
 //! - `collect` - Run the XDP collector
 
 pub mod collect;
+pub mod collect_payload;
 
 pub use collect::execute_collect;
+pub use collect_payload::{
+    execute_collect_payload, AttachError, CollectPayloadResult, TcPayloadAttacher,
+};
 
 use crate::cli::CliError;
 use crate::CollectorError;

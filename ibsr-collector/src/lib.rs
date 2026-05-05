@@ -17,8 +17,9 @@ pub mod sleeper;
 
 pub use cli::{
     default_interface, parse_from, parse_route_table, resolve_interface, Cli, CliError,
-    CollectArgs, Command, DEFAULT_MAX_AGE_SECS, DEFAULT_MAX_FILES, DEFAULT_OUTPUT_DIR,
-    DEFAULT_WINDOW_SEC, MAX_DST_PORTS,
+    CollectArgs, CollectPayloadArgs, Command, DEFAULT_MAX_AGE_SECS, DEFAULT_MAX_FILES,
+    DEFAULT_MAX_FLOWS, DEFAULT_OUTPUT_DIR, DEFAULT_PAYLOAD_OUTPUT_DIR,
+    DEFAULT_PAYLOAD_WINDOW_SEC, DEFAULT_RINGBUF_BYTES, DEFAULT_WINDOW_SEC, MAX_DST_PORTS,
 };
 
 pub use collector::{collect_once, CollectorConfig, CollectorError};
