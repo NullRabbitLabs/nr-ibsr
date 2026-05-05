@@ -111,6 +111,21 @@ impl MockPayloadEventSource {
     }
 }
 
+/// Bridge implementation: `ibsr_bpf::QueueBackedEventSource` becomes a
+/// `PayloadEventSource` the orchestrator can poll. Lives here because
+/// `PayloadEventSource` is defined in this crate and trait coherence
+/// requires the impl to be downstream of both the trait and the type.
+impl PayloadEventSource for ibsr_bpf::QueueBackedEventSource {
+    fn poll(&mut self, _timeout: Duration) -> Result<Vec<Vec<u8>>, String> {
+        // Drain whatever the kernel ringbuf callback has pushed since
+        // the last poll. The kernel-side pump (libbpf-rs RingBuffer::poll)
+        // runs on the same thread, separately, before this method is
+        // called from the orchestrator loop. (When the production
+        // adapter lands, the pump will be wired in via with_pump.)
+        Ok(self.pending().drain())
+    }
+}
+
 impl PayloadEventSource for MockPayloadEventSource {
     fn poll(&mut self, _timeout: Duration) -> Result<Vec<Vec<u8>>, String> {
         self.poll_count += 1;
@@ -1209,6 +1224,56 @@ mod tests {
         );
         assert_eq!(result.windows_completed, 1);
         assert_eq!(result.total_pairs, 1);
+    }
+
+    #[test]
+    fn queue_backed_source_integrates_with_orchestrator_end_to_end() {
+        // Pin the bridge contract: ibsr_bpf::QueueBackedEventSource
+        // (the production-shaped event source) feeds the orchestrator
+        // exactly the same way the MockPayloadEventSource does. If
+        // this test ever drifts (e.g. someone changes the drain
+        // semantics) it trips before live integration breaks.
+        use ibsr_bpf::{PendingEvents, QueueBackedEventSource};
+
+        let req = b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nbody";
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\npayload";
+
+        let pending = PendingEvents::new();
+        // Push the synthetic kernel-shaped events directly into the
+        // queue (bypassing the libbpf-rs pump that production would
+        // use).
+        pending.push(req_event(req));
+        pending.push(resp_event(resp));
+
+        let mut src = QueueBackedEventSource::new(pending);
+        let clock = MockClock::new(HOUR_1);
+        let fs = Arc::new(MockFilesystem::new());
+        let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir());
+        let cfg = config(vec![8899]);
+        let mut handler = PayloadHandler::new(64);
+        let server_ports = server_ports_set(&[8899]);
+        let shutdown = crate::signal::NeverShutdown;
+
+        let result = collect_payload_window(
+            &mut src,
+            &clock,
+            &writer,
+            &ArcFs(fs.clone()),
+            &mut handler,
+            &server_ports,
+            &cfg,
+            HOUR_0,
+            Instant::now(),
+            &shutdown,
+            &output_dir(),
+        )
+        .expect("orchestrator must consume QueueBackedEventSource");
+
+        assert_eq!(result.n_pairs, 1, "one paired RPC across the bridge");
+        let snaps = parse_snapshots_from(&fs);
+        let agg = snaps[0].resp_aggregates.as_ref().expect("aggregates");
+        assert_eq!(agg.req_bytes_max, Some(4));
+        assert_eq!(agg.resp_bytes_max, Some(7));
     }
 
     #[test]
