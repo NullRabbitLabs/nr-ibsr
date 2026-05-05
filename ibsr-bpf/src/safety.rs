@@ -1386,4 +1386,51 @@ mod tests {
             assert!(report.forbidden_helpers.contains(&"bpf_clone_redirect".to_string()));
         }
     }
+
+    #[test]
+    fn test_actual_tc_payload_source_passes_shadow_payload_safety() {
+        // Pin: the real tc_payload.bpf.c source must pass ShadowPayload-mode
+        // safety verification. If a future edit introduces a forbidden
+        // helper / map type / return action, this test trips before the BPF
+        // code can land.
+        let source = include_str!("bpf/tc_payload.bpf.c");
+        let report = analyze_source_with_profile(source, SafetyProfile::ShadowPayload);
+        assert!(
+            report.is_safe,
+            "tc_payload.bpf.c failed ShadowPayload safety verification: {:?}",
+            report,
+        );
+        assert_eq!(report.profile, SafetyProfile::ShadowPayload);
+        assert!(
+            report.forbidden_actions.is_empty(),
+            "tc_payload contains forbidden actions: {:?}", report.forbidden_actions,
+        );
+        assert!(
+            report.forbidden_helpers.is_empty(),
+            "tc_payload contains forbidden helpers: {:?}", report.forbidden_helpers,
+        );
+        assert!(
+            report.forbidden_map_types.is_empty(),
+            "tc_payload contains forbidden map types: {:?}", report.forbidden_map_types,
+        );
+    }
+
+    #[test]
+    fn test_actual_tc_payload_source_rejected_under_strict_counter() {
+        // Pin: tc_payload.bpf.c must NOT pass StrictCounter safety
+        // verification — it uses ringbuf which is StrictCounter-forbidden.
+        // This test documents that the per-mode profile distinction is
+        // load-bearing: payload-aware programs require explicit opt-in.
+        let source = include_str!("bpf/tc_payload.bpf.c");
+        let report = analyze_source_with_profile(source, SafetyProfile::StrictCounter);
+        assert!(
+            !report.is_safe,
+            "tc_payload.bpf.c must not pass StrictCounter — it uses ringbuf",
+        );
+        // Specifically: the ringbuf map type and ringbuf helpers should trip.
+        assert!(
+            report.forbidden_map_types.contains(&"BPF_MAP_TYPE_RINGBUF".to_string()),
+            "expected BPF_MAP_TYPE_RINGBUF to trip under StrictCounter",
+        );
+    }
 }
