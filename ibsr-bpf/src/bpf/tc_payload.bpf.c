@@ -58,7 +58,25 @@ struct flow_id {
 };
 
 // Per-event ringbuf record. Layout is stable across BPF + Rust userspace —
-// fixed-width fields, explicit padding, repr(C) match required.
+// fixed-width fields, explicit padding, repr(C) match required. Total
+// size: 1064 bytes (offset table below).
+//
+// Offset table (must match the userspace decoder in
+// ibsr-bpf/src/tc_payload_event.rs and the size constant
+// EXPECTED_RAW_EVENT_SIZE):
+//
+//   0  : flow.src_ip   (u32)
+//   4  : flow.dst_ip   (u32)
+//   8  : flow.src_port (u16)
+//   10 : flow.dst_port (u16)
+//   12 : direction     (u32)
+//   16 : tcp_seq       (u32)
+//   20 : _pad0         (u32)  -- explicit padding to 8-align ts_ns
+//   24 : ts_ns         (u64)
+//   32 : payload_len   (u32)
+//   36 : sample_len    (u32)
+//   40 : payload[1024]
+// 1064 : end
 //
 // `payload_len`: full TCP payload bytes in this packet (could exceed
 // `sample_len` if the packet is larger than PAYLOAD_SAMPLE_BYTES).
@@ -67,6 +85,7 @@ struct payload_event {
     struct flow_id flow;
     __u32 direction;
     __u32 tcp_seq;
+    __u32 _pad0;          // Explicit padding to 8-align ts_ns
     __u64 ts_ns;
     __u32 payload_len;
     __u32 sample_len;
@@ -176,6 +195,7 @@ static __always_inline int handle_skb(struct __sk_buff *skb, __u32 direction)
     ev->flow.dst_port = tcp->dest;
     ev->direction = direction;
     ev->tcp_seq = bpf_ntohl(tcp->seq);
+    ev->_pad0 = 0;  // Explicit zero so userspace sees deterministic bytes.
     ev->ts_ns = bpf_ktime_get_ns();
     ev->payload_len = payload_len;
     ev->sample_len = sample_len;

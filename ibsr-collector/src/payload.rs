@@ -43,8 +43,9 @@
 //! Eviction: flows are evicted by LRU when the table reaches capacity,
 //! and on idle timeout. Memory is bounded in userspace.
 
+use ibsr_bpf::{direction as raw_dir, DecodedEvent};
 use ibsr_schema::ResponseAggregates;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Maximum HTTP-head size we'll buffer per direction before giving up
 /// and evicting the buffer (parser failure, malformed traffic, or
@@ -107,6 +108,58 @@ pub struct PayloadEvent {
     /// Bytes actually sampled by BPF and copied to userspace.
     /// `payload.len() == sample_len`.
     pub payload: Vec<u8>,
+}
+
+impl PayloadEvent {
+    /// Convert a kernel-decoded `DecodedEvent` into a userspace
+    /// `PayloadEvent`, deriving `Direction` from the configured
+    /// server-port set.
+    ///
+    /// Direction inference: the BPF program records direction relative
+    /// to the network interface (ingress = inbound to host;
+    /// egress = outbound from host). At the post-term loopback vantage,
+    /// what matters is which side of the connection is the *server*.
+    /// We use the server-port set as the disambiguator:
+    ///
+    /// - If `dst_port` is in `server_ports`, the packet is request-bound:
+    ///   client → server → `Direction::ToServer`.
+    /// - If `src_port` is in `server_ports`, the packet is response-bound:
+    ///   server → client → `Direction::FromServer`.
+    /// - Otherwise the packet doesn't belong to a server flow we care
+    ///   about, and `None` is returned. (The BPF port filter normally
+    ///   prevents this; this is a defensive check on the userspace
+    ///   side.)
+    pub fn from_decoded(
+        ev: &DecodedEvent,
+        server_ports: &HashSet<u16>,
+    ) -> Option<Self> {
+        // BPF emits ports in network byte order; convert to host byte
+        // order for set lookup.
+        let src_port = u16::from_be(ev.flow.src_port);
+        let dst_port = u16::from_be(ev.flow.dst_port);
+        let src_ip = u32::from_be(ev.flow.src_ip);
+        let dst_ip = u32::from_be(ev.flow.dst_ip);
+
+        let direction = if server_ports.contains(&dst_port) {
+            Direction::ToServer
+        } else if server_ports.contains(&src_port) {
+            Direction::FromServer
+        } else {
+            return None;
+        };
+
+        let _ = ev.direction; // BPF-side ingress/egress flag is informational here.
+        let _ = (raw_dir::INGRESS, raw_dir::EGRESS); // pin import.
+
+        Some(PayloadEvent {
+            flow: FlowKey::from_tuple(src_ip, src_port, dst_ip, dst_port),
+            direction,
+            tcp_seq: ev.tcp_seq,
+            ts_ns: ev.ts_ns,
+            payload_len: ev.payload_len,
+            payload: ev.payload.clone(),
+        })
+    }
 }
 
 /// A complete request:response pair extracted from the stream. Emitted
@@ -716,5 +769,100 @@ mod tests {
 
         let r2 = h.take_window();
         assert_eq!(r2.count, 0, "second window should be empty after first take");
+    }
+
+    // ===========================================
+    // Bridge from kernel-side DecodedEvent → userspace PayloadEvent
+    // ===========================================
+
+    fn decoded(src_ip: u32, src_port: u16, dst_ip: u32, dst_port: u16, payload: &[u8])
+        -> ibsr_bpf::DecodedEvent
+    {
+        ibsr_bpf::DecodedEvent {
+            flow: ibsr_bpf::RawFlowId {
+                src_ip: src_ip.to_be(),
+                dst_ip: dst_ip.to_be(),
+                src_port: src_port.to_be(),
+                dst_port: dst_port.to_be(),
+            },
+            direction: ibsr_bpf::direction::INGRESS,
+            tcp_seq: 0,
+            ts_ns: 0,
+            payload_len: payload.len() as u32,
+            sample_len: payload.len() as u32,
+            payload: payload.to_vec(),
+        }
+    }
+
+    #[test]
+    fn bridge_decoded_request_packet_maps_to_to_server() {
+        let mut server_ports = HashSet::new();
+        server_ports.insert(8899u16);
+        // Client at 12345 → Server at 8899; dst_port matches server set.
+        let d = decoded(0x7f000002, 12345, 0x7f000001, 8899, b"hello");
+        let pe = PayloadEvent::from_decoded(&d, &server_ports).expect("bridge");
+        assert_eq!(pe.direction, Direction::ToServer);
+        assert_eq!(pe.payload, b"hello");
+    }
+
+    #[test]
+    fn bridge_decoded_response_packet_maps_to_from_server() {
+        let mut server_ports = HashSet::new();
+        server_ports.insert(8899u16);
+        // Server at 8899 → Client at 12345; src_port matches server set.
+        let d = decoded(0x7f000001, 8899, 0x7f000002, 12345, b"resp");
+        let pe = PayloadEvent::from_decoded(&d, &server_ports).expect("bridge");
+        assert_eq!(pe.direction, Direction::FromServer);
+        assert_eq!(pe.payload, b"resp");
+    }
+
+    #[test]
+    fn bridge_unrelated_flow_returns_none() {
+        // Neither port is in the server set — should be filtered out.
+        let server_ports: HashSet<u16> = [8899u16].iter().copied().collect();
+        let d = decoded(0x7f000001, 1000, 0x7f000002, 2000, b"x");
+        assert!(PayloadEvent::from_decoded(&d, &server_ports).is_none());
+    }
+
+    #[test]
+    fn bridge_canonicalises_flow_for_both_directions() {
+        let server_ports: HashSet<u16> = [8899u16].iter().copied().collect();
+        let req = decoded(0x7f000002, 12345, 0x7f000001, 8899, b"REQ");
+        let resp = decoded(0x7f000001, 8899, 0x7f000002, 12345, b"RESP");
+        let req_pe = PayloadEvent::from_decoded(&req, &server_ports).expect("req");
+        let resp_pe = PayloadEvent::from_decoded(&resp, &server_ports).expect("resp");
+        assert_eq!(req_pe.flow, resp_pe.flow,
+            "request + response packets of same connection must map to same FlowKey");
+    }
+
+    #[test]
+    fn bridge_end_to_end_decode_then_pair() {
+        // Full bridge: build raw kernel events → decode → bridge to
+        // PayloadEvent → feed PayloadHandler → produce ResponseAggregates.
+        let server_ports: HashSet<u16> = [8899u16].iter().copied().collect();
+        let req_full = b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nbody";
+        let resp_full = b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\npayload";
+
+        let req_decoded = decoded(0x7f000002, 12345, 0x7f000001, 8899, req_full);
+        let resp_decoded = decoded(0x7f000001, 8899, 0x7f000002, 12345, resp_full);
+
+        let req_pe = PayloadEvent::from_decoded(&req_decoded, &server_ports).unwrap();
+        let resp_pe = PayloadEvent::from_decoded(&resp_decoded, &server_ports).unwrap();
+
+        let mut h = PayloadHandler::new(64);
+        h.feed(&req_pe);
+        let outcome = h.feed(&resp_pe);
+        match outcome {
+            FeedOutcome::MessageComplete(Some(pair)) => {
+                assert_eq!(pair.request_bytes, 4, "body 'body' = 4 bytes");
+                assert_eq!(pair.response_bytes, 7, "body 'payload' = 7 bytes");
+                assert_eq!(pair.status_code, Some(200));
+            }
+            other => panic!("expected paired RpcPair, got {:?}", other),
+        }
+        let agg = h.take_window();
+        assert_eq!(agg.count, 1);
+        assert_eq!(agg.req_bytes_max, Some(4));
+        assert_eq!(agg.resp_bytes_max, Some(7));
     }
 }
