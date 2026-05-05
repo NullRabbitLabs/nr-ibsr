@@ -126,6 +126,24 @@ impl PayloadEventSource for ibsr_bpf::QueueBackedEventSource {
     }
 }
 
+/// Bridge implementation: `ibsr_bpf::LibbpfPayloadCollector` (production
+/// libbpf-rs adapter) becomes a `PayloadEventSource`. On poll: pump
+/// the kernel ringbuf for `timeout`, then drain the queue the
+/// callback pushed into.
+///
+/// This is the kernel-driven path; the orchestrator's loop is
+/// otherwise identical to the mock-driven test path.
+impl PayloadEventSource for ibsr_bpf::LibbpfPayloadCollector {
+    fn poll(&mut self, timeout: Duration) -> Result<Vec<Vec<u8>>, String> {
+        // libbpf RingBuffer::poll's timeout granularity is milliseconds.
+        // We pump the kernel ringbuf for the requested timeout, which
+        // invokes our callback for each available event (pushing into
+        // the PendingEvents queue). Then drain the queue.
+        self.pump(timeout).map_err(|e| e.to_string())?;
+        Ok(self.pending().drain())
+    }
+}
+
 impl PayloadEventSource for MockPayloadEventSource {
     fn poll(&mut self, _timeout: Duration) -> Result<Vec<Vec<u8>>, String> {
         self.poll_count += 1;

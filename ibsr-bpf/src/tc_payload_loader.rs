@@ -215,19 +215,206 @@ impl crate::tc_payload_event::DecodedEvent {
     pub fn __sentinel() {}
 }
 
-// Implement PayloadEventSource via a trait alias path that doesn't
-// pull in ibsr-collector (which depends on us). Since
-// PayloadEventSource is defined in ibsr-collector, the impl lives
-// there or in a downstream crate. For the loader to be useful from
-// ibsr-collector::commands::collect_payload, we expose the
-// queue-backed source as a TYPE that ibsr-collector wraps in its own
-// trait impl.
-//
-// (Trait coherence: PayloadEventSource is in ibsr-collector;
+// Trait coherence: PayloadEventSource is in ibsr-collector;
 // QueueBackedEventSource is in ibsr-bpf. ibsr-collector depends on
 // ibsr-bpf, so the impl `impl PayloadEventSource for QueueBackedEventSource`
 // lives in ibsr-collector. A small adapter in ibsr-collector wires
-// it up.)
+// it up.
+
+// =====================================================================
+// Production libbpf-rs adapter
+// =====================================================================
+//
+// Loads the tc_payload BPF skeleton, creates a clsact qdisc on the
+// configured interface, attaches the TC ingress + egress programs,
+// programs the port-filter map, sets up a ringbuf consumer that
+// pushes events into a `PendingEvents` queue.
+//
+// Lifetime discipline:
+// - The skeleton is `Box::leak`'d to obtain a `'static` lifetime so
+//   the ringbuf and TC hooks (which borrow from the skeleton's maps
+//   and program FDs) can themselves be `'static`.
+// - Drop order in `LibbpfPayloadCollector` is field declaration order:
+//   ringbuf → tc hooks → skel. RingBuffer must drop before the maps it
+//   borrows; tc_hooks must drop before the program FDs they hold.
+
+use libbpf_rs::skel::{OpenSkel, SkelBuilder};
+use libbpf_rs::{
+    MapCore, OpenObject, RingBuffer, RingBufferBuilder, TcHook, TcHookBuilder, TC_EGRESS, TC_INGRESS,
+};
+use std::mem::MaybeUninit;
+use std::os::fd::AsFd;
+
+mod tc_payload_skel {
+    include!(concat!(env!("OUT_DIR"), "/tc_payload.skel.rs"));
+}
+
+use tc_payload_skel::*;
+
+/// Production-ready ShadowPayload-mode attacher + event source.
+///
+/// Owns the skeleton, qdisc, hooks, and ringbuf. Drop is the cleanup
+/// path: ringbuf drops first (releases its borrow on payload_rb map);
+/// then TC hooks (detaching ingress + egress and destroying the
+/// clsact qdisc); then the skel itself.
+pub struct LibbpfPayloadCollector {
+    // Field order = drop order (declared first = dropped first).
+    ringbuf: RingBuffer<'static>,
+    pending: PendingEvents,
+    _ingress_hook: TcHook,
+    _egress_hook: TcHook,
+    _qdisc: TcHook,
+    // Skel must outlive the borrows above; declared last.
+    _skel: TcPayloadSkel<'static>,
+    interface: String,
+}
+
+// SAFETY: Same reasoning as `BpfMapReader` — the collector is used
+// from a single thread; libbpf-rs internals are not shared across
+// threads concurrently.
+unsafe impl Send for LibbpfPayloadCollector {}
+unsafe impl Sync for LibbpfPayloadCollector {}
+
+impl LibbpfPayloadCollector {
+    /// Get the interface name this collector is attached to.
+    pub fn interface(&self) -> &str {
+        &self.interface
+    }
+
+    /// Pump the ringbuf: ask libbpf to drain available events into the
+    /// callback (which pushes into `PendingEvents`). Pure I/O wrapper;
+    /// callers (the `PayloadEventSource::poll` impl in ibsr-collector)
+    /// invoke this then drain `pending()`.
+    pub fn pump(&mut self, timeout: std::time::Duration) -> Result<(), TcPayloadLoaderError> {
+        self.ringbuf
+            .poll(timeout)
+            .map_err(|e| TcPayloadLoaderError::RingbufPoll(e.to_string()))
+    }
+
+    /// Reference to the pending-events queue (drain on each poll).
+    pub fn pending(&self) -> &PendingEvents {
+        &self.pending
+    }
+
+    /// Open + load the skeleton, create clsact qdisc, attach TC
+    /// ingress + egress programs, program the port-filter map, set
+    /// up the ringbuf consumer.
+    ///
+    /// On any failure during attach, partial state is unwound by
+    /// Drop on the values declared so far. Specifically: if qdisc
+    /// creation succeeds but ingress attach fails, the qdisc Drop
+    /// destroys the clsact; if ingress attach succeeds but egress
+    /// fails, the ingress hook Drop detaches it.
+    pub fn attach(
+        iface: &str,
+        ports: &[u16],
+        resolver: &dyn InterfaceResolver,
+    ) -> Result<Self, TcPayloadLoaderError> {
+        let ifindex = resolver.ifindex(iface)?;
+
+        // Box::leak the OpenObject so the skel has 'static lifetime,
+        // which propagates to the ringbuf and TC hooks that borrow
+        // from it. Mirrors the BpfMapReader pattern in bpf_reader.rs.
+        let open_object: &'static mut MaybeUninit<OpenObject> =
+            Box::leak(Box::new(MaybeUninit::<OpenObject>::uninit()));
+
+        let skel_builder = TcPayloadSkelBuilder::default();
+        let open_skel = skel_builder
+            .open(open_object)
+            .map_err(|e| TcPayloadLoaderError::BpfLoad(e.to_string()))?;
+
+        let skel = open_skel
+            .load()
+            .map_err(|e| TcPayloadLoaderError::BpfLoad(e.to_string()))?;
+
+        // Program the port-filter map.
+        let port_entries = build_port_filter_entries(ports)?;
+        for (key, value) in &port_entries {
+            skel.maps
+                .port_filter
+                .update(key, value, libbpf_rs::MapFlags::ANY)
+                .map_err(|e| TcPayloadLoaderError::MapProgram(e.to_string()))?;
+        }
+
+        // Create the clsact qdisc on the interface. clsact is a
+        // dummy classifier that hosts both ingress and egress filters
+        // on the same qdisc.
+        //
+        // The qdisc is created via a TcHook with attach_point =
+        // TC_EGRESS|TC_INGRESS (the libbpf-rs idiom); destroying that
+        // hook tears down the clsact.
+        let ingress_fd = skel.progs.tc_payload_ingress.as_fd();
+        let mut qdisc_builder = TcHookBuilder::new(ingress_fd);
+        qdisc_builder.ifindex(ifindex as i32).replace(true);
+        let qdisc = qdisc_builder
+            .hook(TC_INGRESS | TC_EGRESS)
+            .create()
+            .map_err(|e| TcPayloadLoaderError::Qdisc {
+                iface: iface.to_string(),
+                reason: e.to_string(),
+            })?;
+
+        // Attach ingress filter.
+        let mut ingress_builder = TcHookBuilder::new(ingress_fd);
+        ingress_builder
+            .ifindex(ifindex as i32)
+            .replace(true)
+            .handle(1)
+            .priority(1);
+        let mut ingress_hook = ingress_builder.hook(TC_INGRESS);
+        let ingress_hook = ingress_hook
+            .attach()
+            .map_err(|e| TcPayloadLoaderError::Attach {
+                direction: "ingress",
+                reason: e.to_string(),
+            })?;
+
+        // Attach egress filter (separate program, separate FD).
+        let egress_fd = skel.progs.tc_payload_egress.as_fd();
+        let mut egress_builder = TcHookBuilder::new(egress_fd);
+        egress_builder
+            .ifindex(ifindex as i32)
+            .replace(true)
+            .handle(1)
+            .priority(1);
+        let mut egress_hook = egress_builder.hook(TC_EGRESS);
+        let egress_hook = egress_hook
+            .attach()
+            .map_err(|e| TcPayloadLoaderError::Attach {
+                direction: "egress",
+                reason: e.to_string(),
+            })?;
+
+        // Set up the ringbuf consumer. The callback pushes each
+        // event's raw bytes into the shared queue; the orchestrator's
+        // poll() drains it.
+        let pending = PendingEvents::new();
+        let pending_for_callback = pending.shared();
+        let mut rb_builder = RingBufferBuilder::new();
+        rb_builder
+            .add(&skel.maps.payload_rb, move |bytes: &[u8]| {
+                let mut guard = pending_for_callback
+                    .lock()
+                    .expect("ringbuf callback: pending mutex poisoned");
+                guard.push(bytes.to_vec());
+                0
+            })
+            .map_err(|e| TcPayloadLoaderError::Ringbuf(e.to_string()))?;
+        let ringbuf = rb_builder
+            .build()
+            .map_err(|e| TcPayloadLoaderError::Ringbuf(e.to_string()))?;
+
+        Ok(Self {
+            ringbuf,
+            pending,
+            _ingress_hook: ingress_hook,
+            _egress_hook: egress_hook,
+            _qdisc: qdisc,
+            _skel: skel,
+            interface: iface.to_string(),
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {

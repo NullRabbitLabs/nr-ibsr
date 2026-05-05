@@ -27,6 +27,7 @@ pub use tc_payload_event::{
     EXPECTED_RAW_EVENT_SIZE, PAYLOAD_SAMPLE_BYTES,
 };
 pub use tc_payload_loader::{
-    build_port_filter_entries, InterfaceResolver, MockInterfaceResolver, NixInterfaceResolver,
-    PendingEvents, QueueBackedEventSource, TcPayloadLoaderError, MAX_PORT_FILTER_ENTRIES,
+    build_port_filter_entries, InterfaceResolver, LibbpfPayloadCollector, MockInterfaceResolver,
+    NixInterfaceResolver, PendingEvents, QueueBackedEventSource, TcPayloadLoaderError,
+    MAX_PORT_FILTER_ENTRIES,
 };

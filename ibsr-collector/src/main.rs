@@ -16,7 +16,6 @@ use ibsr_collector::logger::{Logger, StderrLogger, Verbosity};
 use ibsr_collector::commands::collect_payload::{
     execute_collect_payload, AttachError, TcPayloadAttacher,
 };
-use ibsr_collector::payload_collector::PayloadEventSource;
 use ibsr_collector::{execute_collect, Cli, Command, CommandError, RealSleeper, ShutdownFlag};
 use ibsr_fs::RealFilesystem;
 
@@ -79,33 +78,39 @@ fn run_collect(
     Ok(())
 }
 
-/// Stub TC payload attacher that fails attach with a clear error.
-/// The libbpf-rs ringbuf adapter + clsact qdisc + TC ingress/egress
-/// hooks are kernel-bound integration; they're slotted in via this
-/// trait once they land. Until then, `ibsr collect-payload` exits
-/// cleanly with an actionable error rather than silently misbehaving.
-struct UnimplementedAttacher;
+/// Production TC payload attacher backed by libbpf-rs.
+///
+/// Loads the BPF skeleton, creates the clsact qdisc on the configured
+/// interface, attaches the TC ingress + egress programs, programs the
+/// port-filter map, sets up the ringbuf consumer. On any failure
+/// during attach, partial state is unwound by Drop on the values
+/// declared so far (qdisc destroy, hook detach, skel free).
+struct LibbpfTcPayloadAttacher;
 
-/// Stub event source — never used because UnimplementedAttacher always
-/// fails attach. Required so the trait's associated `Source` type
-/// resolves.
-struct UnimplementedSource;
-impl PayloadEventSource for UnimplementedSource {
-    fn poll(&mut self, _timeout: std::time::Duration) -> Result<Vec<Vec<u8>>, String> {
-        unreachable!("UnimplementedAttacher fails attach before this can be called")
-    }
-}
+impl TcPayloadAttacher for LibbpfTcPayloadAttacher {
+    type Source = ibsr_bpf::LibbpfPayloadCollector;
 
-impl TcPayloadAttacher for UnimplementedAttacher {
-    type Source = UnimplementedSource;
-    fn attach(self, _iface: &str, _ports: &[u16]) -> Result<Self::Source, AttachError> {
-        Err(AttachError::Other(
-            "BPF loader + TC qdisc attach + ringbuf consumer wiring is \
-             in-progress; see docs/stage-b-status.md for the remaining \
-             gap. The orchestration layer (collect_payload_loop) is \
-             unit-tested without a kernel; this attacher slots in next."
-                .into(),
-        ))
+    fn attach(self, iface: &str, ports: &[u16]) -> Result<Self::Source, AttachError> {
+        let resolver = ibsr_bpf::NixInterfaceResolver;
+        ibsr_bpf::LibbpfPayloadCollector::attach(iface, ports, &resolver).map_err(|e| {
+            // Map TcPayloadLoaderError variants to AttachError variants
+            // so the user sees a kernel-failure-mode-specific message.
+            use ibsr_bpf::TcPayloadLoaderError as E;
+            match e {
+                E::InterfaceNotFound(name) => AttachError::InterfaceNotFound(name),
+                E::BpfLoad(reason) => AttachError::BpfLoad(reason),
+                E::Qdisc { iface, reason } => AttachError::TcQdisc { iface, reason },
+                E::Attach { direction, reason } => {
+                    AttachError::TcAttach(format!("{}: {}", direction, reason))
+                }
+                E::MapProgram(reason) => AttachError::MapProgram(reason),
+                E::Ringbuf(reason) => AttachError::Ringbuf(reason),
+                E::RingbufPoll(reason) => AttachError::Other(format!("ringbuf poll: {}", reason)),
+                E::TooManyPorts(n) => {
+                    AttachError::Other(format!("too many ports ({}); max 8", n))
+                }
+            }
+        })
     }
 }
 
@@ -125,7 +130,7 @@ fn run_collect_payload(
 
     let clock = SystemClock;
     let fs = RealFilesystem;
-    let attacher = UnimplementedAttacher;
+    let attacher = LibbpfTcPayloadAttacher;
 
     let result = execute_collect_payload(&args, attacher, &clock, &fs, shutdown, &logger)?;
 
