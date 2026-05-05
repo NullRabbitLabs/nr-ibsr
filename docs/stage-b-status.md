@@ -111,9 +111,40 @@ CIPHER_AGNOSTIC_V2 features.
 
 ## What's remaining
 
-### BPF loader + TC qdisc attach + ringbuf consumer
+### Userspace orchestrator + CLI parser (TDD-COMPLETE)
 
-The kernel-attach Rust glue. Probably ~300-500 lines:
+Now landed:
+
+- `ibsr-collector/src/cli.rs`: `Command::CollectPayload(CollectPayloadArgs)`
+  variant with full CLI parser. Flags: `-p / --dst-port`,
+  `--dst-ports`, `-i / --iface` (default `lo`), `--out-dir`,
+  `--window-sec`, `--max-flows`, `--ringbuf-bytes`, `--max-files`,
+  `--max-age`, `--duration-sec`, `-v`. 21 tests pin parsing +
+  validation.
+- `ibsr-collector/src/payload_collector.rs`:
+  - `PayloadEventSource` trait + `MockPayloadEventSource` for tests.
+  - `PayloadCollectorConfig` + `PayloadCollectorError` +
+    `PayloadWindowResult` + `PayloadLoopResult`.
+  - `build_payload_snapshot` — emits v6 with/without
+    `resp_aggregates` based on window data.
+  - `collect_payload_window` — single-window orchestrator with
+    poll-then-deadline-check loop semantics.
+  - `collect_payload_loop` — multi-window runner with the
+    "IBSR runs without dying" contract: writer failures, source
+    failures, decode failures all keep the loop going. Only shutdown
+    terminates.
+  - `args_to_config` / `args_to_server_ports` — wiring layer between
+    validated CLI args and the orchestrator's runtime types.
+  - 27 tests pin: empty/non-empty windows, paired RPC handling,
+    malformed-event resilience, source-error resilience, shutdown
+    short-circuit, writer-error propagation, multi-window
+    aggregation, decode-error tallies, max-windows cap, end-to-end
+    CLI-to-snapshot wiring.
+
+### BPF loader + TC qdisc attach + ringbuf consumer (PENDING)
+
+The kernel-attach Rust glue is the only remaining piece. Probably
+~200-300 lines:
 
 - `ibsr-bpf/src/tc_payload_loader.rs`:
   - `TcPayloadCollector::open(skel, iface, ports, max_flows)`
@@ -122,17 +153,18 @@ The kernel-attach Rust glue. Probably ~300-500 lines:
   - Port-filter map programming
   - Ringbuf consumer setup with a callback that decodes events,
     bridges to `PayloadEvent`, and feeds the `PayloadHandler`
+- A `RingBufPayloadEventSource` impl of `PayloadEventSource` that
+  delegates polls to the libbpf-rs `RingBuffer::poll` API.
 - `ibsr-collector/src/commands/collect_payload.rs`:
-  - Subcommand handler — parse args, validate, instantiate
-    `TcPayloadCollector`, run window-snapshot loop, write v6
-    snapshots with `resp_aggregates`.
-- `ibsr-collector/src/cli.rs`:
-  - Add `Command::CollectPayload(CollectPayloadArgs)` variant.
+  - Subcommand handler — instantiate `TcPayloadCollector`, build
+    config + server-port set via `args_to_*`, run
+    `collect_payload_loop`.
 
 The libbpf-rs API surface is well-defined (`TcHookBuilder`,
 `RingBufferBuilder`, `MapHandle::update`); the work is mechanical
 but kernel-side, so unit tests cover only the orchestration; on-box
-integration test confirms end-to-end behaviour.
+integration test confirms end-to-end behaviour. `ibsr collect-payload`
+currently returns `CommandError::NotImplemented` until this lands.
 
 ### Phase 1 close-gate validation
 
@@ -153,10 +185,40 @@ Once `ibsr collect-payload` is operational:
 
 ## Test coverage so far
 
-- `ibsr-bpf`: 97 tests (was 69 pre-Stage-B).
-- `ibsr-schema`: 46 tests (was 35 pre-Stage-B).
-- `ibsr-collector`: 199 tests (was 182 pre-Stage-B).
-- Workspace total: 434/434 passing.
+- `ibsr-bpf`: 97 tests (was 69 pre-Stage-B; +28).
+- `ibsr-schema`: 46 tests (was 35 pre-Stage-B; +11).
+- `ibsr-collector`: 247 tests (was 182 pre-Stage-B; +65).
+- Workspace total: 482/482 passing.
+
+All Stage-B-related changes are TDD-first: tests written before
+implementation, and `cargo test` is run after every meaningful chunk.
+
+### What runs without dying (operational robustness pinned by tests)
+
+- Writer fails every iteration → loop continues; windows_failed
+  accumulates; no panic.
+  (`loop_continues_through_writer_failures`)
+- Event source returns errors every poll → snapshot still emits;
+  source_errors counts; no panic.
+  (`loop_recovers_after_intermittent_source_errors`)
+- Malformed event bytes → decode_errors increments; subsequent
+  valid events still aggregate; no panic.
+  (`malformed_event_increments_decode_errors_but_loop_continues`)
+- Shutdown signal mid-window → events drained; final snapshot
+  emitted; clean exit.
+  (`shutdown_during_active_polling_emits_snapshot_before_exit`)
+- 1000 unrelated events in one batch → events_filtered tallies; no
+  pathological behavior.
+  (`many_unrelated_events_in_one_batch_does_not_overflow`)
+- HTTP/1.1 keep-alive / pipelined RPCs → multiple pairs aggregate
+  correctly across the same flow.
+  (`keep_alive_two_request_response_pairs`)
+- Buffer overflow → direction state resets lossy; no panic.
+  (`buffer_overflow_resets_direction`)
+- Aggregator output matches `ResponseAggregates::from_pairs` exactly
+  → bridge contract to the offline-extractor's semantics.
+  (`aggregator_matches_offline_semantics`,
+   `multiple_pairs_aggregate_per_offline_semantics`)
 
 ## Honest framing
 
