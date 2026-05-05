@@ -12,7 +12,123 @@ use std::net::Ipv4Addr;
 /// Version 3: Added per-port granularity (dst_port field in BucketEntry)
 /// Version 4: Added aggregation field, changed key_value to src_ip string format
 /// Version 5: Added interval_sec, run_id, counter_mode, base_ts_unix_sec for offline reporting
-pub const SCHEMA_VERSION: u32 = 5;
+/// Version 6: Added optional resp_aggregates field for ShadowPayload mode (per-window
+///            response-amplification aggregates: req_bytes_max, resp_bytes_max,
+///            amp_ratio_{mean,median,max}). Field semantics match
+///            nr-substrate's nr_training/features/responses.py exactly.
+pub const SCHEMA_VERSION: u32 = 6;
+
+/// Schema versions this reader understands. v5 lacks resp_aggregates (StrictCounter
+/// mode); v6 may carry resp_aggregates (ShadowPayload mode).
+pub const SUPPORTED_VERSIONS: &[u32] = &[5, 6];
+
+/// Per-window response-amplification aggregates. Only emitted by ShadowPayload-mode
+/// collectors (`ibsr collect-payload`); absent on StrictCounter (`ibsr collect`)
+/// snapshots.
+///
+/// Semantics match `nr_training/features/responses.py` exactly so the Phase 1
+/// close-gate criterion (numerical identity, per-feature `PHASE_1_TOLERANCE`) is
+/// achievable when this collector is fed the same traffic the offline extractor
+/// reads from `responses.parquet`. The extractor on the offline side computes
+/// from per-RPC `request_size_bytes` / `response_size_bytes` columns; here we
+/// compute from per-RPC pairs reassembled by the userspace TC handler.
+///
+/// Aggregates are over the snapshot window — same window length as the
+/// surrounding snapshot's `interval_sec`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResponseAggregates {
+    /// Number of complete request:response pairs observed in this window.
+    pub count: u64,
+
+    /// Sum of all response bytes across all pairs in window.
+    pub resp_bytes_total: u64,
+
+    /// Maximum request size in bytes (None if count == 0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub req_bytes_max: Option<u64>,
+
+    /// Maximum response size in bytes (None if count == 0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resp_bytes_max: Option<u64>,
+
+    /// Mean amplification ratio (response/request). Per offline semantics:
+    /// only pairs with request_bytes > 0 are included in the ratio set.
+    /// None if no eligible pair existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amp_ratio_mean: Option<f64>,
+
+    /// Median amplification ratio.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amp_ratio_median: Option<f64>,
+
+    /// Maximum amplification ratio.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amp_ratio_max: Option<f64>,
+}
+
+impl ResponseAggregates {
+    /// Compute per-window aggregates from a slice of (request_bytes, response_bytes)
+    /// pairs. Mirrors the aggregation logic in
+    /// `nr_training/features/responses.py` exactly:
+    ///
+    /// - `req_bytes_max` / `resp_bytes_max`: max over all pairs.
+    /// - `amp_ratio_*`: ratios are computed per-pair, but only over pairs where
+    ///   request > 0; if no pair qualifies, all amp_ratio_* are None.
+    /// - `resp_bytes_total`: sum of all response_bytes.
+    pub fn from_pairs(pairs: &[(u64, u64)]) -> Self {
+        if pairs.is_empty() {
+            return Self {
+                count: 0,
+                resp_bytes_total: 0,
+                req_bytes_max: None,
+                resp_bytes_max: None,
+                amp_ratio_mean: None,
+                amp_ratio_median: None,
+                amp_ratio_max: None,
+            };
+        }
+
+        let count = pairs.len() as u64;
+        let resp_bytes_total: u64 = pairs.iter().map(|(_, r)| *r).sum();
+        let req_bytes_max = pairs.iter().map(|(q, _)| *q).max();
+        let resp_bytes_max = pairs.iter().map(|(_, r)| *r).max();
+
+        let mut ratios: Vec<f64> = pairs
+            .iter()
+            .filter(|(q, _)| *q > 0)
+            .map(|(q, r)| (*r as f64) / (*q as f64))
+            .collect();
+
+        let (amp_mean, amp_median, amp_max) = if ratios.is_empty() {
+            (None, None, None)
+        } else {
+            let mean = ratios.iter().sum::<f64>() / (ratios.len() as f64);
+            ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median = if ratios.len() % 2 == 1 {
+                ratios[ratios.len() / 2]
+            } else {
+                let lo = ratios[ratios.len() / 2 - 1];
+                let hi = ratios[ratios.len() / 2];
+                (lo + hi) / 2.0
+            };
+            let max = ratios
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max);
+            (Some(mean), Some(median), Some(max))
+        };
+
+        Self {
+            count,
+            resp_bytes_total,
+            req_bytes_max,
+            resp_bytes_max,
+            amp_ratio_mean: amp_mean,
+            amp_ratio_median: amp_median,
+            amp_ratio_max: amp_max,
+        }
+    }
+}
 
 /// Key type for bucket entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -220,7 +336,7 @@ impl<'de> Deserialize<'de> for BucketEntry {
 }
 
 /// A snapshot of counters at a point in time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub version: u32,
     /// Describes how metrics are aggregated: "src_ip_dst_port" means per source IP per destination port.
@@ -238,6 +354,12 @@ pub struct Snapshot {
     /// Destination ports being monitored (sorted for deterministic output).
     pub dst_ports: Vec<u16>,
     pub buckets: Vec<BucketEntry>,
+    /// Per-window response-amplification aggregates. Only present on v6
+    /// snapshots emitted by ShadowPayload-mode collectors. Absent on v5
+    /// (StrictCounter-mode) snapshots and on v6 ShadowPayload windows
+    /// where no complete request:response pair was observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resp_aggregates: Option<ResponseAggregates>,
 }
 
 impl Snapshot {
@@ -280,7 +402,16 @@ impl Snapshot {
             base_ts_unix_sec,
             dst_ports: sorted_ports,
             buckets,
+            resp_aggregates: None,
         }
+    }
+
+    /// Builder: attach response-amplification aggregates (ShadowPayload mode).
+    /// The snapshot remains v6; this is the form ShadowPayload-mode collectors
+    /// emit when a window contains complete request:response pairs.
+    pub fn with_resp_aggregates(mut self, agg: ResponseAggregates) -> Self {
+        self.resp_aggregates = Some(agg);
+        self
     }
 
     /// Serialize snapshot to JSON string (single line for JSONL format).
@@ -291,10 +422,13 @@ impl Snapshot {
         serde_json::to_string(self).expect("Snapshot serialization cannot fail")
     }
 
-    /// Deserialize snapshot from JSON string.
+    /// Deserialize snapshot from JSON string. Accepts any version listed in
+    /// `SUPPORTED_VERSIONS` (currently v5 and v6). v5 lacks `resp_aggregates`
+    /// (StrictCounter mode); v6 may carry `resp_aggregates` (ShadowPayload
+    /// mode).
     pub fn from_json(json: &str) -> Result<Self, SnapshotError> {
         let snapshot: Snapshot = serde_json::from_str(json)?;
-        if snapshot.version != SCHEMA_VERSION {
+        if !SUPPORTED_VERSIONS.contains(&snapshot.version) {
             return Err(SnapshotError::VersionMismatch {
                 expected: SCHEMA_VERSION,
                 found: snapshot.version,
@@ -621,7 +755,7 @@ mod tests {
 
     #[test]
     fn test_version_mismatch_rejected() {
-        // Manually craft JSON with wrong version
+        // Manually craft JSON with wrong version (not in SUPPORTED_VERSIONS)
         let bad_json = r#"{"version":999,"aggregation":"src_ip_dst_port","ts_unix_sec":1234567890,"interval_sec":60,"run_id":1234567890,"counter_mode":"cumulative","base_ts_unix_sec":1234567890,"dst_ports":[8899],"buckets":[]}"#;
 
         let result = Snapshot::from_json(bad_json);
@@ -631,7 +765,7 @@ mod tests {
         assert!(matches!(
             err,
             SnapshotError::VersionMismatch {
-                expected: 5,
+                expected: SCHEMA_VERSION,
                 found: 999
             }
         ));
@@ -715,7 +849,12 @@ mod tests {
 
     #[test]
     fn test_schema_version_constant() {
-        assert_eq!(SCHEMA_VERSION, 5);
+        assert_eq!(SCHEMA_VERSION, 6);
+    }
+
+    #[test]
+    fn test_supported_versions_constant() {
+        assert_eq!(SUPPORTED_VERSIONS, &[5, 6]);
     }
 
     #[test]
@@ -993,8 +1132,11 @@ mod tests {
     // ===========================================
 
     #[test]
-    fn test_v5_schema_version() {
-        assert_eq!(SCHEMA_VERSION, 5, "Schema version must be 5");
+    fn test_v5_compat_still_supported() {
+        // v5 snapshots from existing StrictCounter-mode collectors must still
+        // round-trip through the reader after the v6 bump.
+        assert!(SUPPORTED_VERSIONS.contains(&5));
+        assert!(SUPPORTED_VERSIONS.contains(&6));
     }
 
     #[test]
@@ -1048,9 +1190,11 @@ mod tests {
         );
 
         let json = snapshot.to_json();
-        let restored = Snapshot::from_json(&json).expect("deserialize v5 snapshot");
+        let restored = Snapshot::from_json(&json).expect("deserialize current snapshot");
 
-        assert_eq!(restored.version, 5);
+        // After v6 bump, Snapshot::new emits version=SCHEMA_VERSION (6). v5
+        // back-compat is exercised in test_v5_snapshot_round_trips_through_v6_reader.
+        assert_eq!(restored.version, SCHEMA_VERSION);
         assert_eq!(restored.interval_sec, 60);
         assert_eq!(restored.run_id, 1704067200);
         assert_eq!(restored.counter_mode, "cumulative");
@@ -1079,8 +1223,8 @@ mod tests {
 
     #[test]
     fn test_v4_json_rejected() {
-        // v4 JSON with all v5 fields should be rejected with version mismatch
-        // (We include v5 fields so serde can parse it, then version check fails)
+        // v4 is below SUPPORTED_VERSIONS — must still be rejected.
+        // (We include v5 fields so serde can parse the body; version check then fails.)
         let v4_json = r#"{"version":4,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
 
         let result = Snapshot::from_json(v4_json);
@@ -1088,7 +1232,7 @@ mod tests {
         assert!(result.is_err(), "v4 JSON should be rejected");
         let err = result.unwrap_err();
         assert!(
-            matches!(err, SnapshotError::VersionMismatch { expected: 5, found: 4 }),
+            matches!(err, SnapshotError::VersionMismatch { expected: SCHEMA_VERSION, found: 4 }),
             "Expected version mismatch error, got: {:?}",
             err
         );
@@ -1096,11 +1240,170 @@ mod tests {
 
     #[test]
     fn test_v5_missing_new_fields_rejected() {
-        // v5 without new fields should fail to parse
+        // v5 without v5 required fields should fail to parse (serde missing-field).
+        // This documents that v5 is not just "any schema with version=5" but the
+        // canonical v5 shape with interval_sec/run_id/counter_mode/base_ts_unix_sec.
         let incomplete_v5 = r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
 
         let result = Snapshot::from_json(incomplete_v5);
 
-        assert!(result.is_err(), "v5 JSON missing new fields should be rejected");
+        assert!(result.is_err(), "v5 JSON missing required fields should be rejected");
+    }
+
+    // ===========================================
+    // Test Category G — Schema v6 Fields (resp_aggregates, ShadowPayload mode)
+    // ===========================================
+
+    #[test]
+    fn test_v5_snapshot_round_trips_through_v6_reader() {
+        // A v5 snapshot (no resp_aggregates field) should still parse cleanly
+        // through the v6-aware reader. ShadowPayload mode is opt-in; existing
+        // StrictCounter-mode collectors continue to emit v5 (or v6 with no
+        // aggregates) and must remain readable.
+        let v5_json = r#"{"version":5,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
+
+        let restored = Snapshot::from_json(v5_json).expect("v5 should round-trip");
+        assert_eq!(restored.version, 5);
+        assert!(restored.resp_aggregates.is_none());
+    }
+
+    #[test]
+    fn test_v6_snapshot_with_aggregates_round_trips() {
+        let agg = ResponseAggregates::from_pairs(&[
+            (100, 200),
+            (50, 250),
+            (200, 200),
+        ]);
+        let snapshot = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000)
+            .with_resp_aggregates(agg.clone());
+
+        let json = snapshot.to_json();
+        let restored = Snapshot::from_json(&json).expect("v6 should round-trip");
+
+        assert_eq!(restored.version, 6);
+        assert_eq!(restored.resp_aggregates, Some(agg));
+    }
+
+    #[test]
+    fn test_v6_snapshot_without_aggregates_omits_field() {
+        // v6 with no aggregates: JSON should not contain a `resp_aggregates`
+        // key at all (skip_serializing_if=Option::is_none). Stays compact for
+        // StrictCounter-mode-equivalent windows.
+        let snapshot = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000);
+        let json = snapshot.to_json();
+        assert!(!json.contains("resp_aggregates"), "JSON should omit resp_aggregates: {}", json);
+    }
+
+    #[test]
+    fn test_resp_aggregates_empty_pairs_yields_zero_count() {
+        let agg = ResponseAggregates::from_pairs(&[]);
+        assert_eq!(agg.count, 0);
+        assert_eq!(agg.resp_bytes_total, 0);
+        assert_eq!(agg.req_bytes_max, None);
+        assert_eq!(agg.resp_bytes_max, None);
+        assert_eq!(agg.amp_ratio_mean, None);
+        assert_eq!(agg.amp_ratio_median, None);
+        assert_eq!(agg.amp_ratio_max, None);
+    }
+
+    #[test]
+    fn test_resp_aggregates_basic_pair() {
+        // Single pair (req=100, resp=300) → ratio = 3.0; max-byte = 100/300.
+        let agg = ResponseAggregates::from_pairs(&[(100, 300)]);
+        assert_eq!(agg.count, 1);
+        assert_eq!(agg.resp_bytes_total, 300);
+        assert_eq!(agg.req_bytes_max, Some(100));
+        assert_eq!(agg.resp_bytes_max, Some(300));
+        assert_eq!(agg.amp_ratio_mean, Some(3.0));
+        assert_eq!(agg.amp_ratio_median, Some(3.0));
+        assert_eq!(agg.amp_ratio_max, Some(3.0));
+    }
+
+    #[test]
+    fn test_resp_aggregates_zero_request_excluded_from_ratios() {
+        // req=0 pairs are excluded from ratio set per offline semantics
+        // (responses.py:48 — `if r is None or q is None or q <= 0: continue`).
+        // But max-byte / count / total still see them.
+        let agg = ResponseAggregates::from_pairs(&[
+            (0, 500),
+            (100, 200),
+            (200, 600),
+        ]);
+        assert_eq!(agg.count, 3);
+        assert_eq!(agg.resp_bytes_total, 1300);
+        assert_eq!(agg.req_bytes_max, Some(200));
+        assert_eq!(agg.resp_bytes_max, Some(600));
+        // ratios from the 2 non-zero-request pairs: 200/100 = 2.0, 600/200 = 3.0
+        assert_eq!(agg.amp_ratio_mean, Some(2.5));
+        assert_eq!(agg.amp_ratio_median, Some(2.5));
+        assert_eq!(agg.amp_ratio_max, Some(3.0));
+    }
+
+    #[test]
+    fn test_resp_aggregates_all_zero_requests_yields_no_ratios() {
+        let agg = ResponseAggregates::from_pairs(&[(0, 100), (0, 200)]);
+        assert_eq!(agg.count, 2);
+        assert_eq!(agg.resp_bytes_total, 300);
+        assert_eq!(agg.req_bytes_max, Some(0));
+        assert_eq!(agg.resp_bytes_max, Some(200));
+        assert_eq!(agg.amp_ratio_mean, None);
+        assert_eq!(agg.amp_ratio_median, None);
+        assert_eq!(agg.amp_ratio_max, None);
+    }
+
+    #[test]
+    fn test_resp_aggregates_median_even_count() {
+        // Even count → median is mean of two middle values after sorting.
+        // ratios = [1.0, 2.0, 3.0, 4.0] → median = (2.0 + 3.0) / 2 = 2.5
+        let agg = ResponseAggregates::from_pairs(&[
+            (100, 100),
+            (100, 200),
+            (100, 300),
+            (100, 400),
+        ]);
+        assert_eq!(agg.amp_ratio_median, Some(2.5));
+    }
+
+    #[test]
+    fn test_resp_aggregates_median_odd_count() {
+        // Odd count → median is exact middle after sorting.
+        // ratios = [1.0, 2.0, 3.0] → median = 2.0
+        let agg = ResponseAggregates::from_pairs(&[
+            (100, 100),
+            (100, 200),
+            (100, 300),
+        ]);
+        assert_eq!(agg.amp_ratio_median, Some(2.0));
+    }
+
+    #[test]
+    fn test_resp_aggregates_matches_offline_semantics_documentation() {
+        // This test pins the contract with the offline extractor at
+        // training/src/nr_training/features/responses.py:
+        //
+        // - req_bytes_max = max(non-null request_size_bytes)
+        // - resp_bytes_max = max(non-null response_size_bytes)
+        // - resp_bytes_total = sum(non-null response_size_bytes)
+        // - amp_ratio_* = aggregates over per-pair ratios where request > 0
+        //
+        // If the offline semantics ever change, this test will catch the drift
+        // at IBSR-side, before Phase 1 cross-validation surfaces it as a
+        // numerical-identity failure.
+        let agg = ResponseAggregates::from_pairs(&[
+            (100, 200),  // ratio = 2.0
+            (50, 250),   // ratio = 5.0
+            (200, 200),  // ratio = 1.0
+        ]);
+        assert_eq!(agg.req_bytes_max, Some(200));
+        assert_eq!(agg.resp_bytes_max, Some(250));
+        assert_eq!(agg.resp_bytes_total, 650);
+        assert_eq!(agg.amp_ratio_max, Some(5.0));
+        // mean of [2.0, 5.0, 1.0] = 8/3
+        assert!(
+            (agg.amp_ratio_mean.unwrap() - (8.0 / 3.0)).abs() < 1e-9,
+            "amp_ratio_mean should be 8/3, got {:?}", agg.amp_ratio_mean,
+        );
+        // median of sorted [1.0, 2.0, 5.0] = 2.0
+        assert_eq!(agg.amp_ratio_median, Some(2.0));
     }
 }
