@@ -1,0 +1,741 @@
+//! ShadowPayload-mode collector orchestration.
+//!
+//! Pulls payload events from a `PayloadEventSource` (kernel ringbuf in
+//! production; mock in tests), runs them through the userspace
+//! `PayloadHandler`, and emits a `Snapshot` v6 with `resp_aggregates`
+//! at each window boundary.
+//!
+//! This module follows the project pattern of trait-abstracted I/O
+//! (event source, clock, filesystem, snapshot writer) so the
+//! orchestration logic is unit-testable without a kernel.
+//!
+//! Robustness contract — load-bearing for "IBSR runs without dying":
+//!
+//! - Event-source errors are logged and the loop continues. The
+//!   ShadowPayload safety invariant is "ring-buffer pressure cannot
+//!   backpressure the network stack"; this is preserved on the
+//!   userspace side as "userspace errors don't terminate the loop".
+//! - Malformed events (decode failure) are counted and dropped, never
+//!   panicked on.
+//! - Snapshot-write errors propagate (the caller decides whether to
+//!   retry or exit).
+//! - Shutdown is checked via `ShutdownCheck` between event polls so
+//!   SIGINT/SIGTERM produce a clean exit (final snapshot emitted, TC
+//!   detached at a higher layer).
+//! - Empty windows (no events) still produce a snapshot for the
+//!   inference loop's heartbeat semantics.
+
+use std::collections::HashSet;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use ibsr_bpf::decode_event;
+use ibsr_clock::Clock;
+use ibsr_fs::{rotate_snapshots, Filesystem, FsError, RotationConfig, SnapshotWriter};
+use ibsr_schema::{ResponseAggregates, Snapshot};
+use thiserror::Error;
+
+use crate::payload::{PayloadEvent, PayloadHandler};
+use crate::signal::ShutdownCheck;
+
+/// Configuration for one ShadowPayload-mode collection cycle.
+#[derive(Debug, Clone)]
+pub struct PayloadCollectorConfig {
+    /// Server-side ports being monitored. Used both as the BPF
+    /// port-filter input and as the userspace direction-inference
+    /// disambiguator.
+    pub server_ports: Vec<u16>,
+    /// Rotation policy for snapshot files.
+    pub rotation: RotationConfig,
+    /// Snapshot emission interval in seconds. Same field semantics as
+    /// `CollectorConfig::interval_sec` for StrictCounter.
+    pub interval_sec: u32,
+    /// Stable run identifier (Unix timestamp at run start).
+    pub run_id: u64,
+}
+
+/// Errors raised by the orchestrator.
+#[derive(Debug, Error)]
+pub enum PayloadCollectorError {
+    #[error("snapshot write error: {0}")]
+    Write(#[from] FsError),
+}
+
+/// Outcome of one collection window.
+#[derive(Debug)]
+pub struct PayloadWindowResult {
+    /// Number of complete request:response pairs aggregated this window.
+    pub n_pairs: u64,
+    /// Snapshot timestamp.
+    pub timestamp: u64,
+    /// Whether `resp_aggregates` was populated (false = empty window).
+    pub has_aggregates: bool,
+    /// Snapshot files rotated out.
+    pub rotated_count: usize,
+    /// Decode failures observed this window (lossy by design).
+    pub decode_errors: u64,
+    /// Events filtered out by direction inference (no server-port match).
+    pub events_filtered: u64,
+    /// Event-source errors observed this window (lossy by design;
+    /// preserves the no-drop guarantee even if userspace falls behind).
+    pub source_errors: u64,
+}
+
+/// Trait abstracting the kernel-side ringbuf for testability. The
+/// production implementation polls the libbpf-rs `RingBuffer`; the
+/// mock implementation returns canned events.
+pub trait PayloadEventSource {
+    /// Poll for raw event bytes for at most `timeout`. Returns the
+    /// (possibly empty) batch of events received before the timeout
+    /// elapsed. An empty `Vec` is a normal idle return, not an error.
+    fn poll(&mut self, timeout: Duration) -> Result<Vec<Vec<u8>>, String>;
+}
+
+/// In-process event source for tests. Returns canned event batches
+/// in order; subsequent polls return empty until exhausted.
+#[derive(Debug, Default)]
+pub struct MockPayloadEventSource {
+    pub batches: Vec<Vec<Vec<u8>>>,
+    pub poll_count: u64,
+    /// If set and >= poll_count threshold, subsequent polls error.
+    pub fail_after: Option<u64>,
+}
+
+impl MockPayloadEventSource {
+    pub fn from_batches(batches: Vec<Vec<Vec<u8>>>) -> Self {
+        Self {
+            batches,
+            poll_count: 0,
+            fail_after: None,
+        }
+    }
+}
+
+impl PayloadEventSource for MockPayloadEventSource {
+    fn poll(&mut self, _timeout: Duration) -> Result<Vec<Vec<u8>>, String> {
+        self.poll_count += 1;
+        if let Some(fail_after) = self.fail_after {
+            if self.poll_count > fail_after {
+                return Err("mock failure after limit".into());
+            }
+        }
+        if self.batches.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Ok(self.batches.remove(0))
+        }
+    }
+}
+
+/// Build a v6 Snapshot from a window's `ResponseAggregates`. If the
+/// aggregates are empty (zero pairs), emit a v6 snapshot WITHOUT the
+/// `resp_aggregates` field (Strict-equivalent shape).
+pub fn build_payload_snapshot<C: Clock>(
+    aggregates: ResponseAggregates,
+    config: &PayloadCollectorConfig,
+    clock: &C,
+    base_ts_unix_sec: u64,
+) -> Snapshot {
+    // ShadowPayload mode doesn't carry per-(src_ip, dst_port) counter
+    // buckets — those are StrictCounter mode's domain. Emit an empty
+    // bucket list; downstream consumers infer mode from the presence
+    // of `resp_aggregates`.
+    let snapshot = Snapshot::new(
+        clock.now_unix_sec(),
+        &config.server_ports,
+        Vec::new(),
+        config.interval_sec,
+        config.run_id,
+        base_ts_unix_sec,
+    );
+
+    if aggregates.count == 0 {
+        snapshot
+    } else {
+        snapshot.with_resp_aggregates(aggregates)
+    }
+}
+
+/// Run one window's worth of event polling + snapshot emission.
+/// Returns when the deadline has elapsed OR the shutdown flag has been
+/// raised.
+///
+/// Robustness: event-source errors and decode errors are recorded but
+/// don't terminate the loop. Only writer errors propagate (so the
+/// caller can distinguish recoverable from unrecoverable). In
+/// production the caller treats writer errors as warnings and
+/// continues; the next window's write is attempted independently.
+#[allow(clippy::too_many_arguments)]
+pub fn collect_payload_window<E, C, W, F, S>(
+    event_source: &mut E,
+    clock: &C,
+    writer: &W,
+    fs: &F,
+    handler: &mut PayloadHandler,
+    server_ports: &HashSet<u16>,
+    config: &PayloadCollectorConfig,
+    base_ts_unix_sec: u64,
+    window_deadline: Instant,
+    shutdown: &S,
+    output_dir: &Path,
+) -> Result<PayloadWindowResult, PayloadCollectorError>
+where
+    E: PayloadEventSource,
+    C: Clock,
+    W: SnapshotWriter,
+    F: Filesystem,
+    S: ShutdownCheck,
+{
+    let mut decode_errors: u64 = 0;
+    let mut events_filtered: u64 = 0;
+    let mut source_errors: u64 = 0;
+
+    // Loop invariant: always poll at least once per iteration, even
+    // when deadline has already passed. This ensures queued events get
+    // drained on shutdown / window-wraparound. Exit condition is
+    // (poll returned empty AND deadline passed) OR shutdown.
+    loop {
+        if shutdown.should_stop() {
+            break;
+        }
+        let now = Instant::now();
+        let remaining = window_deadline.saturating_duration_since(now);
+        // Cap per-poll wait so we re-check shutdown promptly on long
+        // windows. When remaining is 0, this is also 0 — a non-blocking
+        // drain.
+        let poll_timeout = remaining.min(Duration::from_millis(250));
+
+        let (events, source_err) = match event_source.poll(poll_timeout) {
+            Ok(events) => (events, false),
+            Err(_e) => {
+                source_errors += 1;
+                (Vec::new(), true)
+            }
+        };
+
+        let was_idle = events.is_empty();
+        for raw in events {
+            match decode_event(&raw) {
+                Ok(decoded) => match PayloadEvent::from_decoded(&decoded, server_ports) {
+                    Some(pe) => {
+                        let _outcome = handler.feed(&pe);
+                    }
+                    None => {
+                        events_filtered += 1;
+                    }
+                },
+                Err(_e) => {
+                    decode_errors += 1;
+                }
+            }
+        }
+
+        // Exit: idle (no events to drain) AND deadline reached. A source
+        // error counts as idle for exit purposes — we've already
+        // recorded it and shouldn't busy-loop on a broken source.
+        if (was_idle || source_err) && now >= window_deadline {
+            break;
+        }
+    }
+
+    let aggregates = handler.take_window();
+    let n_pairs = aggregates.count;
+    let has_aggregates = aggregates.count > 0;
+
+    let snapshot =
+        build_payload_snapshot(aggregates, config, clock, base_ts_unix_sec);
+    let timestamp = snapshot.ts_unix_sec;
+
+    writer.write(&snapshot)?;
+
+    let rotation_result = rotate_snapshots(fs, output_dir, &config.rotation, clock)?;
+
+    Ok(PayloadWindowResult {
+        n_pairs,
+        timestamp,
+        has_aggregates,
+        rotated_count: rotation_result.total_removed(),
+        decode_errors,
+        events_filtered,
+        source_errors,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ibsr_bpf::{
+        direction, RawFlowId, RawPayloadEvent, EXPECTED_RAW_EVENT_SIZE, PAYLOAD_SAMPLE_BYTES,
+    };
+    use ibsr_clock::MockClock;
+    use ibsr_fs::{MockFilesystem, StandardSnapshotWriter};
+    use std::collections::HashSet;
+    use std::io;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    // Wrapper to implement Filesystem for Arc<MockFilesystem>, mirrors
+    // collector::tests::ArcFs.
+    struct ArcFs(Arc<MockFilesystem>);
+    impl Filesystem for ArcFs {
+        fn write_atomic(&self, path: &Path, data: &[u8]) -> Result<(), FsError> {
+            self.0.write_atomic(path, data)
+        }
+        fn append_atomic(&self, path: &Path, data: &[u8]) -> Result<(), FsError> {
+            self.0.append_atomic(path, data)
+        }
+        fn read_file(&self, path: &Path) -> Result<String, FsError> {
+            self.0.read_file(path)
+        }
+        fn list_snapshots(&self, dir: &Path) -> Result<Vec<ibsr_fs::SnapshotFile>, FsError> {
+            self.0.list_snapshots(dir)
+        }
+        fn remove(&self, path: &Path) -> Result<(), FsError> {
+            self.0.remove(path)
+        }
+        fn exists(&self, path: &Path) -> bool {
+            self.0.exists(path)
+        }
+        fn create_dir_all(&self, path: &Path) -> Result<(), FsError> {
+            self.0.create_dir_all(path)
+        }
+    }
+
+    // Hour-boundary timestamp so snapshot_filename generates a
+    // deterministic path (same convention as collector tests).
+    const HOUR_0: u64 = 1_704_067_200; // 2024-01-01 00:00:00 UTC
+    const HOUR_1: u64 = 1_704_070_800; // 2024-01-01 01:00:00 UTC
+
+    fn raw_event_bytes(
+        src_ip: u32,
+        src_port: u16,
+        dst_ip: u32,
+        dst_port: u16,
+        dir: u32,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut ev = RawPayloadEvent {
+            flow: RawFlowId {
+                src_ip: src_ip.to_be(),
+                dst_ip: dst_ip.to_be(),
+                src_port: src_port.to_be(),
+                dst_port: dst_port.to_be(),
+            },
+            direction: dir,
+            tcp_seq: 0,
+            _pad0: 0,
+            ts_ns: 0,
+            payload_len: payload.len() as u32,
+            sample_len: payload.len() as u32,
+            payload: [0u8; PAYLOAD_SAMPLE_BYTES],
+        };
+        ev.payload[..payload.len()].copy_from_slice(payload);
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&ev as *const RawPayloadEvent) as *const u8,
+                std::mem::size_of::<RawPayloadEvent>(),
+            )
+        };
+        bytes.to_vec()
+    }
+
+    fn req_event(payload: &[u8]) -> Vec<u8> {
+        // Client 12345 → Server 8899; ingress.
+        raw_event_bytes(0x7f000002, 12345, 0x7f000001, 8899, direction::INGRESS, payload)
+    }
+
+    fn resp_event(payload: &[u8]) -> Vec<u8> {
+        // Server 8899 → Client 12345; egress.
+        raw_event_bytes(0x7f000001, 8899, 0x7f000002, 12345, direction::EGRESS, payload)
+    }
+
+    fn config(server_ports: Vec<u16>) -> PayloadCollectorConfig {
+        PayloadCollectorConfig {
+            server_ports,
+            rotation: RotationConfig::new(100, 86400),
+            interval_sec: 60,
+            run_id: HOUR_0,
+        }
+    }
+
+    fn server_ports_set(ports: &[u16]) -> HashSet<u16> {
+        ports.iter().copied().collect()
+    }
+
+    fn output_dir() -> PathBuf {
+        PathBuf::from("/var/lib/ibsr/snapshots/payload")
+    }
+
+    fn parse_snapshots_from(fs: &MockFilesystem) -> Vec<Snapshot> {
+        let dir = output_dir();
+        let listed = fs.list_snapshots(&dir).expect("list");
+        let mut out = Vec::new();
+        for sf in listed {
+            // Files in MockFilesystem are append-atomic with newline-
+            // terminated JSON; iterate one snapshot per line.
+            if let Ok(content) = fs.read_file(&sf.path) {
+                for line in content.lines() {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Ok(s) = Snapshot::from_json(line) {
+                        out.push(s);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    // ===========================================
+    // Test Category A — build_payload_snapshot
+    // ===========================================
+
+    #[test]
+    fn empty_aggregates_yields_v6_snapshot_without_resp_block() {
+        let cfg = config(vec![8899]);
+        let clock = MockClock::new(HOUR_1);
+        let agg = ResponseAggregates::from_pairs(&[]);
+        let snap = build_payload_snapshot(agg, &cfg, &clock, HOUR_0);
+        assert_eq!(snap.version, 6);
+        assert!(snap.resp_aggregates.is_none());
+        assert_eq!(snap.ts_unix_sec, HOUR_1);
+        assert_eq!(snap.run_id, HOUR_0);
+    }
+
+    #[test]
+    fn nonempty_aggregates_yields_v6_snapshot_with_resp_block() {
+        let cfg = config(vec![8899]);
+        let clock = MockClock::new(HOUR_1);
+        let agg = ResponseAggregates::from_pairs(&[(100, 200), (50, 250)]);
+        let snap = build_payload_snapshot(agg.clone(), &cfg, &clock, HOUR_0);
+        assert_eq!(snap.version, 6);
+        assert_eq!(snap.resp_aggregates, Some(agg));
+    }
+
+    #[test]
+    fn snapshot_carries_server_ports_in_dst_ports() {
+        let cfg = config(vec![8899, 9000]);
+        let clock = MockClock::new(HOUR_1);
+        let agg = ResponseAggregates::from_pairs(&[]);
+        let snap = build_payload_snapshot(agg, &cfg, &clock, HOUR_0);
+        assert!(snap.dst_ports.contains(&8899));
+        assert!(snap.dst_ports.contains(&9000));
+    }
+
+    // ===========================================
+    // Test Category B — Orchestrator
+    // ===========================================
+
+    fn run_one_window(
+        batches: Vec<Vec<Vec<u8>>>,
+    ) -> (PayloadWindowResult, Vec<Snapshot>) {
+        let mut src = MockPayloadEventSource::from_batches(batches);
+        let clock = MockClock::new(HOUR_1);
+        let fs = Arc::new(MockFilesystem::new());
+        let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir());
+        let cfg = config(vec![8899]);
+        let mut handler = PayloadHandler::new(64);
+        let server_ports = server_ports_set(&[8899]);
+        let shutdown = crate::signal::NeverShutdown;
+
+        // Window deadline already in the past → loop exits immediately,
+        // process whatever's queued and emit snapshot.
+        let deadline = Instant::now();
+
+        let result = collect_payload_window(
+            &mut src,
+            &clock,
+            &writer,
+            &ArcFs(fs.clone()),
+            &mut handler,
+            &server_ports,
+            &cfg,
+            HOUR_0,
+            deadline,
+            &shutdown,
+            &output_dir(),
+        )
+        .expect("collect_payload_window");
+
+        let snaps = parse_snapshots_from(&fs);
+        (result, snaps)
+    }
+
+    #[test]
+    fn empty_window_writes_v6_snapshot_with_no_aggregates() {
+        let (result, snaps) = run_one_window(vec![]);
+        assert_eq!(result.n_pairs, 0);
+        assert!(!result.has_aggregates);
+        assert_eq!(result.decode_errors, 0);
+        assert_eq!(result.events_filtered, 0);
+        assert_eq!(result.source_errors, 0);
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].version, 6);
+        assert!(snaps[0].resp_aggregates.is_none());
+    }
+
+    #[test]
+    fn paired_request_response_produces_resp_aggregates() {
+        // POST / HTTP/1.1 ... Content-Length: 4 ... body
+        // HTTP/1.1 200 OK ... Content-Length: 7 ... body
+        let req = b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nBODY";
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nPAYLOAD";
+        let batches = vec![vec![req_event(req)], vec![resp_event(resp)]];
+        let (result, snaps) = run_one_window(batches);
+        assert_eq!(result.n_pairs, 1);
+        assert!(result.has_aggregates);
+        assert_eq!(snaps.len(), 1);
+        let agg = snaps[0].resp_aggregates.as_ref().expect("resp_aggregates");
+        assert_eq!(agg.count, 1);
+        assert_eq!(agg.req_bytes_max, Some(4));
+        assert_eq!(agg.resp_bytes_max, Some(7));
+    }
+
+    #[test]
+    fn malformed_event_increments_decode_errors_but_loop_continues() {
+        // First batch: a truncated event (will fail decode_event).
+        // Second/third: a valid pair so we still get aggregates.
+        let truncated = vec![0u8; 100];
+        let req = b"POST / HTTP/1.1\r\nContent-Length: 3\r\n\r\nABC";
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHELLO";
+        let batches = vec![
+            vec![truncated.clone()],
+            vec![req_event(req)],
+            vec![resp_event(resp)],
+        ];
+        let (result, snaps) = run_one_window(batches);
+        assert!(result.decode_errors >= 1);
+        assert_eq!(result.n_pairs, 1, "valid pair must still aggregate");
+        let agg = snaps[0].resp_aggregates.as_ref().expect("aggregates");
+        assert_eq!(agg.count, 1);
+        assert_eq!(agg.req_bytes_max, Some(3));
+    }
+
+    #[test]
+    fn unrelated_flow_increments_events_filtered_but_loop_continues() {
+        let unrelated = raw_event_bytes(
+            0x0a000001, 1000, 0x0a000002, 2000, direction::INGRESS,
+            b"random",
+        );
+        let (result, snaps) = run_one_window(vec![vec![unrelated]]);
+        assert_eq!(result.events_filtered, 1);
+        assert_eq!(result.n_pairs, 0);
+        assert_eq!(snaps.len(), 1);
+        assert!(snaps[0].resp_aggregates.is_none());
+    }
+
+    #[test]
+    fn event_source_error_does_not_kill_loop() {
+        let mut src = MockPayloadEventSource::from_batches(Vec::new());
+        src.fail_after = Some(0);
+        let clock = MockClock::new(HOUR_1);
+        let fs = Arc::new(MockFilesystem::new());
+        let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir());
+        let cfg = config(vec![8899]);
+        let mut handler = PayloadHandler::new(64);
+        let server_ports = server_ports_set(&[8899]);
+        let shutdown = crate::signal::NeverShutdown;
+
+        let result = collect_payload_window(
+            &mut src,
+            &clock,
+            &writer,
+            &ArcFs(fs.clone()),
+            &mut handler,
+            &server_ports,
+            &cfg,
+            HOUR_0,
+            Instant::now(),
+            &shutdown,
+            &output_dir(),
+        )
+        .expect("loop must not propagate event-source errors");
+        assert!(result.source_errors >= 1);
+        let snaps = parse_snapshots_from(&fs);
+        assert_eq!(snaps.len(), 1);
+    }
+
+    #[test]
+    fn shutdown_flag_short_circuits_window() {
+        let mut src = MockPayloadEventSource::from_batches(Vec::new());
+        let clock = MockClock::new(HOUR_1);
+        let fs = Arc::new(MockFilesystem::new());
+        let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir());
+        let cfg = config(vec![8899]);
+        let mut handler = PayloadHandler::new(64);
+        let server_ports = server_ports_set(&[8899]);
+        let shutdown = crate::signal::AlwaysShutdown;
+
+        // Long deadline; shutdown should short-circuit.
+        let deadline = Instant::now() + Duration::from_secs(60);
+
+        let _result = collect_payload_window(
+            &mut src,
+            &clock,
+            &writer,
+            &ArcFs(fs.clone()),
+            &mut handler,
+            &server_ports,
+            &cfg,
+            HOUR_0,
+            deadline,
+            &shutdown,
+            &output_dir(),
+        )
+        .expect("clean shutdown");
+        let snaps = parse_snapshots_from(&fs);
+        assert_eq!(snaps.len(), 1, "shutdown must still emit final snapshot");
+    }
+
+    #[test]
+    fn writer_error_propagates() {
+        struct FailingWriter;
+        impl SnapshotWriter for FailingWriter {
+            fn write(&self, _snapshot: &Snapshot) -> Result<PathBuf, FsError> {
+                Err(FsError::Io(io::Error::new(io::ErrorKind::Other, "disk full")))
+            }
+        }
+        let mut src = MockPayloadEventSource::from_batches(Vec::new());
+        let clock = MockClock::new(HOUR_1);
+        let fs = Arc::new(MockFilesystem::new());
+        let cfg = config(vec![8899]);
+        let mut handler = PayloadHandler::new(64);
+        let server_ports = server_ports_set(&[8899]);
+        let shutdown = crate::signal::NeverShutdown;
+
+        let result = collect_payload_window(
+            &mut src,
+            &clock,
+            &FailingWriter,
+            &ArcFs(fs.clone()),
+            &mut handler,
+            &server_ports,
+            &cfg,
+            HOUR_0,
+            Instant::now(),
+            &shutdown,
+            &output_dir(),
+        );
+        match result {
+            Err(PayloadCollectorError::Write(_)) => {}
+            other => panic!("expected Write error, got {:?}", other.as_ref().err()),
+        }
+    }
+
+    #[test]
+    fn multiple_pairs_aggregate_per_offline_semantics() {
+        // Pin: 3 RPC pairs in one window produce ResponseAggregates that
+        // exactly match `ResponseAggregates::from_pairs`. This is the
+        // bridge contract from ShadowPayload userspace to the Phase 1
+        // close-gate cross-validation.
+        let pairs = [(100u64, 200u64), (50, 250), (200, 600)];
+        let mut batches: Vec<Vec<Vec<u8>>> = Vec::new();
+        for (req_n, resp_n) in pairs.iter() {
+            let req = format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n", req_n);
+            let req_body = vec![b'r'; *req_n as usize];
+            let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", resp_n);
+            let resp_body = vec![b's'; *resp_n as usize];
+            let mut req_bytes = req.as_bytes().to_vec();
+            req_bytes.extend_from_slice(&req_body);
+            let mut resp_bytes = resp.as_bytes().to_vec();
+            resp_bytes.extend_from_slice(&resp_body);
+            // Cap to BPF sample size to mimic real ringbuf behaviour.
+            req_bytes.truncate(PAYLOAD_SAMPLE_BYTES);
+            resp_bytes.truncate(PAYLOAD_SAMPLE_BYTES);
+            batches.push(vec![req_event(&req_bytes)]);
+            batches.push(vec![resp_event(&resp_bytes)]);
+        }
+        let (_result, snaps) = run_one_window(batches);
+        let agg = snaps[0].resp_aggregates.as_ref().expect("aggregates");
+        let expected = ResponseAggregates::from_pairs(&[
+            (100, 200),
+            (50, 250),
+            (200, 600),
+        ]);
+        assert_eq!(*agg, expected,
+            "ShadowPayload userspace pipeline must produce aggregates \
+             identical to ResponseAggregates::from_pairs (the offline-\
+             contract bridge).",
+        );
+    }
+
+    #[test]
+    fn pinned_event_size_matches_decoder() {
+        // Defense in depth: the event-source returns Vec<u8> of size
+        // EXPECTED_RAW_EVENT_SIZE; decode_event rejects anything else.
+        // If the BPF struct ever drifts, both this test and the
+        // tc_payload_event raw-size pin trip together.
+        let req = b"POST / HTTP/1.1\r\n\r\n";
+        let raw = req_event(req);
+        assert_eq!(raw.len(), EXPECTED_RAW_EVENT_SIZE);
+    }
+
+    #[test]
+    fn many_unrelated_events_in_one_batch_does_not_overflow() {
+        // Stress: 1000 unrelated events in one batch. The loop must
+        // process them all in one poll call without panicking, then
+        // emit an empty snapshot.
+        let unrelated: Vec<Vec<u8>> = (0..1000u32)
+            .map(|i| {
+                raw_event_bytes(
+                    0x0a000000 + i,
+                    1000,
+                    0x0a000001,
+                    2000,
+                    direction::INGRESS,
+                    b"x",
+                )
+            })
+            .collect();
+        let (result, snaps) = run_one_window(vec![unrelated]);
+        assert_eq!(result.events_filtered, 1000);
+        assert_eq!(result.n_pairs, 0);
+        assert_eq!(snaps.len(), 1);
+    }
+
+    #[test]
+    fn shutdown_during_active_polling_emits_snapshot_before_exit() {
+        // Pre-load a paired request/response, then have the shutdown
+        // signal fire after the events are drained — the snapshot emit
+        // must still happen with the aggregates from those events.
+        // (CountingShutdown returns false N times then true.)
+        use crate::signal::CountingShutdown;
+        let req = b"POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\nok";
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nack";
+        let mut src = MockPayloadEventSource::from_batches(vec![
+            vec![req_event(req)],
+            vec![resp_event(resp)],
+        ]);
+        let clock = MockClock::new(HOUR_1);
+        let fs = Arc::new(MockFilesystem::new());
+        let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir());
+        let cfg = config(vec![8899]);
+        let mut handler = PayloadHandler::new(64);
+        let server_ports = server_ports_set(&[8899]);
+        // Allow 5 polls before signaling shutdown, so both batches drain.
+        let shutdown = CountingShutdown::new(5);
+        // Long deadline; shutdown should short-circuit after 5 polls.
+        let deadline = Instant::now() + Duration::from_secs(60);
+
+        let result = collect_payload_window(
+            &mut src,
+            &clock,
+            &writer,
+            &ArcFs(fs.clone()),
+            &mut handler,
+            &server_ports,
+            &cfg,
+            HOUR_0,
+            deadline,
+            &shutdown,
+            &output_dir(),
+        )
+        .expect("shutdown should not error");
+        assert_eq!(result.n_pairs, 1, "events drained before shutdown");
+        let snaps = parse_snapshots_from(&fs);
+        assert_eq!(snaps.len(), 1);
+        let agg = snaps[0].resp_aggregates.as_ref().expect("aggregates");
+        assert_eq!(agg.count, 1);
+    }
+}

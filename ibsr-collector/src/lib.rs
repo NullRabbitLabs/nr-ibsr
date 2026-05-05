@@ -11,6 +11,7 @@ pub mod exit;
 pub mod io;
 pub mod logger;
 pub mod payload;
+pub mod payload_collector;
 pub mod signal;
 pub mod sleeper;
 
