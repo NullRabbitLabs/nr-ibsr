@@ -255,15 +255,24 @@ use tc_payload_skel::*;
 ///
 /// Owns the skeleton, qdisc, hooks, and ringbuf. Drop is the cleanup
 /// path: ringbuf drops first (releases its borrow on payload_rb map);
-/// then TC hooks (detaching ingress + egress and destroying the
-/// clsact qdisc); then the skel itself.
+/// then the explicit cleanup `Drop` impl detaches both TC filters and
+/// destroys the clsact qdisc; finally the skel itself drops.
+///
+/// libbpf-rs's `TcHook` does NOT implement `Drop` (verified by
+/// inspection of libbpf-rs 0.24.8 src/tc.rs — only explicit
+/// `detach()` / `destroy()` methods), so the cleanup must be done
+/// manually. Without it, attached filters and the clsact qdisc are
+/// orphaned on the configured interface — visible via
+/// `tc qdisc show dev lo`. Our `Drop` impl below performs the
+/// teardown idempotently and logs failures rather than panicking
+/// (panicking-during-drop is undefined for nested drops).
 pub struct LibbpfPayloadCollector {
     // Field order = drop order (declared first = dropped first).
     ringbuf: RingBuffer<'static>,
     pending: PendingEvents,
-    _ingress_hook: TcHook,
-    _egress_hook: TcHook,
-    _qdisc: TcHook,
+    ingress_hook: Option<TcHook>,
+    egress_hook: Option<TcHook>,
+    qdisc: Option<TcHook>,
     // Skel must outlive the borrows above; declared last.
     _skel: TcPayloadSkel<'static>,
     interface: String,
@@ -274,6 +283,39 @@ pub struct LibbpfPayloadCollector {
 // threads concurrently.
 unsafe impl Send for LibbpfPayloadCollector {}
 unsafe impl Sync for LibbpfPayloadCollector {}
+
+impl Drop for LibbpfPayloadCollector {
+    fn drop(&mut self) {
+        // Detach TC filters before destroying the qdisc — order
+        // matters per libbpf-rs's TcHook semantics. Failures are
+        // logged but not propagated; we're already in a destructor
+        // path so panicking here would be undefined.
+        if let Some(mut h) = self.ingress_hook.take() {
+            if let Err(e) = h.detach() {
+                eprintln!(
+                    "ibsr collect-payload: TC ingress detach on '{}' failed: {} (qdisc may need manual `tc qdisc del dev {} clsact`)",
+                    self.interface, e, self.interface,
+                );
+            }
+        }
+        if let Some(mut h) = self.egress_hook.take() {
+            if let Err(e) = h.detach() {
+                eprintln!(
+                    "ibsr collect-payload: TC egress detach on '{}' failed: {}",
+                    self.interface, e,
+                );
+            }
+        }
+        if let Some(mut h) = self.qdisc.take() {
+            if let Err(e) = h.destroy() {
+                eprintln!(
+                    "ibsr collect-payload: clsact qdisc destroy on '{}' failed: {} (recover with `tc qdisc del dev {} clsact`)",
+                    self.interface, e, self.interface,
+                );
+            }
+        }
+    }
+}
 
 impl LibbpfPayloadCollector {
     /// Get the interface name this collector is attached to.
@@ -407,9 +449,9 @@ impl LibbpfPayloadCollector {
         Ok(Self {
             ringbuf,
             pending,
-            _ingress_hook: ingress_hook,
-            _egress_hook: egress_hook,
-            _qdisc: qdisc,
+            ingress_hook: Some(ingress_hook),
+            egress_hook: Some(egress_hook),
+            qdisc: Some(qdisc),
             _skel: skel,
             interface: iface.to_string(),
         })
