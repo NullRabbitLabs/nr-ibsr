@@ -64,6 +64,20 @@ pub struct ResponseAggregates {
     /// Maximum amplification ratio.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub amp_ratio_max: Option<f64>,
+
+    /// Distinct dst_port cardinality observed across all packets in
+    /// the window, capped at 5 to match offline `summarise_pcap`'s
+    /// `top_n=5` semantic. Tracked by the userspace handler from
+    /// every TC payload event's flow tuple. Omitted on pre-v0.2
+    /// snapshots that did not yet emit this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unique_dst_ports: Option<u32>,
+
+    /// Distinct src_port cardinality observed across all packets in
+    /// the window, capped at 5 to match offline semantics. Same
+    /// userspace-handler tracking path as `unique_dst_ports`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unique_src_ports: Option<u32>,
 }
 
 impl ResponseAggregates {
@@ -85,6 +99,8 @@ impl ResponseAggregates {
                 amp_ratio_mean: None,
                 amp_ratio_median: None,
                 amp_ratio_max: None,
+                unique_dst_ports: None,
+                unique_src_ports: None,
             };
         }
 
@@ -111,10 +127,7 @@ impl ResponseAggregates {
                 let hi = ratios[ratios.len() / 2];
                 (lo + hi) / 2.0
             };
-            let max = ratios
-                .iter()
-                .cloned()
-                .fold(f64::NEG_INFINITY, f64::max);
+            let max = ratios.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             (Some(mean), Some(median), Some(max))
         };
 
@@ -126,7 +139,19 @@ impl ResponseAggregates {
             amp_ratio_mean: amp_mean,
             amp_ratio_median: amp_median,
             amp_ratio_max: amp_max,
+            unique_dst_ports: None,
+            unique_src_ports: None,
         }
+    }
+
+    /// Builder: attach distinct dst_port + src_port cardinalities
+    /// observed in the same window. Caps each at 5 to match offline
+    /// `summarise_pcap`'s `top_n=5` semantic. Pass the full set of
+    /// distinct ports observed; this method takes care of the cap.
+    pub fn with_port_cardinalities(mut self, dst_ports: usize, src_ports: usize) -> Self {
+        self.unique_dst_ports = Some(dst_ports.min(5) as u32);
+        self.unique_src_ports = Some(src_ports.min(5) as u32);
+        self
     }
 }
 

@@ -810,16 +810,35 @@ mod tests {
         }
         let (_result, snaps) = run_one_window(batches);
         let agg = snaps[0].resp_aggregates.as_ref().expect("aggregates");
-        let expected = ResponseAggregates::from_pairs(&[
+        // Strip port-cardinality fields for the resp.*-only comparison;
+        // those fields are populated by the userspace pipeline's
+        // observe_ports() path (handler now tracks every event's
+        // src/dst port for `pcap.unique_{src,dst}_ports`), which the
+        // offline `from_pairs` doesn't know about.
+        let mut agg_for_resp_only = agg.clone();
+        agg_for_resp_only.unique_dst_ports = None;
+        agg_for_resp_only.unique_src_ports = None;
+        let expected_resp = ResponseAggregates::from_pairs(&[
             (100, 200),
             (50, 250),
             (200, 600),
         ]);
-        assert_eq!(*agg, expected,
-            "ShadowPayload userspace pipeline must produce aggregates \
+        assert_eq!(agg_for_resp_only, expected_resp,
+            "ShadowPayload userspace pipeline must produce resp.* aggregates \
              identical to ResponseAggregates::from_pairs (the offline-\
-             contract bridge).",
+             contract bridge for the V8 cipher-agnostic byte-count manifest).",
         );
+        // And the new pcap.* port-cardinality fields are populated by
+        // the userspace pipeline (closes the Phase 1 close-gate gap).
+        // The bidirectional fixture has 2 distinct dst_ports (8899 server-
+        // side + 12345 client-side from the response leg) and 2 distinct
+        // src_ports — IBSR sees both directions of the TCP connection.
+        // This matches the offline `summarise_pcap` semantic: distinct
+        // dst_port values across the WHOLE pcap, not just the request-leg.
+        assert_eq!(agg.unique_dst_ports, Some(2),
+            "TC sees both directions: dst=8899 (request) + dst=12345 (response)");
+        assert_eq!(agg.unique_src_ports, Some(2),
+            "same: src=12345 (request) + src=8899 (response)");
     }
 
     #[test]

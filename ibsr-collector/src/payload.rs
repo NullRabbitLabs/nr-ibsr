@@ -108,6 +108,15 @@ pub struct PayloadEvent {
     /// Bytes actually sampled by BPF and copied to userspace.
     /// `payload.len() == sample_len`.
     pub payload: Vec<u8>,
+    /// Original source port from the packet's TCP header (host byte
+    /// order). Preserved alongside `flow` (which canonicalises
+    /// directional ports for flow-table keying) so the
+    /// `pcap.unique_src_ports` cardinality feature can track the
+    /// original port-tuple distribution.
+    pub src_port: u16,
+    /// Original destination port (host byte order). Same purpose as
+    /// `src_port` for `pcap.unique_dst_ports`.
+    pub dst_port: u16,
 }
 
 impl PayloadEvent {
@@ -158,6 +167,8 @@ impl PayloadEvent {
             ts_ns: ev.ts_ns,
             payload_len: ev.payload_len,
             payload: ev.payload.clone(),
+            src_port,
+            dst_port,
         })
     }
 }
@@ -403,6 +414,11 @@ fn content_length(headers: &[httparse::Header<'_>]) -> usize {
 /// Per-window aggregator. Accumulates RpcPair records for the active
 /// window; on `take_window`, emits a `ResponseAggregates` matching the
 /// offline `nr_training/features/responses.py` semantics exactly.
+///
+/// Also tracks distinct dst_port + src_port values observed across
+/// EVERY payload event (not just paired RPCs) for the
+/// `unique_dst_ports` / `unique_src_ports` features. Capped at 5 on
+/// emit to match offline `summarise_pcap`'s `top_n=5` semantic.
 #[derive(Debug, Default)]
 pub struct WindowAggregator {
     pairs: Vec<(u64, u64)>,
@@ -410,6 +426,12 @@ pub struct WindowAggregator {
     n_status_2xx: u64,
     n_status_4xx: u64,
     n_status_5xx: u64,
+    /// All distinct dst_port values observed in any TC payload event
+    /// during the current window. Used for `pcap.unique_dst_ports`.
+    dst_ports_seen: std::collections::HashSet<u16>,
+    /// All distinct src_port values observed in any TC payload event
+    /// during the current window. Used for `pcap.unique_src_ports`.
+    src_ports_seen: std::collections::HashSet<u16>,
 }
 
 impl WindowAggregator {
@@ -429,13 +451,28 @@ impl WindowAggregator {
         }
     }
 
+    /// Record port-tuple from one payload event (regardless of
+    /// whether it ever produces an RpcPair). Called for every event
+    /// fed to the handler so the distinct-port-cardinality features
+    /// see all packets in the window, not just complete RPCs.
+    pub fn observe_ports(&mut self, src_port: u16, dst_port: u16) {
+        self.src_ports_seen.insert(src_port);
+        self.dst_ports_seen.insert(dst_port);
+    }
+
     /// Emit aggregates for the current window and reset state.
+    /// Includes the port-cardinality features capped at 5.
     pub fn take_window(&mut self) -> ResponseAggregates {
-        let agg = ResponseAggregates::from_pairs(&self.pairs);
+        let dst_card = self.dst_ports_seen.len();
+        let src_card = self.src_ports_seen.len();
+        let agg = ResponseAggregates::from_pairs(&self.pairs)
+            .with_port_cardinalities(dst_card, src_card);
         self.pairs.clear();
         self.n_status_2xx = 0;
         self.n_status_4xx = 0;
         self.n_status_5xx = 0;
+        self.dst_ports_seen.clear();
+        self.src_ports_seen.clear();
         agg
     }
 
@@ -468,7 +505,17 @@ impl PayloadHandler {
 
     /// Feed a payload event. Routes to per-flow reassembler; if a
     /// complete RpcPair emerges, records into the aggregator.
+    /// Also records the event's port-tuple in the aggregator so
+    /// `pcap.unique_{dst,src}_ports` features see every packet, not
+    /// just complete RPCs.
     pub fn feed(&mut self, ev: &PayloadEvent) -> FeedOutcome {
+        // Record port-tuple BEFORE the reassembler call — every event
+        // contributes to port-cardinality features regardless of
+        // whether it ever completes an RPC pair (handshake-only
+        // connections, partial captures, malformed traffic all
+        // still inform the port-distribution view).
+        self.aggregator.observe_ports(ev.src_port, ev.dst_port);
+
         // Touch flow in LRU.
         let is_new = !self.flows.contains_key(&ev.flow);
         if is_new && self.flows.len() >= self.max_flows {
@@ -521,6 +568,8 @@ mod tests {
     }
 
     fn ev(direction: Direction, payload: &[u8]) -> PayloadEvent {
+        // Test fixture src/dst ports — match the canonical flow tuple
+        // built by `flow()`: src_port=12345, dst_port=8899.
         PayloadEvent {
             flow: flow(),
             direction,
@@ -528,6 +577,8 @@ mod tests {
             ts_ns: 0,
             payload_len: payload.len() as u32,
             payload: payload.to_vec(),
+            src_port: 12345,
+            dst_port: 8899,
         }
     }
 
@@ -655,10 +706,23 @@ mod tests {
             h.feed(&ev(Direction::FromServer, &resp_body));
         }
         let agg_via_handler = h.take_window();
+        // Strip port-cardinality fields before comparing — they're
+        // populated by the handler path (which sees event ports) but
+        // not by from_pairs alone. Compare on the responses.* features
+        // that both paths compute.
+        let mut agg_for_compare = agg_via_handler.clone();
+        agg_for_compare.unique_dst_ports = None;
+        agg_for_compare.unique_src_ports = None;
         let agg_via_direct = ResponseAggregates::from_pairs(&[
             (100, 200), (50, 250), (200, 600),
         ]);
-        assert_eq!(agg_via_handler, agg_via_direct);
+        assert_eq!(agg_for_compare, agg_via_direct);
+        // The handler path additionally populates port cardinalities;
+        // pin those too to surface drift if the contract changes.
+        assert_eq!(agg_via_handler.unique_dst_ports, Some(1),
+            "all 3 RPCs target the same dst_port=8899 in this test");
+        assert_eq!(agg_via_handler.unique_src_ports, Some(1),
+            "all 3 RPCs use src_port=12345 (the test fixture's `flow()`)");
     }
 
     #[test]
@@ -666,7 +730,8 @@ mod tests {
         // max_flows=2; after 3 distinct flows, the oldest must evict.
         let mut h = PayloadHandler::new(2);
         for i in 0..3u32 {
-            let f = FlowKey::from_tuple(0x7f000001, 1000 + i as u16, 0x7f000001, 8899);
+            let src_port = 1000 + i as u16;
+            let f = FlowKey::from_tuple(0x7f000001, src_port, 0x7f000001, 8899);
             let e = PayloadEvent {
                 flow: f,
                 direction: Direction::ToServer,
@@ -674,6 +739,8 @@ mod tests {
                 ts_ns: i as u64,
                 payload_len: 5,
                 payload: b"hello".to_vec(),
+                src_port,
+                dst_port: 8899,
             };
             h.feed(&e);
         }
@@ -721,6 +788,86 @@ mod tests {
         }
         let agg = h.take_window();
         assert_eq!(agg.count, 0);
+    }
+
+    #[test]
+    fn port_cardinality_tracked_per_window() {
+        // Pin: distinct dst_port + src_port observed across events
+        // are reported as cardinalities on the resulting
+        // ResponseAggregates. Capped at 5 to match offline.
+        let mut h = PayloadHandler::new(64);
+        // 7 distinct src_ports, 1 dst_port (server) — cardinality
+        // capped at 5 for src.
+        for i in 0..7u16 {
+            let src_port = 10000 + i;
+            let f = FlowKey::from_tuple(0x7f000001, src_port, 0x7f000001, 8899);
+            let e = PayloadEvent {
+                flow: f,
+                direction: Direction::ToServer,
+                tcp_seq: 0,
+                ts_ns: i as u64,
+                payload_len: 5,
+                payload: b"hello".to_vec(),
+                src_port,
+                dst_port: 8899,
+            };
+            h.feed(&e);
+        }
+        let agg = h.take_window();
+        assert_eq!(agg.unique_src_ports, Some(5),
+            "src_ports cardinality must be capped at 5");
+        assert_eq!(agg.unique_dst_ports, Some(1),
+            "dst_ports cardinality is the count of distinct dst_ports");
+    }
+
+    #[test]
+    fn port_cardinality_resets_between_windows() {
+        let mut h = PayloadHandler::new(64);
+        let f = FlowKey::from_tuple(0x7f000001, 12345, 0x7f000001, 8899);
+        let e = PayloadEvent {
+            flow: f, direction: Direction::ToServer,
+            tcp_seq: 0, ts_ns: 0, payload_len: 5,
+            payload: b"hello".to_vec(),
+            src_port: 12345, dst_port: 8899,
+        };
+        h.feed(&e);
+        let r1 = h.take_window();
+        assert_eq!(r1.unique_dst_ports, Some(1));
+        assert_eq!(r1.unique_src_ports, Some(1));
+        // Second window with no events: cardinalities are 0
+        // (still emitted as Some, since we want explicit zero — not
+        // None — to distinguish "v0.2-aware writer with empty
+        // window" from "v0.1 writer that never emitted the field").
+        let r2 = h.take_window();
+        assert_eq!(r2.unique_dst_ports, Some(0));
+        assert_eq!(r2.unique_src_ports, Some(0));
+    }
+
+    #[test]
+    fn port_cardinality_observed_on_every_event_not_just_paired_rpcs() {
+        // Pin: events that never produce an RpcPair (handshake-only,
+        // partial captures, malformed traffic) STILL contribute to
+        // port-cardinality. Test: feed 3 unparseable events, take
+        // window. Expect cardinalities populated even though
+        // n_pairs=0.
+        let mut h = PayloadHandler::new(64);
+        for i in 0..3u16 {
+            let src_port = 20000 + i;
+            let f = FlowKey::from_tuple(0x7f000001, src_port, 0x7f000001, 8899);
+            let trash = b"not_http\r\n\r\n";
+            let e = PayloadEvent {
+                flow: f, direction: Direction::ToServer,
+                tcp_seq: 0, ts_ns: 0, payload_len: trash.len() as u32,
+                payload: trash.to_vec(),
+                src_port, dst_port: 8899,
+            };
+            h.feed(&e);
+        }
+        let agg = h.take_window();
+        assert_eq!(agg.count, 0, "no paired RPCs from malformed events");
+        assert_eq!(agg.unique_src_ports, Some(3),
+            "but port-cardinality features must still see all 3 src_ports");
+        assert_eq!(agg.unique_dst_ports, Some(1));
     }
 
     #[test]
