@@ -183,6 +183,27 @@ BPF skeleton (libbpf reports the load attempt), fails cleanly with
 EPERM, exits 1, prints "BPF program load failed: Operation not
 permitted (os error 1)".
 
+**Verified live (root) on 2026-05-06**:
+`sudo ibsr collect-payload -p 8899 -i lo --window-sec 2 --duration-sec 6`
+→ 3 windows × ~57 RPC pairs from organic Solana validator traffic →
+3 v6 snapshots with populated `resp_aggregates`. Verified clean
+clsact qdisc teardown on shutdown (`tc qdisc show dev lo` clean
+before AND after). Live integration fixes committed (commit
+`1445ade`):
+- BPF verifier rejection of variable-size `bpf_skb_load_bytes`
+  resolved via bucketed constant-size dispatch (power-of-2 chunks);
+  preserves all sample bytes.
+- Orphan clsact qdisc resolved via explicit `Drop` impl on
+  `LibbpfPayloadCollector` (libbpf-rs 0.24's `TcHook` has no `Drop`
+  by design — manual teardown required).
+
+**Verified end-to-end pipeline**:
+`scripts/inference_loop.py` consumed the v6 snapshots, loaded the V8
+production model (`cipher-agnostic-v2`, isotonic-calibrated, 7
+features), and emitted predictions with 6/7 features active
+(only `pcap.unique_src_ports` NaN, by design — IBSR keys on `src_ip`).
+Score 0.0 (benign) on all 3 organic-traffic windows.
+
 ### Live integration tests (TO DO with root)
 
 The 3 `#[ignore]`d tests in `ibsr-bpf::tc_payload_loader::tests`
