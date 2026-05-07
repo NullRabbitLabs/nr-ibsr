@@ -253,6 +253,22 @@ static __always_inline int handle_skb(struct __sk_buff *skb, __u32 direction)
     // statement copies a fixed constant number of bytes if `remaining`
     // permits, then advances. The verifier sees each bpf_skb_load_bytes
     // size argument as a constant.
+    //
+    // Buckets: 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1.
+    // Sum = 2047 bytes worth of capacity, comfortably draining any
+    // sample_len up to PAYLOAD_SAMPLE_BYTES (1024). The 1024-byte
+    // bucket is load-bearing: any packet whose TCP payload is >= 1024
+    // bytes gets truncated to sample_len = 1024 by the cap above, and
+    // without this top bucket the chain only sums to 1023, leaving
+    // `remaining = 1` at the end → event discarded. That bug silently
+    // dropped every event from packets with full-sized samples (the
+    // common case for any non-trivial HTTP body), making
+    // ShadowPayload-mode unobservable on traffic with multi-KB
+    // payloads.
+    if (remaining >= 1024 && rc == 0 && buf_off + 1024 <= PAYLOAD_SAMPLE_BYTES) {
+        rc = bpf_skb_load_bytes(skb, off + buf_off, ev->payload + buf_off, 1024);
+        if (rc == 0) { buf_off += 1024; remaining -= 1024; }
+    }
     if (remaining >= 512 && rc == 0 && buf_off + 512 <= PAYLOAD_SAMPLE_BYTES) {
         rc = bpf_skb_load_bytes(skb, off + buf_off, ev->payload + buf_off, 512);
         if (rc == 0) { buf_off += 512; remaining -= 512; }

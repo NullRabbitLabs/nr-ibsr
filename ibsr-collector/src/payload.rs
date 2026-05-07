@@ -228,6 +228,12 @@ struct DirectionState {
     /// Status code parsed from the response head (response direction
     /// only). None on request direction.
     status_code: Option<u16>,
+    /// Cumulative network-actual payload bytes seen on this direction
+    /// during head parsing (sum of prior events' `payload_len`). Used
+    /// on head completion to compute how many body bytes have already
+    /// arrived in the network (not just the sample). Reset alongside
+    /// the rest of the per-message state.
+    bytes_seen_pre_head: u64,
 }
 
 impl DirectionState {
@@ -238,6 +244,7 @@ impl DirectionState {
         self.body_remaining = None;
         self.body_len_total = None;
         self.status_code = None;
+        self.bytes_seen_pre_head = 0;
     }
 }
 
@@ -250,20 +257,35 @@ impl FlowReassembler {
     /// `FeedOutcome` describing what happened. When a complete
     /// request:response pair is produced, returns it inside
     /// `MessageComplete(Some(pair))`.
+    ///
+    /// Body byte accounting: BPF samples up to `PAYLOAD_SAMPLE_BYTES`
+    /// (1024) of each TCP packet's payload, but the event carries the
+    /// **actual** segment payload size in `ev.payload_len`. For HTTP
+    /// body byte counting we use `payload_len` (the real network
+    /// progress), not the sampled bytes, so that responses larger than
+    /// the sample size — common on `lo` where a single skb can carry
+    /// 60+ KB without MTU-fragmentation — complete correctly.
     pub fn feed(&mut self, ev: &PayloadEvent) -> FeedOutcome {
         let (state, is_response) = match ev.direction {
             Direction::ToServer => (&mut self.to_server, false),
             Direction::FromServer => (&mut self.from_server, true),
         };
 
-        if state.buf.len() + ev.payload.len() > MAX_DIRECTION_BUFFER_BYTES {
-            state.reset();
-            return FeedOutcome::BufferOverflow;
-        }
-        state.buf.extend_from_slice(&ev.payload);
+        let head_was_parsed = state.body_remaining.is_some();
 
-        // If we haven't parsed the head yet, try to.
-        if state.body_remaining.is_none() {
+        if !head_was_parsed {
+            // Head-parsing phase: buffer the sample bytes (so httparse
+            // can find CRLF CRLF) and accumulate the network-actual
+            // payload byte count so we know how many body bytes have
+            // arrived by the time the head completes.
+            if state.buf.len() + ev.payload.len() > MAX_DIRECTION_BUFFER_BYTES {
+                state.reset();
+                return FeedOutcome::BufferOverflow;
+            }
+            state.buf.extend_from_slice(&ev.payload);
+            state.bytes_seen_pre_head =
+                state.bytes_seen_pre_head.saturating_add(ev.payload_len as u64);
+
             match try_parse_head(&state.buf, is_response) {
                 ParseHead::Incomplete => return FeedOutcome::Buffered,
                 ParseHead::Failed => {
@@ -271,34 +293,49 @@ impl FlowReassembler {
                     return FeedOutcome::BufferOverflow;
                 }
                 ParseHead::Complete { head_bytes, body_len, status } => {
-                    // Drop the head from the buffer; body bytes start fresh.
-                    state.buf.drain(..head_bytes);
-                    state.body_remaining = Some(body_len);
                     state.body_len_total = Some(body_len as u64);
                     state.status_code = status;
-                    if state.body_remaining == Some(0) {
+
+                    // Body bytes already seen in the network = total
+                    // payload bytes received during head parsing minus
+                    // the head_bytes. Subsequent events count their
+                    // ev.payload_len directly toward body completion.
+                    //
+                    // Why ev.payload_len rather than the sample buffer:
+                    // BPF caps each event's sampled bytes at
+                    // PAYLOAD_SAMPLE_BYTES (1024), but `payload_len`
+                    // carries the true TCP-segment payload size. On
+                    // `lo` a single skb can be 60+ KB without MTU-
+                    // fragmentation; counting via sampled bytes would
+                    // never reach a Content-Length of 1.4 MB.
+                    let body_seen_so_far =
+                        state.bytes_seen_pre_head.saturating_sub(head_bytes as u64);
+                    let body_remaining_init =
+                        (body_len as u64).saturating_sub(body_seen_so_far);
+                    state.body_remaining = Some(body_remaining_init as usize);
+                    state.buf.clear();
+
+                    if body_remaining_init == 0 {
                         return self.complete_message(ev.flow, is_response);
                     }
-                    // Fall through — body bytes may have arrived in this same event.
+                    return FeedOutcome::HeadComplete;
                 }
             }
         }
 
-        // Head is parsed; we're consuming body bytes.
+        // Head was already parsed in a previous event. This event is
+        // pure body — count its full network payload toward body
+        // completion. The sample buffer is unused for body bytes; body
+        // accounting is by network-actual `payload_len` only.
         if let Some(remaining) = state.body_remaining.as_mut() {
-            let consumed = std::cmp::min(*remaining, state.buf.len());
+            let consumed = std::cmp::min(*remaining as u64, ev.payload_len as u64) as usize;
             *remaining -= consumed;
-            state.buf.drain(..consumed);
             if *remaining == 0 {
                 return self.complete_message(ev.flow, is_response);
             }
         }
 
-        if state.body_remaining.is_some() {
-            FeedOutcome::HeadComplete
-        } else {
-            FeedOutcome::Buffered
-        }
+        FeedOutcome::HeadComplete
     }
 
     fn complete_message(&mut self, flow: FlowKey, is_response: bool) -> FeedOutcome {
@@ -638,6 +675,102 @@ mod tests {
         assert!(matches!(o1, FeedOutcome::Buffered), "got {:?}", o1);
         assert!(matches!(o2, FeedOutcome::HeadComplete), "got {:?}", o2);
         assert!(matches!(o3, FeedOutcome::MessageComplete(None)), "got {:?}", o3);
+    }
+
+    /// Test fixture for events whose actual TCP-segment payload is
+    /// larger than the BPF sample. `payload_len` carries the network-
+    /// actual size; `payload` (sample) is truncated. Mimics BPF on `lo`
+    /// where a single skb can be 60+ KB but BPF samples only 1024 bytes.
+    fn ev_truncated(direction: Direction, sample: &[u8], full_len: u32) -> PayloadEvent {
+        PayloadEvent {
+            flow: flow(),
+            direction,
+            tcp_seq: 0,
+            ts_ns: 0,
+            payload_len: full_len,
+            payload: sample.to_vec(),
+            src_port: 12345,
+            dst_port: 8899,
+        }
+    }
+
+    #[test]
+    fn parses_large_body_with_truncated_samples() {
+        // BPF emits at most PAYLOAD_SAMPLE_BYTES (1024) per event, but
+        // ev.payload_len is the true segment size. A 1.5 MB response
+        // typically arrives as a few 60+ KB skbs on `lo` (no MTU). The
+        // parser must complete based on payload_len, not the truncated
+        // sample buffer, otherwise body_remaining never reaches 0.
+        let mut h = PayloadHandler::new(1024);
+
+        // Tiny request that fits in one event.
+        let req = b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n";
+        let outcome = h.feed(&ev(Direction::ToServer, req));
+        assert!(
+            matches!(outcome, FeedOutcome::MessageComplete(None)),
+            "request should complete with body_len=0; got {:?}", outcome,
+        );
+
+        // Response: head + ~1.4 MB body, delivered as 24 events of 60 KB
+        // each. BPF samples first 1024 bytes of each event; rest is
+        // truncated. The parser must count via payload_len.
+        let total_body: u32 = 1_400_000;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            total_body,
+        );
+        let head_bytes_len = head.len();
+
+        // Event 0: head + start of body. Sample carries the full head
+        // plus a few body bytes (head_bytes_len + 100 bytes of body
+        // sampled, but the segment is 60 KB).
+        let segment_size: u32 = 60_000;
+        let mut event_0_sample = head.as_bytes().to_vec();
+        event_0_sample.extend_from_slice(&vec![b'y'; 100]); // body bytes in sample
+        let outcome = h.feed(&ev_truncated(
+            Direction::FromServer,
+            &event_0_sample,
+            segment_size,
+        ));
+        assert!(
+            matches!(outcome, FeedOutcome::HeadComplete),
+            "event 0 should complete head and not finish body; got {:?}", outcome,
+        );
+
+        // Subsequent events: pure body. Sample is 1024 bytes of 'y',
+        // payload_len is the full 60_000-byte segment. After 23 more
+        // events of 60 KB each, total body bytes seen =
+        // (60_000 - head_bytes_len) + 23 * 60_000 = 24 * 60_000 - head_bytes_len.
+        // For total_body = 1_400_000, that's 1_440_000 - head_len ≈ 1.44 MB,
+        // so we need fewer events (23) for the body to complete.
+        let mut event_count_needed = 23;
+        let mut completed = false;
+        let body_chunk_sample = vec![b'y'; 1024];
+        for i in 0..30 {  // safety cap
+            let outcome = h.feed(&ev_truncated(
+                Direction::FromServer,
+                &body_chunk_sample,
+                segment_size,
+            ));
+            match outcome {
+                FeedOutcome::HeadComplete => continue,
+                FeedOutcome::MessageComplete(Some(pair)) => {
+                    assert_eq!(pair.response_bytes, total_body as u64);
+                    assert_eq!(pair.request_bytes, 0);
+                    completed = true;
+                    event_count_needed = i + 1;
+                    break;
+                }
+                other => panic!("event {}: unexpected outcome {:?}", i + 1, other),
+            }
+        }
+        assert!(completed, "1.4 MB body never completed across 30 large events");
+        // Sanity: body should complete after ~23-24 events of 60 KB
+        // (24 events * 60 KB = 1.44 MB > 1.4 MB body + ~80 byte head).
+        assert!(
+            event_count_needed >= 22 && event_count_needed <= 25,
+            "expected completion at event 23±2, got {}", event_count_needed,
+        );
     }
 
     #[test]
