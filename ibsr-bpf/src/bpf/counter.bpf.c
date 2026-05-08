@@ -189,4 +189,125 @@ port_matched:
     return XDP_PASS;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// TC egress counter — observes packets leaving the interface (the
+// server's responses). Mirrors xdp_counter's per-(src_ip, dst_port)
+// aggregation but for the response direction:
+//   - matches packets where tcp->source ∈ watched_ports (server is
+//     replying from a watched server-side port)
+//   - keys the counter map by (peer_ip = packet's dst_ip,
+//     server_port = packet's src_port) — same shape as XDP ingress's
+//     key (src_ip = scanner, dst_port = watched), so both directions
+//     aggregate into the same bucket
+//
+// This closes the V9 close-gate finding (2026-05-08): pcap on the
+// bridge captured 8 RSTs during a port scan; XDP-ingress-only
+// counter saw 1. The missing 7 are the egress RSTs from closed-port
+// responses, which only TC egress can observe.
+//
+// Safety: same as XDP — TC_ACT_OK (passes the packet), no drop / no
+// modify; counters only.
+
+#include <linux/pkt_cls.h>
+
+SEC("classifier")
+int tc_egress_counter(struct __sk_buff *skb)
+{
+    void *data_end = (void *)(long)skb->data_end;
+    void *data = (void *)(long)skb->data;
+
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return TC_ACT_OK;
+    if (eth->h_proto != bpf_htons(ETH_P_IP))
+        return TC_ACT_OK;
+
+    struct iphdr *ip = (void *)(eth + 1);
+    if ((void *)(ip + 1) > data_end)
+        return TC_ACT_OK;
+    if (ip->protocol != IPPROTO_TCP)
+        return TC_ACT_OK;
+
+    __u32 ip_hdr_len = ip->ihl * 4;
+    if (ip_hdr_len < sizeof(struct iphdr))
+        return TC_ACT_OK;
+
+    struct tcphdr *tcp = (void *)ip + ip_hdr_len;
+    if ((void *)(tcp + 1) > data_end)
+        return TC_ACT_OK;
+
+    // Egress direction: match on tcp->source (the server's replying
+    // port), not tcp->dest. Manually unrolled to mirror XDP's pattern.
+    __u16 matched_port = 0;
+    __u32 cfg_key;
+    __u16 *port_cfg;
+
+    cfg_key = 0; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->source == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto egress_matched; }
+    cfg_key = 1; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->source == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto egress_matched; }
+    cfg_key = 2; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->source == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto egress_matched; }
+    cfg_key = 3; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->source == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto egress_matched; }
+    cfg_key = 4; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->source == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto egress_matched; }
+    cfg_key = 5; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->source == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto egress_matched; }
+    cfg_key = 6; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->source == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto egress_matched; }
+    cfg_key = 7; port_cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (port_cfg && *port_cfg != 0 && tcp->source == *port_cfg) { matched_port = bpf_ntohs(*port_cfg); goto egress_matched; }
+
+    return TC_ACT_OK;
+
+egress_matched:
+    ;
+    // Key by (dst_ip, src_port) — the dst_ip on egress IS the
+    // peer/scanner; the src_port IS the watched server port. Same
+    // bucket-shape as ingress so directional counts aggregate.
+    __u32 peer_ip = ip->daddr;
+    struct map_key mkey = {
+        .src_ip = peer_ip,
+        .dst_port = matched_port,
+        ._pad = 0,
+    };
+
+    __u64 pkt_len = data_end - data;
+
+    __u32 tcp_hdr_len = tcp->doff * 4;
+    __u32 ip_total_len = bpf_ntohs(ip->tot_len);
+    __u32 tcp_payload_len = 0;
+    if (ip_total_len > ip_hdr_len + tcp_hdr_len)
+        tcp_payload_len = ip_total_len - ip_hdr_len - tcp_hdr_len;
+    int is_handshake_ack = tcp->ack && !tcp->syn && !tcp->rst && (tcp_payload_len == 0);
+
+    struct counters *ctr = bpf_map_lookup_elem(&counter_map, &mkey);
+    if (ctr) {
+        __sync_fetch_and_add(&ctr->packets, 1);
+        __sync_fetch_and_add(&ctr->bytes, pkt_len);
+        if (tcp->syn)
+            __sync_fetch_and_add(&ctr->syn, 1);
+        if (tcp->ack)
+            __sync_fetch_and_add(&ctr->ack, 1);
+        if (is_handshake_ack)
+            __sync_fetch_and_add(&ctr->handshake_ack, 1);
+        if (tcp->rst)
+            __sync_fetch_and_add(&ctr->rst, 1);
+    } else {
+        struct counters new_ctr = {
+            .syn = tcp->syn ? 1 : 0,
+            .ack = tcp->ack ? 1 : 0,
+            .handshake_ack = is_handshake_ack ? 1 : 0,
+            .rst = tcp->rst ? 1 : 0,
+            .packets = 1,
+            ._pad = 0,
+            .bytes = pkt_len,
+        };
+        bpf_map_update_elem(&counter_map, &mkey, &new_ctr, BPF_ANY);
+    }
+
+    return TC_ACT_OK;
+}
+
 char LICENSE[] SEC("license") = "MIT";

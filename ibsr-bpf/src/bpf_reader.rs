@@ -1,13 +1,23 @@
 //! Real BPF Map Reader implementation.
 //!
-//! This module provides `BpfMapReader` which loads and manages the XDP program
-//! and reads counters from the BPF map.
+//! This module provides `BpfMapReader` which loads and manages BPF programs
+//! and reads counters from the shared map.
+//!
+//! Two BPF programs run in parallel:
+//!  - XDP `xdp_counter` on interface ingress (server receives probes)
+//!  - TC  `tc_egress_counter` on interface egress (server sends responses)
+//!
+//! Both share the same `counter_map`; the egress program keys its bucket by
+//! (peer_ip, server_port) so directional counts aggregate into the same
+//! per-(scanner, watched-port) row. Closes V9 close-gate finding 2026-05-08
+//! that XDP-ingress-only undercounts egress RSTs.
 
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
+use std::os::fd::AsFd;
 
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
-use libbpf_rs::{MapCore, OpenObject};
+use libbpf_rs::{MapCore, OpenObject, TcHookBuilder, TC_EGRESS, TC_INGRESS};
 
 use crate::map_reader::{BpfError, Counters, MapKey, MapReader, MapReaderError};
 
@@ -18,13 +28,14 @@ mod counter_skel {
 
 use counter_skel::*;
 
-/// BPF Map Reader that loads and manages the XDP program.
+/// BPF Map Reader that loads and manages the XDP + TC counter programs.
 ///
-/// This struct owns the BPF skeleton and XDP link. When dropped, it automatically
-/// detaches the XDP program from the interface.
+/// Owns the skeleton + XDP link + TC hooks. Drop unwinds attach state.
 pub struct BpfMapReader {
     skel: CounterSkel<'static>,
-    _link: libbpf_rs::Link,
+    _xdp_link: libbpf_rs::Link,
+    _tc_egress_hook: libbpf_rs::TcHook,
+    _tc_qdisc: libbpf_rs::TcHook, // clsact qdisc; destroyed on drop
     interface: String,
 }
 
@@ -80,8 +91,8 @@ impl BpfMapReader {
                 .map_err(|e| BpfError::MapError(e.to_string()))?;
         }
 
-        // Attach XDP program to interface
-        let link = skel
+        // Attach XDP program (ingress direction).
+        let xdp_link = skel
             .progs
             .xdp_counter
             .attach_xdp(ifindex as i32)
@@ -96,9 +107,56 @@ impl BpfMapReader {
                 }
             })?;
 
+        // Create clsact qdisc on the interface so we can hang TC
+        // egress filter off it. tc_payload_loader.rs uses the same
+        // pattern. Failure to create the qdisc unwinds the XDP link
+        // when this fn returns Err.
+        let egress_fd = skel.progs.tc_egress_counter.as_fd();
+        let mut qdisc_builder = TcHookBuilder::new(egress_fd);
+        qdisc_builder.ifindex(ifindex as i32).replace(true);
+        let qdisc = match qdisc_builder.hook(TC_INGRESS | TC_EGRESS).create() {
+            Ok(h) => h,
+            Err(e) => {
+                let msg = e.to_string();
+                // EEXIST / "Exclusivity flag on" — qdisc already
+                // exists. Standard libbpf idiom: ignore and continue
+                // to filter attach. We construct a non-creating
+                // handle for the destroy path.
+                if msg.contains("Exclusivity") || msg.contains("EEXIST") || msg.contains("exists") {
+                    let mut b = TcHookBuilder::new(egress_fd);
+                    b.ifindex(ifindex as i32).replace(true);
+                    b.hook(TC_INGRESS | TC_EGRESS)
+                } else {
+                    return Err(BpfError::Attach {
+                        interface: interface.to_string(),
+                        reason: format!("clsact qdisc create: {}", e),
+                    });
+                }
+            }
+        };
+
+        // Attach TC egress filter (the new bidirectional-counter
+        // closure for V9 close-gate's tcp_rst undercounting finding,
+        // 2026-05-08).
+        let mut egress_builder = TcHookBuilder::new(egress_fd);
+        egress_builder
+            .ifindex(ifindex as i32)
+            .replace(true)
+            .handle(1)
+            .priority(1);
+        let mut egress_hook = egress_builder.hook(TC_EGRESS);
+        let egress_hook = egress_hook
+            .attach()
+            .map_err(|e| BpfError::Attach {
+                interface: interface.to_string(),
+                reason: format!("TC egress attach: {}", e),
+            })?;
+
         Ok(Self {
             skel,
-            _link: link,
+            _xdp_link: xdp_link,
+            _tc_egress_hook: egress_hook,
+            _tc_qdisc: qdisc,
             interface: interface.to_string(),
         })
     }
