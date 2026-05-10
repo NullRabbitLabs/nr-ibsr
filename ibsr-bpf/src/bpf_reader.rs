@@ -33,7 +33,10 @@ use counter_skel::*;
 /// Owns the skeleton + XDP link + TC hooks. Drop unwinds attach state.
 pub struct BpfMapReader {
     skel: CounterSkel<'static>,
-    _xdp_link: libbpf_rs::Link,
+    /// libxdp dispatcher attach handle. Detaches on Drop.
+    /// Replaces the old `libbpf_rs::Link` so IBSR's XDP coexists with
+    /// other libxdp-aware programs (nr-guard) on the same interface.
+    _xdp_handle: crate::xdp_dispatcher::XdpDispatcherHandle,
     _tc_egress_hook: libbpf_rs::TcHook,
     _tc_qdisc: libbpf_rs::TcHook, // clsact qdisc; destroyed on drop
     interface: String,
@@ -91,21 +94,22 @@ impl BpfMapReader {
                 .map_err(|e| BpfError::MapError(e.to_string()))?;
         }
 
-        // Attach XDP program (ingress direction).
-        let xdp_link = skel
-            .progs
-            .xdp_counter
-            .attach_xdp(ifindex as i32)
-            .map_err(|e| {
-                if e.to_string().contains("permission") || e.to_string().contains("EPERM") {
-                    BpfError::InsufficientPermissions
-                } else {
-                    BpfError::Attach {
-                        interface: interface.to_string(),
-                        reason: e.to_string(),
-                    }
+        // Attach XDP program via libxdp's chained-program dispatcher.
+        // Lets us coexist with nr-guard (or any other libxdp-aware
+        // program) on the same interface — libxdp installs the
+        // dispatcher and chains us in by priority.
+        let xdp_prog_fd = skel.progs.xdp_counter.as_fd();
+        let xdp_handle = crate::xdp_dispatcher::attach(interface, xdp_prog_fd).map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("permission") || msg.contains("EPERM") {
+                BpfError::InsufficientPermissions
+            } else {
+                BpfError::Attach {
+                    interface: interface.to_string(),
+                    reason: msg,
                 }
-            })?;
+            }
+        })?;
 
         // Create clsact qdisc on the interface so we can hang TC
         // egress filter off it. tc_payload_loader.rs uses the same
@@ -154,7 +158,7 @@ impl BpfMapReader {
 
         Ok(Self {
             skel,
-            _xdp_link: xdp_link,
+            _xdp_handle: xdp_handle,
             _tc_egress_hook: egress_hook,
             _tc_qdisc: qdisc,
             interface: interface.to_string(),

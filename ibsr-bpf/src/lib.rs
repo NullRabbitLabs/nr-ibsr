@@ -17,6 +17,7 @@ pub mod record_incident_loader;
 pub mod safety;
 pub mod tc_payload_event;
 pub mod tc_payload_loader;
+pub mod xdp_dispatcher;
 
 pub use bpf_reader::BpfMapReader;
 pub use map_reader::{

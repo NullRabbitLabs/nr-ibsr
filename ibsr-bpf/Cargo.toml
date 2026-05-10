@@ -13,6 +13,12 @@ ibsr-schema = { path = "../ibsr-schema" }
 ibsr-clock = { path = "../ibsr-clock" }
 libbpf-rs.workspace = true
 nix = { version = "0.30", features = ["net"] }
+# libxdp-sys: chained-program dispatcher attach so IBSR's XDP counter
+# program can coexist with nr-guard on the same interface (eth0 in
+# the demo). Without this libbpf-rs's bare attach_xdp claims the
+# interface's single XDP slot, blocking nr-guard's enforcement.
+libxdp-sys = "0.2"
+libc = "0.2"
 
 [build-dependencies]
 libbpf-cargo = "0.24"
