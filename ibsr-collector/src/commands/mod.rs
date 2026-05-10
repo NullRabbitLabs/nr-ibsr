@@ -1,14 +1,23 @@
 //! Command orchestration for CLI subcommands.
 //!
 //! Provides execute functions for:
-//! - `collect` - Run the XDP collector
+//! - `collect` — StrictCounter mode (XDP counters).
+//! - `collect-payload` — ShadowPayload mode (TC + ringbuf, HTTP parser).
+//! - `record-incident` — CF-style sampled packet capture (TC + ringbuf,
+//!   pcap writer).
 
 pub mod collect;
 pub mod collect_payload;
+pub mod record_incident;
 
 pub use collect::execute_collect;
 pub use collect_payload::{
     execute_collect_payload, AttachError, CollectPayloadResult, TcPayloadAttacher,
+};
+pub use record_incident::{
+    compute_boot_anchor_now, execute_record_incident, format_run_dir_name as record_run_dir_name,
+    record_incident_loop, PacketEventSource, RecordIncidentAttacher, RecordIncidentLoopStats,
+    RecordIncidentResult,
 };
 
 use crate::cli::CliError;

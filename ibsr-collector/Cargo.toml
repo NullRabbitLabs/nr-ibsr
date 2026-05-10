@@ -24,5 +24,11 @@ ibsr-schema = { path = "../ibsr-schema" }
 # Memory-safe, no_std-friendly, parses HTTP/1.x request + response heads
 # and reports body byte length via Content-Length / chunked transfer.
 httparse = "1.9"
+# Used by record-incident's compute_boot_anchor_now: clock_gettime
+# (CLOCK_MONOTONIC) to translate kernel ktime → wall-clock for pcap
+# timestamps.
+nix = { version = "0.30", features = ["time"] }
+# gzip for record-incident's warm-tier archive sweeper.
+flate2 = "1.1"
 
 [dev-dependencies]

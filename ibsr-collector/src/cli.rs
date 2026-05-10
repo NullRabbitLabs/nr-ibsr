@@ -49,6 +49,12 @@ pub enum CliError {
 
     #[error("max-flows must be at least 1, got {0}")]
     InvalidMaxFlows(usize),
+
+    #[error("sample-rate must be at least 1, got {0}")]
+    InvalidSampleRate(u64),
+
+    #[error("incident tag must be 1..=64 chars and match [a-zA-Z0-9_-], got {0:?}")]
+    InvalidIncidentTag(String),
 }
 
 /// IBSR XDP Collector - Passive traffic metrics collection for Solana validators.
@@ -70,6 +76,11 @@ pub enum Command {
     /// operator-controlled boundaries (validator infra, edge proxies)
     /// for application-layer attack detection.
     CollectPayload(CollectPayloadArgs),
+    /// Sampled packet capture for incident recording (CF-style "under
+    /// attack mode"). TC ingress/egress program samples 1-in-N packets,
+    /// userspace writes pcap files. Per
+    /// docs/CF-INCIDENT-RECORDING-DESIGN-V1.md.
+    RecordIncident(RecordIncidentArgs),
 }
 
 /// Default status interval in seconds (for status.jsonl updates).
@@ -94,6 +105,27 @@ pub const DEFAULT_RINGBUF_BYTES: usize = 16 * 1024 * 1024;
 
 /// Default snapshot-emission window for ShadowPayload mode.
 pub const DEFAULT_PAYLOAD_WINDOW_SEC: u64 = 60;
+
+/// Default output directory for record-incident mode pcap files.
+/// Distinct from the other modes so a multi-mode deployment doesn't
+/// clobber.
+pub const DEFAULT_RECORD_OUTPUT_DIR: &str = "/var/lib/ibsr/incidents";
+
+/// Default sample rate — 1-in-1000 packets, the CF baseline. Operators
+/// can drop to 1 (capture every packet) on trigger; a future Phase 2
+/// runtime trigger will mutate this from outside the BPF program via
+/// the config_map.
+pub const DEFAULT_SAMPLE_RATE: u64 = 1000;
+
+/// Default network interface for record-incident. Defaults to `lo`
+/// for the same reason ShadowPayload does — post-term loopback is the
+/// canonical recording vantage on hyperscaler-style boxes.
+pub const DEFAULT_RECORD_IFACE: &str = "lo";
+
+/// Default Unix socket path for the record-incident trigger socket.
+/// Per docs/CF-INCIDENT-RECORDING-DESIGN-V1.md §"Trigger-socket auth",
+/// access is gated by filesystem permissions.
+pub const DEFAULT_TRIGGER_SOCKET_PATH: &str = "/var/run/ibsr.sock";
 
 /// Arguments for the collect command.
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
@@ -322,6 +354,113 @@ impl CollectPayloadArgs {
         }
         Ok(())
     }
+}
+
+/// Arguments for the `record-incident` subcommand (CF-style sampled
+/// capture). Phase 1: static sample-rate from CLI. Phase 2 will add
+/// a config_map subscription for runtime rate changes; the CLI value
+/// becomes the initial setting.
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct RecordIncidentArgs {
+    /// Network interface for TC attach. Defaults to `lo` — same
+    /// post-term-loopback vantage as collect-payload.
+    #[arg(short, long, default_value = DEFAULT_RECORD_IFACE)]
+    pub iface: String,
+
+    /// Output directory for pcap files. Each invocation lands in a
+    /// timestamped subdirectory; phase 4 will add per-trigger
+    /// partitioning.
+    #[arg(short = 'o', long, default_value = DEFAULT_RECORD_OUTPUT_DIR)]
+    pub out_dir: PathBuf,
+
+    /// Incident tag — short identifier baked into the output dir name.
+    /// 1..=64 ASCII chars, [a-zA-Z0-9_-] only.
+    #[arg(long, default_value = "ad-hoc")]
+    pub tag: String,
+
+    /// Sampling rate: 1-in-N packets are captured. `1` = every packet.
+    /// Phase 1: static for the duration of the run.
+    #[arg(long, default_value_t = DEFAULT_SAMPLE_RATE)]
+    pub sample_rate: u64,
+
+    /// Duration to capture in seconds. If not specified, runs until SIGINT.
+    #[arg(long)]
+    pub duration_sec: Option<u64>,
+
+    /// Increase verbosity (-v, -vv).
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Interval for status.jsonl updates in seconds.
+    #[arg(long, default_value_t = DEFAULT_STATUS_INTERVAL_SEC)]
+    pub status_interval_sec: u64,
+
+    /// Enable the trigger socket for runtime sample-rate / trigger /
+    /// stop / status commands. Defaults off — when omitted, the
+    /// recording runs at the static --sample-rate for the requested
+    /// duration.
+    #[arg(long)]
+    pub trigger_socket: Option<PathBuf>,
+
+    /// Per-customer salt for IPv4 hashing (16 hex chars). When set,
+    /// every captured packet's src + dst IPv4 addresses are replaced
+    /// with FNV-1a-64(salt || ip). Different salts produce
+    /// uncorrelated hashed outputs across customers / runs.
+    #[arg(long)]
+    pub scrub_ip_salt: Option<String>,
+
+    /// CIDR of an "internal" subnet (e.g., the operator's
+    /// service-mesh range). Packets where BOTH src and dst are
+    /// inside this subnet are dropped from the pcap output. Repeat
+    /// the flag for multiple subnets.
+    #[arg(long)]
+    pub scrub_internal_subnet: Option<String>,
+
+    /// Hot-tier per-pcap byte cap. When the current pcap exceeds this
+    /// size, the sink rotates to a new file in the same out-dir with
+    /// a freshly-stamped tag-ts directory. Operators bound disk
+    /// usage with this + `--archive-after-sec`.
+    #[arg(long)]
+    pub max_pcap_bytes: Option<u64>,
+
+    /// Archive directory: pcap files in `--out-dir` older than
+    /// `--archive-after-sec` are gzipped into here. When `None`, no
+    /// archiving happens (operator handles via cron / logrotate).
+    #[arg(long)]
+    pub archive_dir: Option<PathBuf>,
+
+    /// Age threshold (seconds) before a pcap file is moved to the
+    /// archive dir. Default 3600 (1 hour).
+    #[arg(long, default_value_t = 3600)]
+    pub archive_after_sec: u64,
+}
+
+impl RecordIncidentArgs {
+    /// Validate the arguments. Sample-rate must be ≥ 1; tag must
+    /// match the safe-on-disk character set so it can be used in the
+    /// output directory name without escaping.
+    pub fn validate(&self) -> Result<(), CliError> {
+        if self.sample_rate < 1 {
+            return Err(CliError::InvalidSampleRate(self.sample_rate));
+        }
+        if !is_valid_incident_tag(&self.tag) {
+            return Err(CliError::InvalidIncidentTag(self.tag.clone()));
+        }
+        // Scrub flags are validated in execute_record_incident via
+        // scrub::parse_ip_salt / parse_subnet to surface rich error
+        // messages without coupling cli.rs to the scrub module.
+        Ok(())
+    }
+}
+
+/// Validates an incident tag: 1..=64 chars, [a-zA-Z0-9_-] only.
+/// Pure function so tests can pin the exact charset.
+pub fn is_valid_incident_tag(tag: &str) -> bool {
+    let len = tag.chars().count();
+    if !(1..=64).contains(&len) {
+        return false;
+    }
+    tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Parse CLI arguments from an iterator of strings.
@@ -1338,5 +1477,273 @@ eth0 00000000 0102A8C0";
         ]);
         assert_eq!(args.window_sec, 10);
         assert!(args.validate().is_ok());
+    }
+
+    // ===========================================
+    // Test Category G — record-incident subcommand
+    // ===========================================
+
+    fn parse_record(argv: &[&str]) -> RecordIncidentArgs {
+        let cli = parse_from(argv).expect("parse");
+        match cli.command {
+            Command::RecordIncident(a) => a,
+            _ => panic!("expected RecordIncident"),
+        }
+    }
+
+    #[test]
+    fn record_subcommand_parses_minimal_args() {
+        let args = parse_record(&["ibsr", "record-incident"]);
+        assert_eq!(args.iface, DEFAULT_RECORD_IFACE);
+        assert_eq!(args.tag, "ad-hoc");
+        assert_eq!(args.sample_rate, DEFAULT_SAMPLE_RATE);
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn record_subcommand_iface_defaults_to_lo() {
+        let args = parse_record(&["ibsr", "record-incident"]);
+        assert_eq!(args.iface, "lo");
+    }
+
+    #[test]
+    fn record_subcommand_iface_overridable() {
+        let args = parse_record(&["ibsr", "record-incident", "-i", "eth0"]);
+        assert_eq!(args.iface, "eth0");
+    }
+
+    #[test]
+    fn record_subcommand_tag_overridable() {
+        let args = parse_record(&["ibsr", "record-incident", "--tag", "incident-abc"]);
+        assert_eq!(args.tag, "incident-abc");
+    }
+
+    #[test]
+    fn record_subcommand_default_out_dir() {
+        let args = parse_record(&["ibsr", "record-incident"]);
+        assert_eq!(args.out_dir, PathBuf::from(DEFAULT_RECORD_OUTPUT_DIR));
+    }
+
+    #[test]
+    fn record_subcommand_default_sample_rate_is_1000() {
+        let args = parse_record(&["ibsr", "record-incident"]);
+        assert_eq!(args.sample_rate, 1000);
+    }
+
+    #[test]
+    fn record_subcommand_custom_sample_rate() {
+        let args = parse_record(&["ibsr", "record-incident", "--sample-rate", "1"]);
+        assert_eq!(args.sample_rate, 1);
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn record_subcommand_validates_zero_sample_rate() {
+        let args = parse_record(&["ibsr", "record-incident", "--sample-rate", "0"]);
+        assert_eq!(args.validate(), Err(CliError::InvalidSampleRate(0)));
+    }
+
+    #[test]
+    fn record_subcommand_validates_invalid_tag_with_slash() {
+        let args = parse_record(&["ibsr", "record-incident", "--tag", "bad/slash"]);
+        assert!(matches!(args.validate(), Err(CliError::InvalidIncidentTag(_))));
+    }
+
+    #[test]
+    fn record_subcommand_validates_invalid_tag_with_dot_dot() {
+        // Path-traversal attempt — must be rejected.
+        let args = parse_record(&["ibsr", "record-incident", "--tag", "..abc"]);
+        assert!(matches!(args.validate(), Err(CliError::InvalidIncidentTag(_))));
+    }
+
+    #[test]
+    fn record_subcommand_validates_empty_tag() {
+        let args = parse_record(&["ibsr", "record-incident", "--tag", ""]);
+        assert!(matches!(args.validate(), Err(CliError::InvalidIncidentTag(_))));
+    }
+
+    #[test]
+    fn record_subcommand_validates_too_long_tag() {
+        let long = "x".repeat(65);
+        let args = parse_record(&["ibsr", "record-incident", "--tag", &long]);
+        assert!(matches!(args.validate(), Err(CliError::InvalidIncidentTag(_))));
+    }
+
+    #[test]
+    fn record_subcommand_accepts_64_char_tag() {
+        let max = "a".repeat(64);
+        let args = parse_record(&["ibsr", "record-incident", "--tag", &max]);
+        assert!(args.validate().is_ok(), "64 chars is the limit, must pass");
+    }
+
+    #[test]
+    fn record_subcommand_accepts_alphanumeric_underscore_dash() {
+        let args = parse_record(&[
+            "ibsr", "record-incident", "--tag", "a-b_c-1234",
+        ]);
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn record_subcommand_duration_sec_optional() {
+        let args = parse_record(&["ibsr", "record-incident"]);
+        assert!(args.duration_sec.is_none());
+    }
+
+    #[test]
+    fn record_subcommand_duration_sec_provided() {
+        let args = parse_record(&[
+            "ibsr", "record-incident", "--duration-sec", "60",
+        ]);
+        assert_eq!(args.duration_sec, Some(60));
+    }
+
+    #[test]
+    fn record_subcommand_trigger_socket_optional() {
+        let args = parse_record(&["ibsr", "record-incident"]);
+        assert!(args.trigger_socket.is_none());
+    }
+
+    #[test]
+    fn record_subcommand_trigger_socket_path_parses() {
+        let args = parse_record(&[
+            "ibsr", "record-incident",
+            "--trigger-socket", "/run/ibsr.sock",
+        ]);
+        assert_eq!(args.trigger_socket, Some(PathBuf::from("/run/ibsr.sock")));
+    }
+
+    #[test]
+    fn record_subcommand_scrub_ip_salt_parses() {
+        let args = parse_record(&[
+            "ibsr", "record-incident",
+            "--scrub-ip-salt", "DEADBEEFCAFEBABE",
+        ]);
+        assert_eq!(args.scrub_ip_salt, Some("DEADBEEFCAFEBABE".to_string()));
+    }
+
+    #[test]
+    fn record_subcommand_scrub_internal_subnet_parses() {
+        let args = parse_record(&[
+            "ibsr", "record-incident",
+            "--scrub-internal-subnet", "10.0.0.0/8",
+        ]);
+        assert_eq!(args.scrub_internal_subnet, Some("10.0.0.0/8".to_string()));
+    }
+
+    #[test]
+    fn record_subcommand_max_pcap_bytes_optional() {
+        let args = parse_record(&["ibsr", "record-incident"]);
+        assert!(args.max_pcap_bytes.is_none());
+    }
+
+    #[test]
+    fn record_subcommand_max_pcap_bytes_parses() {
+        let args = parse_record(&[
+            "ibsr", "record-incident", "--max-pcap-bytes", "10485760",
+        ]);
+        assert_eq!(args.max_pcap_bytes, Some(10_485_760));
+    }
+
+    #[test]
+    fn record_subcommand_archive_dir_optional() {
+        let args = parse_record(&["ibsr", "record-incident"]);
+        assert!(args.archive_dir.is_none());
+    }
+
+    #[test]
+    fn record_subcommand_archive_dir_parses() {
+        let args = parse_record(&[
+            "ibsr", "record-incident", "--archive-dir", "/srv/archive",
+        ]);
+        assert_eq!(args.archive_dir, Some(PathBuf::from("/srv/archive")));
+    }
+
+    #[test]
+    fn record_subcommand_archive_after_sec_default_is_3600() {
+        let args = parse_record(&["ibsr", "record-incident"]);
+        assert_eq!(args.archive_after_sec, 3600);
+    }
+
+    #[test]
+    fn record_subcommand_archive_after_sec_overridable() {
+        let args = parse_record(&[
+            "ibsr", "record-incident", "--archive-after-sec", "60",
+        ]);
+        assert_eq!(args.archive_after_sec, 60);
+    }
+
+    #[test]
+    fn record_subcommand_distinct_from_collect_modes() {
+        // Pin: the three subcommands route independently.
+        let cli_record = parse_from(["ibsr", "record-incident"]).expect("parse");
+        assert!(matches!(cli_record.command, Command::RecordIncident(_)));
+    }
+
+    #[test]
+    fn record_subcommand_out_dir_default_distinct_from_other_modes() {
+        let args = parse_record(&["ibsr", "record-incident"]);
+        assert_ne!(args.out_dir, PathBuf::from(DEFAULT_OUTPUT_DIR));
+        assert_ne!(args.out_dir, PathBuf::from(DEFAULT_PAYLOAD_OUTPUT_DIR));
+    }
+
+    #[test]
+    fn record_subcommand_help() {
+        let result = parse_from(["ibsr", "record-incident", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    // ===========================================
+    // is_valid_incident_tag — direct tests
+    // ===========================================
+
+    #[test]
+    fn valid_tag_minimal_one_char() {
+        assert!(is_valid_incident_tag("a"));
+    }
+
+    #[test]
+    fn valid_tag_max_64_chars() {
+        let s = "a".repeat(64);
+        assert!(is_valid_incident_tag(&s));
+    }
+
+    #[test]
+    fn invalid_tag_65_chars() {
+        let s = "a".repeat(65);
+        assert!(!is_valid_incident_tag(&s));
+    }
+
+    #[test]
+    fn invalid_tag_empty() {
+        assert!(!is_valid_incident_tag(""));
+    }
+
+    #[test]
+    fn invalid_tag_with_slash_disallowed() {
+        assert!(!is_valid_incident_tag("a/b"));
+    }
+
+    #[test]
+    fn invalid_tag_with_dot_disallowed() {
+        // `.` is intentionally disallowed so `..` can't slip in.
+        assert!(!is_valid_incident_tag("a.b"));
+    }
+
+    #[test]
+    fn invalid_tag_with_space_disallowed() {
+        assert!(!is_valid_incident_tag("a b"));
+    }
+
+    #[test]
+    fn invalid_tag_with_unicode_disallowed() {
+        assert!(!is_valid_incident_tag("café"));
+    }
+
+    #[test]
+    fn valid_tag_alphanumeric_dash_underscore() {
+        assert!(is_valid_incident_tag("incident-customer-A_42"));
     }
 }
