@@ -18,6 +18,11 @@
 #include <linux/tcp.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
+// xdp_helpers.h ships with libxdp (xdp-tools). The XDP_RUN_CONFIG()
+// macro emits the .xdp_run_config BTF section that libxdp's chained-
+// program dispatcher reads to register a program for chaining. Without
+// it, attach to a dispatcher fails with EOPNOTSUPP.
+#include <xdp/xdp_helpers.h>
 
 // Map key structure - 8 bytes total with explicit padding
 // Layout: src_ip(4) + dst_port(2) + _pad(2) = 8 bytes
@@ -61,6 +66,18 @@ struct {
     __type(key, struct map_key);
     __type(value, struct counters);
 } counter_map SEC(".maps");
+
+// Dispatcher chain registration.
+//   priority=50 (default observation tier; nr-guard's enforcement runs
+//                earlier, around 30, so banned IPs are dropped before
+//                we waste cycles counting them — that's the production
+//                ordering)
+//   XDP_PASS=1 (chain continues to subsequent programs after we PASS;
+//               we ALWAYS PASS so this is the only relevant action)
+struct {
+    __uint(priority, 50);
+    __uint(XDP_PASS, 1);
+} XDP_RUN_CONFIG(xdp_counter);
 
 SEC("xdp")
 int xdp_counter(struct xdp_md *ctx)
