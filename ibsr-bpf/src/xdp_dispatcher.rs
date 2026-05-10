@@ -12,8 +12,9 @@ use std::ffi::{CStr, CString};
 use std::os::fd::{AsFd, AsRawFd};
 
 use libxdp_sys::{
-    libxdp_strerror, xdp_attach_mode_XDP_MODE_NATIVE, xdp_attach_mode_XDP_MODE_SKB,
-    xdp_program, xdp_program__attach, xdp_program__detach, xdp_program__from_fd,
+    bpf_object, libxdp_strerror, xdp_attach_mode_XDP_MODE_NATIVE,
+    xdp_attach_mode_XDP_MODE_SKB, xdp_program, xdp_program__attach,
+    xdp_program__detach, xdp_program__from_bpf_obj, xdp_program__from_fd,
     xdp_program__id,
 };
 
@@ -106,8 +107,77 @@ fn ifindex_for(iface: &str) -> Result<i32, DispatcherError> {
     Ok(idx as i32)
 }
 
-/// Attach `prog_fd` (a libbpf-rs-loaded XDP program FD) to `iface` via
-/// libxdp's dispatcher. Tries native mode first, falls back to SKB.
+/// Attach via libxdp from an OPEN (not loaded) bpf_object. This is the
+/// path the dispatcher actually accepts: libxdp does the load with the
+/// right BTF FREPLACE context, producing a `BPF_PROG_TYPE_EXT` program
+/// the dispatcher chains successfully. Loading via libbpf-rs first then
+/// handing the FD to `xdp_program__from_fd` produces a plain XDP type
+/// that the dispatcher rejects with EOPNOTSUPP — empirically verified
+/// 2026-05-10.
+///
+/// `obj_ptr` MUST be an open-but-not-loaded `bpf_object*` from libbpf.
+/// Caller retains ownership; libxdp wraps but does not free.
+/// `section` is the BPF section name (e.g. "xdp"), not the function name.
+pub fn attach_from_obj(
+    iface: &str,
+    obj_ptr: *mut bpf_object,
+    section: &str,
+) -> Result<XdpDispatcherHandle, DispatcherError> {
+    if obj_ptr.is_null() {
+        return Err(DispatcherError::InvalidProgramFd);
+    }
+    let ifindex = ifindex_for(iface)?;
+    let csec = CString::new(section).map_err(|_| DispatcherError::NoSuchInterface {
+        iface: iface.to_string(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "section has NUL"),
+    })?;
+
+    let xprog = unsafe { xdp_program__from_bpf_obj(obj_ptr, csec.as_ptr()) };
+    // libxdp returns ERR_PTR-style negative pointers on failure — IS_ERR
+    // semantics: pointer in [-4095, -1] range is an error.
+    if xprog.is_null() || (xprog as i64).abs() < 4096 {
+        let err = if xprog.is_null() { -22 } else { -(xprog as i64) as i32 };
+        return Err(DispatcherError::AttachFailed {
+            iface: iface.to_string(),
+            code: err,
+            msg: format!("xdp_program__from_bpf_obj: {}", strerror(err)),
+        });
+    }
+
+    // Try native, then SKB.
+    let err = unsafe {
+        xdp_program__attach(xprog, ifindex, xdp_attach_mode_XDP_MODE_NATIVE, 0)
+    };
+    if err == 0 {
+        return Ok(XdpDispatcherHandle {
+            prog: xprog,
+            ifindex,
+            mode: xdp_attach_mode_XDP_MODE_NATIVE,
+            iface: iface.to_string(),
+        });
+    }
+    let err =
+        unsafe { xdp_program__attach(xprog, ifindex, xdp_attach_mode_XDP_MODE_SKB, 0) };
+    if err == 0 {
+        return Ok(XdpDispatcherHandle {
+            prog: xprog,
+            ifindex,
+            mode: xdp_attach_mode_XDP_MODE_SKB,
+            iface: iface.to_string(),
+        });
+    }
+    Err(DispatcherError::AttachFailed {
+        iface: iface.to_string(),
+        code: err,
+        msg: strerror(err),
+    })
+}
+
+/// Legacy entry point — kept for any caller that already has a libbpf-rs
+/// loaded program FD. NOTE: dispatcher-chain attach DOES NOT WORK on
+/// FDs from this path (program type is XDP not EXT, dispatcher returns
+/// EOPNOTSUPP). Prefer `attach_from_obj`. Retained for nr-guard's
+/// transitional-state aya path until that's also migrated.
 pub fn attach<F: AsFd>(iface: &str, prog_fd: F) -> Result<XdpDispatcherHandle, DispatcherError> {
     let raw_fd = prog_fd.as_fd().as_raw_fd();
     let ifindex = ifindex_for(iface)?;

@@ -13,33 +13,42 @@
 //! that XDP-ingress-only undercounts egress RSTs.
 
 use std::collections::HashMap;
-use std::mem::MaybeUninit;
+use std::io::Write;
 use std::os::fd::AsFd;
 
-use libbpf_rs::skel::{OpenSkel, SkelBuilder};
-use libbpf_rs::{MapCore, OpenObject, TcHookBuilder, TC_EGRESS, TC_INGRESS};
+use libbpf_rs::{Object, ObjectBuilder, TcHookBuilder, TC_EGRESS, TC_INGRESS};
 
 use crate::map_reader::{BpfError, Counters, MapKey, MapReader, MapReaderError};
 
-// Include the generated skeleton
-mod counter_skel {
-    include!(concat!(env!("OUT_DIR"), "/counter.skel.rs"));
-}
-
-use counter_skel::*;
+/// counter.bpf.c compiled to BPF object bytes at build time.
+/// build.rs invokes libbpf-cargo's SkeletonBuilder with .obj() so the
+/// .o lands at a path exposed via the COUNTER_BPF_OBJ_PATH env var.
+/// We write these bytes to a tempfile at runtime so libxdp's
+/// xdp_program__open_file (which insists on a path on disk) can
+/// load + dispatch-attach the program.
+const COUNTER_BPF_OBJ_BYTES: &[u8] = include_bytes!(env!("COUNTER_BPF_OBJ_PATH"));
 
 /// BPF Map Reader that loads and manages the XDP + TC counter programs.
 ///
-/// Owns the skeleton + XDP link + TC hooks. Drop unwinds attach state.
+/// Owns the BPF object (loaded by libxdp through the dispatcher path),
+/// the libxdp dispatcher attach handle, and TC hooks. Drop unwinds
+/// attach state in declaration order — xdp_handle detaches first, then
+/// the bpf_object is freed.
 pub struct BpfMapReader {
-    skel: CounterSkel<'static>,
     /// libxdp dispatcher attach handle. Detaches on Drop.
-    /// Replaces the old `libbpf_rs::Link` so IBSR's XDP coexists with
-    /// other libxdp-aware programs (nr-guard) on the same interface.
+    /// MUST drop before `_object` so xdp_program__detach runs against
+    /// a still-valid bpf_object. Field declaration order matters.
     _xdp_handle: crate::xdp_dispatcher::XdpDispatcherHandle,
+    /// Loaded bpf_object (libxdp did the kernel load with FREPLACE
+    /// BTF context). Maps + TC programs accessible via libbpf-rs.
+    object: Object,
     _tc_egress_hook: libbpf_rs::TcHook,
     _tc_qdisc: libbpf_rs::TcHook, // clsact qdisc; destroyed on drop
     interface: String,
+    /// Tempfile holding counter.bpf.o bytes. Kept alive for process
+    /// lifetime so /proc/self/fd entries (libbpf may reference) stay
+    /// valid even though we don't strictly need the file post-load.
+    _temp_obj: tempfile::NamedTempFile,
 }
 
 // SAFETY: BpfMapReader is only used from a single thread in practice.
@@ -68,38 +77,40 @@ impl BpfMapReader {
         let ifindex = nix::net::if_::if_nametoindex(interface)
             .map_err(|_| BpfError::InterfaceNotFound(interface.to_string()))?;
 
-        // Open and load the BPF skeleton
-        // Leak the OpenObject to give it 'static lifetime (required by skeleton API)
-        // This is intentional - the BpfMapReader lives for the duration of the program
-        let open_object: &'static mut MaybeUninit<OpenObject> =
-            Box::leak(Box::new(MaybeUninit::<OpenObject>::uninit()));
+        // Stage 1 — write the build-time-embedded counter.bpf.o to a
+        // tempfile. libxdp's xdp_program__open_file insists on a path
+        // (libxdp 1.6 has a from-buffer API but the version on the
+        // sui-victim runtime is 1.3, which only takes paths).
+        let mut temp_obj = tempfile::Builder::new()
+            .prefix("ibsr-counter-")
+            .suffix(".bpf.o")
+            .tempfile()
+            .map_err(|e| BpfError::Load(format!("create temp .o: {}", e)))?;
+        temp_obj
+            .write_all(COUNTER_BPF_OBJ_BYTES)
+            .map_err(|e| BpfError::Load(format!("write temp .o: {}", e)))?;
+        temp_obj.flush().ok();
+        let obj_path = temp_obj.path().to_path_buf();
 
-        let skel_builder = CounterSkelBuilder::default();
-        let open_skel = skel_builder
-            .open(open_object)
-            .map_err(|e| BpfError::Load(e.to_string()))?;
+        // Stage 2 — open via libbpf (parses ELF, allocates kernel
+        // objects, BUT does NOT load programs into the kernel yet).
+        let open_object = ObjectBuilder::default()
+            .open_file(&obj_path)
+            .map_err(|e| BpfError::Load(format!("open bpf object: {}", e)))?;
+        let raw_obj_ptr = open_object.take_ptr();
 
-        let skel = open_skel
-            .load()
-            .map_err(|e| BpfError::Load(e.to_string()))?;
-
-        // Configure dst_ports in the config map (convert to network byte order)
-        // Up to 8 ports supported; unused slots remain 0
-        for (i, &port) in dst_ports.iter().take(8).enumerate() {
-            let port_ne = port.to_be();
-            let key: u32 = i as u32;
-            skel.maps
-                .config_map
-                .update(&key.to_ne_bytes(), &port_ne.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
-                .map_err(|e| BpfError::MapError(e.to_string()))?;
-        }
-
-        // Attach XDP program via libxdp's chained-program dispatcher.
-        // Lets us coexist with nr-guard (or any other libxdp-aware
-        // program) on the same interface — libxdp installs the
-        // dispatcher and chains us in by priority.
-        let xdp_prog_fd = skel.progs.xdp_counter.as_fd();
-        let xdp_handle = crate::xdp_dispatcher::attach(interface, xdp_prog_fd).map_err(|e| {
+        // Stage 3 — hand the open bpf_object to libxdp for FREPLACE-aware
+        // load + dispatcher attach. libxdp loads the program as type
+        // BPF_PROG_TYPE_EXT (FREPLACE) so it chains correctly into the
+        // dispatcher slot. counter.bpf.c includes XDP_RUN_CONFIG() which
+        // emits the .xdp_run_config BTF section libxdp reads to register
+        // the program at the configured priority.
+        let xdp_handle = crate::xdp_dispatcher::attach_from_obj(
+            interface,
+            raw_obj_ptr.as_ptr() as *mut libxdp_sys::bpf_object,
+            "xdp",
+        )
+        .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("permission") || msg.contains("EPERM") {
                 BpfError::InsufficientPermissions
@@ -111,57 +122,73 @@ impl BpfMapReader {
             }
         })?;
 
-        // Create clsact qdisc on the interface so we can hang TC
-        // egress filter off it. tc_payload_loader.rs uses the same
-        // pattern. Failure to create the qdisc unwinds the XDP link
-        // when this fn returns Err.
-        let egress_fd = skel.progs.tc_egress_counter.as_fd();
-        let mut qdisc_builder = TcHookBuilder::new(egress_fd);
-        qdisc_builder.ifindex(ifindex as i32).replace(true);
-        let qdisc = match qdisc_builder.hook(TC_INGRESS | TC_EGRESS).create() {
-            Ok(h) => h,
-            Err(e) => {
-                let msg = e.to_string();
-                // EEXIST / "Exclusivity flag on" — qdisc already
-                // exists. Standard libbpf idiom: ignore and continue
-                // to filter attach. We construct a non-creating
-                // handle for the destroy path.
-                if msg.contains("Exclusivity") || msg.contains("EEXIST") || msg.contains("exists") {
-                    let mut b = TcHookBuilder::new(egress_fd);
-                    b.ifindex(ifindex as i32).replace(true);
-                    b.hook(TC_INGRESS | TC_EGRESS)
-                } else {
-                    return Err(BpfError::Attach {
-                        interface: interface.to_string(),
-                        reason: format!("clsact qdisc create: {}", e),
-                    });
-                }
-            }
-        };
+        // Stage 4 — wrap the now-loaded bpf_object in a libbpf-rs Object
+        // for map + program access. libxdp's attach_from_obj loaded
+        // EVERYTHING in the object (XDP via FREPLACE + TC programs as
+        // plain libbpf programs); we now have full handles to maps.
+        // SAFETY: raw_obj_ptr was returned by libbpf as an open object,
+        // libxdp's attach loaded it, and we now hold sole ownership.
+        let mut object = unsafe { Object::from_ptr(raw_obj_ptr) };
 
-        // Attach TC egress filter (the new bidirectional-counter
-        // closure for V9 close-gate's tcp_rst undercounting finding,
-        // 2026-05-08).
-        let mut egress_builder = TcHookBuilder::new(egress_fd);
-        egress_builder
-            .ifindex(ifindex as i32)
-            .replace(true)
-            .handle(1)
-            .priority(1);
-        let mut egress_hook = egress_builder.hook(TC_EGRESS);
-        let egress_hook = egress_hook
-            .attach()
-            .map_err(|e| BpfError::Attach {
+        // Stage 5 — configure dst_ports in config_map (network byte
+        // order). Same logic as the old skel.maps.config_map.update.
+        configure_config_map(&mut object, dst_ports)?;
+
+        // Stage 6 — TC egress attach. tc_egress_counter was loaded as
+        // a sched_cls program by libbpf during stage 3 (libxdp's load
+        // touches the whole object, not just the XDP entry).
+        // We perform the attach inside a closure scope so the borrowed
+        // Program FD doesn't outlive the Program iterator item.
+        let (qdisc, egress_hook) = {
+            let prog = object
+                .progs()
+                .find(|p| p.name() == "tc_egress_counter")
+                .ok_or_else(|| BpfError::Attach {
+                    interface: interface.to_string(),
+                    reason: "tc_egress_counter program not found in loaded object".into(),
+                })?;
+            let egress_prog_fd = prog.as_fd();
+
+            let mut qdisc_builder = TcHookBuilder::new(egress_prog_fd);
+            qdisc_builder.ifindex(ifindex as i32).replace(true);
+            let qdisc = match qdisc_builder.hook(TC_INGRESS | TC_EGRESS).create() {
+                Ok(h) => h,
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("Exclusivity") || msg.contains("EEXIST") || msg.contains("exists") {
+                        let mut b = TcHookBuilder::new(egress_prog_fd);
+                        b.ifindex(ifindex as i32).replace(true);
+                        b.hook(TC_INGRESS | TC_EGRESS)
+                    } else {
+                        return Err(BpfError::Attach {
+                            interface: interface.to_string(),
+                            reason: format!("clsact qdisc create: {}", e),
+                        });
+                    }
+                }
+            };
+
+            let mut egress_builder = TcHookBuilder::new(egress_prog_fd);
+            egress_builder
+                .ifindex(ifindex as i32)
+                .replace(true)
+                .handle(1)
+                .priority(1);
+            let mut egress_hook = egress_builder.hook(TC_EGRESS);
+            let egress_hook = egress_hook.attach().map_err(|e| BpfError::Attach {
                 interface: interface.to_string(),
                 reason: format!("TC egress attach: {}", e),
             })?;
+            (qdisc, egress_hook)
+        };
 
         Ok(Self {
-            skel,
             _xdp_handle: xdp_handle,
+            object,
             _tc_egress_hook: egress_hook,
             _tc_qdisc: qdisc,
             interface: interface.to_string(),
+            _temp_obj: temp_obj,
         })
     }
 
@@ -171,12 +198,45 @@ impl BpfMapReader {
     }
 }
 
+/// Set the configured dst_ports list in `config_map` (8 slots, key=index,
+/// value=u16 port in network byte order). Used at startup before traffic
+/// flows so the BPF program's port-match unrolled loop has the right
+/// values; unused slots stay zero (counter.bpf.c treats 0 as "ignore").
+fn configure_config_map(object: &mut Object, dst_ports: &[u16]) -> Result<(), BpfError> {
+    use libbpf_rs::MapCore;
+    let config_map = object
+        .maps_mut()
+        .find(|m| m.name() == "config_map")
+        .ok_or_else(|| BpfError::MapError("config_map not found".into()))?;
+    for (i, &port) in dst_ports.iter().take(8).enumerate() {
+        let port_ne = port.to_be();
+        let key: u32 = i as u32;
+        config_map
+            .update(
+                &key.to_ne_bytes(),
+                &port_ne.to_ne_bytes(),
+                libbpf_rs::MapFlags::ANY,
+            )
+            .map_err(|e| BpfError::MapError(format!("config_map update: {}", e)))?;
+    }
+    Ok(())
+}
+
 impl MapReader for BpfMapReader {
     fn read_counters(&self) -> Result<HashMap<MapKey, Counters>, MapReaderError> {
+        use libbpf_rs::MapCore;
         let mut result = HashMap::new();
 
-        // Iterate over all keys in the counter map
-        let map = &self.skel.maps.counter_map;
+        // Iterate over all keys in counter_map. We re-find the map per
+        // call rather than caching a handle, because libbpf-rs's Map
+        // borrows from Object and we'd need self-referential lifetimes.
+        let map = self
+            .object
+            .maps()
+            .find(|m| m.name() == "counter_map")
+            .ok_or_else(|| {
+                MapReaderError::ReadError("counter_map not found in loaded object".into())
+            })?;
 
         for key in map.keys() {
             let key_clone = key.clone();

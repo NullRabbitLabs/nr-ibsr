@@ -19,6 +19,7 @@ nix = { version = "0.30", features = ["net"] }
 # interface's single XDP slot, blocking nr-guard's enforcement.
 libxdp-sys = "0.2"
 libc = "0.2"
+tempfile = "3"
 
 [build-dependencies]
 libbpf-cargo = "0.24"

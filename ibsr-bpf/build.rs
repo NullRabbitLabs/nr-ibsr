@@ -26,10 +26,26 @@ fn main() {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
+    // counter.bpf.c needs BOTH:
+    //   - the generated Rust skeleton (for libbpf-rs Object/Map handles
+    //     against the loaded bpf_object — used in bpf_reader.rs for
+    //     counter_map iteration + config_map writes)
+    //   - the raw .o file on disk (for libxdp's xdp_program__open_file
+    //     to load with the right BTF context for FREPLACE/dispatcher
+    //     chaining — D5a fix)
+    // SkeletonBuilder writes to .obj() target; we then expose the path
+    // via cargo:rustc-env so bpf_reader.rs can pass it to libxdp at
+    // runtime.
+    let counter_obj_path = out_dir.join("counter.bpf.o");
     SkeletonBuilder::new()
         .source(COUNTER_SOURCE)
+        .obj(&counter_obj_path)
         .build_and_generate(out_dir.join("counter.skel.rs"))
         .expect("Failed to build and generate counter BPF skeleton");
+    println!(
+        "cargo:rustc-env=COUNTER_BPF_OBJ_PATH={}",
+        counter_obj_path.display()
+    );
 
     SkeletonBuilder::new()
         .source(TC_PAYLOAD_SOURCE)
