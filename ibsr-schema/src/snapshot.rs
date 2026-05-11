@@ -21,9 +21,11 @@ use std::net::Ipv4Addr;
 ///            (duration_ns_{mean,max}), HTTP status fractions
 ///            (status_{2xx,4xx,5xx}_frac), JSON-RPC error metadata
 ///            (rpc_error_distinct_codes, rpc_error_frac), and derived
-///            byte means (req_bytes_mean, resp_bytes_mean). All new
-///            fields are Option-typed with skip_serializing_if so v7
-///            readers parse v6 snapshots cleanly and v6 readers ignore
+///            byte means (req_bytes_mean, resp_bytes_mean). Adds an
+///            optional HostTelemetry block (`host`) sourced from
+///            `/proc/<pid>` for collectors configured with a target PID.
+///            All new fields are Option-typed with skip_serializing_if so
+///            v7 readers parse v6 snapshots cleanly and v6 readers ignore
 ///            the new keys.
 pub const SCHEMA_VERSION: u32 = 7;
 
@@ -352,6 +354,64 @@ impl ResponseAggregates {
     }
 }
 
+/// Per-window host-process telemetry block. Optional addition to v7+
+/// snapshots. Source: `/proc/<pid>/{stat,status,io,fd,net/tcp}` sampled
+/// at the snapshot-emit thread's window-boundary cadence (window-start
+/// baseline + window-close end-snapshot, deltas computed in userspace).
+///
+/// All fields are individually `Option`-typed: a collector that lacks
+/// `/proc/<pid>/io` permission can still emit `cpu_*` and `rss_*`
+/// without forcing the whole block to `None`. Operators with no
+/// `--target-pid` configured emit `Snapshot.host: None` entirely (the
+/// block doesn't appear in JSON at all).
+///
+/// Window-boundary semantics: `cpu_max` and `rss_max` collapse to the
+/// end-of-window value in v7 (single-thread sampling). A future v8
+/// could add a 1Hz mid-window sampler for true intra-window max.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostTelemetry {
+    /// Mean process CPU% over window, as a fraction-of-one-core
+    /// percentage (0.0 = idle, 100.0 = one full core). v7+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_mean: Option<f64>,
+
+    /// Maximum process CPU% observed in window. v7+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_max: Option<f64>,
+
+    /// RSS memory delta over window in bytes (signed; positive = grew).
+    /// Computed as `rss_at_window_close - rss_at_window_start`. v7+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_delta: Option<i64>,
+
+    /// RSS memory at window end, in bytes. v7+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_max: Option<u64>,
+
+    /// RSS slope in bytes-per-second (rss_delta / window_duration_secs).
+    /// Captures slow-leak signatures that flip-flopping deltas can mask. v7+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_slope_bps: Option<f64>,
+
+    /// File-descriptor count delta over window (signed). v7+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_fds_delta: Option<i64>,
+
+    /// Open TCP-connection count delta over window (signed). Sourced
+    /// from `/proc/<pid>/net/tcp` ESTABLISHED-state lines. v7+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_connections_delta: Option<i64>,
+
+    /// Maximum open TCP-connection count observed during window. v7+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_connections_max: Option<u32>,
+
+    /// Disk-write byte delta over window. Sourced from
+    /// `/proc/<pid>/io::write_bytes`. v7+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_write_delta: Option<i64>,
+}
+
 /// Key type for bucket entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -582,6 +642,14 @@ pub struct Snapshot {
     /// where no complete request:response pair was observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resp_aggregates: Option<ResponseAggregates>,
+
+    /// Per-window host-process telemetry. Optional v7+ addition. Present
+    /// only when the collector has been configured with a target PID
+    /// (e.g. `ibsr collect-payload --target-pid 1234`). Absent for
+    /// untargeted runs and on snapshots from collectors without
+    /// `/proc` access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostTelemetry>,
 }
 
 impl Snapshot {
@@ -625,6 +693,7 @@ impl Snapshot {
             dst_ports: sorted_ports,
             buckets,
             resp_aggregates: None,
+            host: None,
         }
     }
 
@@ -633,6 +702,13 @@ impl Snapshot {
     /// emit when a window contains complete request:response pairs.
     pub fn with_resp_aggregates(mut self, agg: ResponseAggregates) -> Self {
         self.resp_aggregates = Some(agg);
+        self
+    }
+
+    /// Builder: attach per-window host-process telemetry. v7+ addition;
+    /// emitted by collectors configured with a target PID.
+    pub fn with_host(mut self, host: HostTelemetry) -> Self {
+        self.host = Some(host);
         self
     }
 
@@ -1934,4 +2010,97 @@ mod tests {
         assert_eq!(agg.rpc_error_frac, Some(0.0));
     }
 
+    // ===========================================
+    // Test Category I — v7 HostTelemetry block
+    // (closes B.1 of PLAN-PRODUCTION-FEATURE-SURFACE)
+    // ===========================================
+
+    #[test]
+    fn test_v7_snapshot_with_host_block_round_trips() {
+        // Populate every host telemetry field with a clean-decimal value so
+        // JSON round-trip is bit-stable. Verify equality through the
+        // serialise/deserialise path.
+        let host = HostTelemetry {
+            cpu_mean: Some(25.5),
+            cpu_max: Some(87.0),
+            rss_delta: Some(-65536),
+            rss_max: Some(2_147_483_648),
+            rss_slope_bps: Some(1024.5),
+            num_fds_delta: Some(4),
+            num_connections_delta: Some(-2),
+            num_connections_max: Some(128),
+            io_write_delta: Some(4096),
+        };
+        let snapshot = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000)
+            .with_host(host.clone());
+
+        let json = snapshot.to_json();
+        let restored = Snapshot::from_json(&json).expect("v7 with host should round-trip");
+
+        assert_eq!(restored.version, 7);
+        assert_eq!(restored.host, Some(host));
+    }
+
+    #[test]
+    fn test_v7_snapshot_without_host_block_omits_field() {
+        // No `with_host` → JSON must not contain "host" key
+        // (skip_serializing_if=Option::is_none).
+        let snapshot = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000);
+        let json = snapshot.to_json();
+        assert!(
+            !json.contains("\"host\""),
+            "JSON should omit host field: {}",
+            json,
+        );
+    }
+
+    #[test]
+    fn test_host_telemetry_omits_none_fields_individually() {
+        // A partially-populated HostTelemetry must omit the None-valued
+        // fields from JSON. Operators that have no /proc/<pid>/io access
+        // (e.g. unprivileged collector) emit cpu/rss but skip io_write_delta.
+        let host = HostTelemetry {
+            cpu_mean: Some(50.0),
+            cpu_max: Some(75.0),
+            rss_max: Some(1024),
+            ..Default::default()
+        };
+        let snapshot = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000)
+            .with_host(host);
+        let json = snapshot.to_json();
+        // Present fields appear
+        assert!(json.contains("cpu_mean"), "expected cpu_mean in JSON: {}", json);
+        assert!(json.contains("cpu_max"), "expected cpu_max in JSON: {}", json);
+        assert!(json.contains("rss_max"), "expected rss_max in JSON: {}", json);
+        // Absent (None) fields do not
+        for absent in [
+            "rss_delta",
+            "rss_slope_bps",
+            "num_fds_delta",
+            "num_connections_delta",
+            "num_connections_max",
+            "io_write_delta",
+        ] {
+            assert!(
+                !json.contains(absent),
+                "expected {} omitted from JSON: {}",
+                absent,
+                json,
+            );
+        }
+    }
+
+    #[test]
+    fn test_v6_snapshot_no_host_field_parses_under_v7() {
+        // A literal v6 JSON (pre-host era) must still parse cleanly under
+        // the v7-aware reader and surface `host: None`. Forward-compat
+        // regression-pin — the Phase B schema addition is purely additive
+        // and must not break existing readers.
+        let v6_json = r#"{"version":6,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
+        let restored = Snapshot::from_json(v6_json)
+            .expect("v6 should parse under v7-with-host reader");
+        assert_eq!(restored.version, 6);
+        assert!(restored.host.is_none());
+        assert!(restored.resp_aggregates.is_none());
+    }
 }

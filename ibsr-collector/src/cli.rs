@@ -55,6 +55,15 @@ pub enum CliError {
 
     #[error("incident tag must be 1..=64 chars and match [a-zA-Z0-9_-], got {0:?}")]
     InvalidIncidentTag(String),
+
+    #[error("target-pid must be > 0 (pid 0 is the kernel swapper), got {0}")]
+    InvalidTargetPid(u32),
+
+    #[error(
+        "--target-pid and --target-process-name are mutually exclusive; \
+         pass at most one"
+    )]
+    TargetPidAndNameBothSet,
 }
 
 /// IBSR XDP Collector - Passive traffic metrics collection for Solana validators.
@@ -298,6 +307,20 @@ pub struct CollectPayloadArgs {
     /// Interval for status.jsonl updates in seconds.
     #[arg(long, default_value_t = DEFAULT_STATUS_INTERVAL_SEC)]
     pub status_interval_sec: u64,
+
+    /// Target PID for host telemetry sampling. When set, the collector
+    /// reads `/proc/<pid>/{stat,status,io,fd,net/tcp}` at window
+    /// boundaries and emits an optional `host` block on each snapshot.
+    /// Mutually exclusive with `--target-process-name`. Default: none
+    /// (host block omitted).
+    #[arg(long)]
+    pub target_pid: Option<u32>,
+
+    /// Target process name for host telemetry sampling. The collector
+    /// resolves the name to a PID at startup via `/proc` walk. Mutually
+    /// exclusive with `--target-pid`. Default: none.
+    #[arg(long)]
+    pub target_process_name: Option<String>,
 }
 
 impl CollectPayloadArgs {
@@ -351,6 +374,14 @@ impl CollectPayloadArgs {
         }
         if self.max_flows == 0 {
             return Err(CliError::InvalidMaxFlows(self.max_flows));
+        }
+        if self.target_pid.is_some() && self.target_process_name.is_some() {
+            return Err(CliError::TargetPidAndNameBothSet);
+        }
+        if let Some(pid) = self.target_pid {
+            if pid == 0 {
+                return Err(CliError::InvalidTargetPid(pid));
+            }
         }
         Ok(())
     }
@@ -1477,6 +1508,56 @@ eth0 00000000 0102A8C0";
         ]);
         assert_eq!(args.window_sec, 10);
         assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn payload_subcommand_target_pid_defaults_to_none() {
+        let args = parse_payload(&["ibsr", "collect-payload", "-p", "8899"]);
+        assert!(args.target_pid.is_none(),
+            "no --target-pid → no host telemetry block emitted");
+        assert!(args.target_process_name.is_none());
+    }
+
+    #[test]
+    fn payload_subcommand_target_pid_parses_when_provided() {
+        let args = parse_payload(&[
+            "ibsr", "collect-payload", "-p", "8899", "--target-pid", "1234",
+        ]);
+        assert_eq!(args.target_pid, Some(1234));
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn payload_subcommand_target_process_name_parses_when_provided() {
+        let args = parse_payload(&[
+            "ibsr", "collect-payload", "-p", "8899",
+            "--target-process-name", "sui-node",
+        ]);
+        assert_eq!(args.target_process_name.as_deref(), Some("sui-node"));
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn payload_subcommand_target_pid_and_name_mutually_exclusive() {
+        // Specifying both is ambiguous — reject at validate() rather than
+        // silently picking one. The collector resolves name → pid via
+        // /proc walk if --target-process-name; if both arrive, the
+        // operator's intent is unclear.
+        let args = parse_payload(&[
+            "ibsr", "collect-payload", "-p", "8899",
+            "--target-pid", "1234",
+            "--target-process-name", "sui-node",
+        ]);
+        assert_eq!(args.validate(), Err(CliError::TargetPidAndNameBothSet));
+    }
+
+    #[test]
+    fn payload_subcommand_target_pid_zero_rejected() {
+        // pid=0 is the swapper / not a real userspace target.
+        let args = parse_payload(&[
+            "ibsr", "collect-payload", "-p", "8899", "--target-pid", "0",
+        ]);
+        assert_eq!(args.validate(), Err(CliError::InvalidTargetPid(0)));
     }
 
     // ===========================================

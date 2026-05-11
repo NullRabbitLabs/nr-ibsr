@@ -142,6 +142,11 @@ where
         .duration_sec
         .map(|d| d.checked_div(args.window_sec).unwrap_or(1));
 
+    // Resolve --target-pid (or --target-process-name) into an optional
+    // HostSampler. The sampler is the wiring point for the v7 host
+    // block; absent it, snapshots emit without `host`.
+    let host_sampler = crate::payload_collector::resolve_host_sampler(args);
+
     let loop_result = collect_payload_loop(
         &mut event_source,
         clock,
@@ -153,6 +158,7 @@ where
         shutdown,
         &run_dir,
         max_windows,
+        host_sampler.as_ref(),
     );
 
     logger.info(&format!(

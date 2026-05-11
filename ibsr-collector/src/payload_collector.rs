@@ -32,9 +32,10 @@ use std::time::{Duration, Instant};
 use ibsr_bpf::decode_event;
 use ibsr_clock::Clock;
 use ibsr_fs::{rotate_snapshots, Filesystem, FsError, RotationConfig, SnapshotWriter};
-use ibsr_schema::{ResponseAggregates, Snapshot};
+use ibsr_schema::{HostTelemetry, ResponseAggregates, Snapshot};
 use thiserror::Error;
 
+use crate::host_telemetry::{self, HostSampler, HostSnapshot};
 use crate::payload::{PayloadEvent, PayloadHandler};
 use crate::signal::ShutdownCheck;
 
@@ -160,20 +161,24 @@ impl PayloadEventSource for MockPayloadEventSource {
     }
 }
 
-/// Build a v6 Snapshot from a window's `ResponseAggregates`. If the
-/// aggregates are empty (zero pairs), emit a v6 snapshot WITHOUT the
-/// `resp_aggregates` field (Strict-equivalent shape).
+/// Build a v7 Snapshot from a window's `ResponseAggregates` and an
+/// optional `HostTelemetry` block. If the aggregates are empty (zero
+/// pairs), the `resp_aggregates` field is omitted (Strict-equivalent
+/// shape). The host block is attached when `host` is `Some` regardless
+/// of whether response pairs were observed (operators may want host-
+/// only emit on idle windows).
 pub fn build_payload_snapshot<C: Clock>(
     aggregates: ResponseAggregates,
     config: &PayloadCollectorConfig,
     clock: &C,
     base_ts_unix_sec: u64,
+    host: Option<HostTelemetry>,
 ) -> Snapshot {
     // ShadowPayload mode doesn't carry per-(src_ip, dst_port) counter
     // buckets — those are StrictCounter mode's domain. Emit an empty
     // bucket list; downstream consumers infer mode from the presence
     // of `resp_aggregates`.
-    let snapshot = Snapshot::new(
+    let mut snapshot = Snapshot::new(
         clock.now_unix_sec(),
         &config.server_ports,
         Vec::new(),
@@ -182,11 +187,13 @@ pub fn build_payload_snapshot<C: Clock>(
         base_ts_unix_sec,
     );
 
-    if aggregates.count == 0 {
-        snapshot
-    } else {
-        snapshot.with_resp_aggregates(aggregates)
+    if aggregates.count > 0 {
+        snapshot = snapshot.with_resp_aggregates(aggregates);
     }
+    if let Some(h) = host {
+        snapshot = snapshot.with_host(h);
+    }
+    snapshot
 }
 
 /// Run one window's worth of event polling + snapshot emission.
@@ -211,6 +218,7 @@ pub fn collect_payload_window<E, C, W, F, S>(
     window_deadline: Instant,
     shutdown: &S,
     output_dir: &Path,
+    host_sampler: Option<&HostSampler>,
 ) -> Result<PayloadWindowResult, PayloadCollectorError>
 where
     E: PayloadEventSource,
@@ -222,6 +230,13 @@ where
     let mut decode_errors: u64 = 0;
     let mut events_filtered: u64 = 0;
     let mut source_errors: u64 = 0;
+
+    // Capture host-telemetry baseline at window start. Failure (target
+    // process is gone, /proc unreadable, non-Linux dev host) is
+    // tolerated: the end-of-window capture re-checks, and the
+    // resulting snapshot simply omits the host block.
+    let host_baseline: Option<HostSnapshot> = host_sampler
+        .and_then(|s| s.capture().ok());
 
     // Loop invariant: always poll at least once per iteration, even
     // when deadline has already passed. This ensures queued events get
@@ -275,8 +290,20 @@ where
     let n_pairs = aggregates.count;
     let has_aggregates = aggregates.count > 0;
 
+    // Capture end-of-window host snapshot and compute delta. Both the
+    // baseline and end captures must succeed for the host block to
+    // emit; otherwise the snapshot omits it (target gone mid-window /
+    // /proc denied / non-Linux).
+    let host_block: Option<HostTelemetry> = match (host_sampler, &host_baseline) {
+        (Some(sampler), Some(baseline)) => sampler
+            .capture()
+            .ok()
+            .map(|end| host_telemetry::delta(baseline, &end, host_telemetry::CLOCK_TICKS_PER_SEC)),
+        _ => None,
+    };
+
     let snapshot =
-        build_payload_snapshot(aggregates, config, clock, base_ts_unix_sec);
+        build_payload_snapshot(aggregates, config, clock, base_ts_unix_sec, host_block);
     let timestamp = snapshot.ts_unix_sec;
 
     writer.write(&snapshot)?;
@@ -315,6 +342,55 @@ pub fn args_to_config<C: Clock>(
 /// inference path. Pulled from validated `CollectPayloadArgs`.
 pub fn args_to_server_ports(args: &crate::cli::CollectPayloadArgs) -> HashSet<u16> {
     args.get_all_ports().into_iter().collect()
+}
+
+/// Resolve the optional host-telemetry target into a [`HostSampler`].
+///
+/// - `--target-pid` → `Some(HostSampler::new(pid))`.
+/// - `--target-process-name` → walk `/proc` for the first PID whose
+///   `comm` matches; `None` if no match (snapshot omits host block).
+/// - Neither set → `None`.
+///
+/// Process-name resolution is Linux-only; on non-Linux dev hosts the
+/// name path returns `None`. Validation has already rejected the
+/// "both flags set" case at CLI parse time, so this fn just picks
+/// whichever was provided.
+pub fn resolve_host_sampler(args: &crate::cli::CollectPayloadArgs) -> Option<HostSampler> {
+    if let Some(pid) = args.target_pid {
+        return Some(HostSampler::new(pid));
+    }
+    if let Some(name) = args.target_process_name.as_deref() {
+        return resolve_pid_from_name(name).map(HostSampler::new);
+    }
+    None
+}
+
+/// Walk `/proc` and return the first PID whose `comm` (process name,
+/// truncated to 15 chars by the kernel) matches `name`. Linux-only;
+/// returns `None` on non-Linux dev hosts.
+#[cfg(target_os = "linux")]
+fn resolve_pid_from_name(name: &str) -> Option<u32> {
+    let dir = std::fs::read_dir("/proc").ok()?;
+    for entry in dir.flatten() {
+        let file_name = entry.file_name();
+        let pid_str = file_name.to_str()?;
+        let pid: u32 = match pid_str.parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let comm_path = format!("/proc/{}/comm", pid);
+        if let Ok(comm) = std::fs::read_to_string(&comm_path) {
+            if comm.trim() == name {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn resolve_pid_from_name(_name: &str) -> Option<u32> {
+    None
 }
 
 /// Outcome of a multi-window collection run.
@@ -362,6 +438,7 @@ pub fn collect_payload_loop<E, C, W, F, S>(
     shutdown: &S,
     output_dir: &Path,
     max_windows: Option<u64>,
+    host_sampler: Option<&HostSampler>,
 ) -> PayloadLoopResult
 where
     E: PayloadEventSource,
@@ -396,6 +473,7 @@ where
             deadline,
             shutdown,
             output_dir,
+            host_sampler,
         ) {
             Ok(window_result) => {
                 result.windows_completed += 1;
@@ -558,7 +636,7 @@ mod tests {
         let cfg = config(vec![8899]);
         let clock = MockClock::new(HOUR_1);
         let agg = ResponseAggregates::from_pairs(&[]);
-        let snap = build_payload_snapshot(agg, &cfg, &clock, HOUR_0);
+        let snap = build_payload_snapshot(agg, &cfg, &clock, HOUR_0, None);
         assert_eq!(snap.version, ibsr_schema::SCHEMA_VERSION);
         assert!(snap.resp_aggregates.is_none());
         assert_eq!(snap.ts_unix_sec, HOUR_1);
@@ -570,7 +648,7 @@ mod tests {
         let cfg = config(vec![8899]);
         let clock = MockClock::new(HOUR_1);
         let agg = ResponseAggregates::from_pairs(&[(100, 200), (50, 250)]);
-        let snap = build_payload_snapshot(agg.clone(), &cfg, &clock, HOUR_0);
+        let snap = build_payload_snapshot(agg.clone(), &cfg, &clock, HOUR_0, None);
         assert_eq!(snap.version, ibsr_schema::SCHEMA_VERSION);
         assert_eq!(snap.resp_aggregates, Some(agg));
     }
@@ -580,9 +658,126 @@ mod tests {
         let cfg = config(vec![8899, 9000]);
         let clock = MockClock::new(HOUR_1);
         let agg = ResponseAggregates::from_pairs(&[]);
-        let snap = build_payload_snapshot(agg, &cfg, &clock, HOUR_0);
+        let snap = build_payload_snapshot(agg, &cfg, &clock, HOUR_0, None);
         assert!(snap.dst_ports.contains(&8899));
         assert!(snap.dst_ports.contains(&9000));
+    }
+
+    #[test]
+    fn build_payload_snapshot_attaches_host_block_when_provided() {
+        let cfg = config(vec![8899]);
+        let clock = MockClock::new(HOUR_1);
+        let agg = ResponseAggregates::from_pairs(&[]);
+        let host = ibsr_schema::HostTelemetry {
+            cpu_mean: Some(50.0),
+            rss_max: Some(1024),
+            ..Default::default()
+        };
+        let snap = build_payload_snapshot(agg, &cfg, &clock, HOUR_0, Some(host.clone()));
+        assert_eq!(snap.host, Some(host));
+    }
+
+    #[test]
+    fn build_payload_snapshot_omits_host_block_when_none() {
+        let cfg = config(vec![8899]);
+        let clock = MockClock::new(HOUR_1);
+        let agg = ResponseAggregates::from_pairs(&[]);
+        let snap = build_payload_snapshot(agg, &cfg, &clock, HOUR_0, None);
+        assert!(snap.host.is_none(),
+            "no host telemetry input → snapshot.host stays None");
+    }
+
+    #[test]
+    fn resolve_host_sampler_picks_target_pid_when_set() {
+        let args = make_args(&[("--target-pid", "1234")]);
+        let sampler = resolve_host_sampler(&args).expect("sampler");
+        assert_eq!(sampler.pid(), 1234);
+    }
+
+    #[test]
+    fn resolve_host_sampler_returns_none_when_neither_flag_set() {
+        let args = make_args(&[]);
+        assert!(resolve_host_sampler(&args).is_none(),
+            "no --target-pid + no --target-process-name → no sampler");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn collect_payload_window_emits_host_block_for_self_sampler() {
+        // Sampling /proc/self should always succeed (the test process
+        // is alive). The end-of-window capture also succeeds, and the
+        // resulting snapshot carries a populated host block.
+        let mut src = MockPayloadEventSource::from_batches(vec![]);
+        let clock = MockClock::new(HOUR_1);
+        let fs = Arc::new(MockFilesystem::new());
+        let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir());
+        let cfg = config(vec![8899]);
+        let mut handler = PayloadHandler::new(64);
+        let server_ports = server_ports_set(&[8899]);
+        let shutdown = crate::signal::NeverShutdown;
+        let deadline = Instant::now();
+        let pid = std::process::id();
+        let sampler = HostSampler::new(pid);
+
+        let _result = collect_payload_window(
+            &mut src,
+            &clock,
+            &writer,
+            &ArcFs(fs.clone()),
+            &mut handler,
+            &server_ports,
+            &cfg,
+            HOUR_0,
+            deadline,
+            &shutdown,
+            &output_dir(),
+            Some(&sampler),
+        )
+        .expect("collect_payload_window");
+
+        let snaps = parse_snapshots_from(&fs);
+        assert_eq!(snaps.len(), 1);
+        let host = snaps[0].host.as_ref()
+            .expect("snapshot.host should be populated for /proc/self sampler");
+        assert!(host.rss_max.is_some(), "rss_max should be populated for self");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn collect_payload_window_omits_host_block_for_nonexistent_pid() {
+        // A nonexistent target PID — both captures fail; snapshot
+        // omits the host block (graceful degradation).
+        let mut src = MockPayloadEventSource::from_batches(vec![]);
+        let clock = MockClock::new(HOUR_1);
+        let fs = Arc::new(MockFilesystem::new());
+        let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir());
+        let cfg = config(vec![8899]);
+        let mut handler = PayloadHandler::new(64);
+        let server_ports = server_ports_set(&[8899]);
+        let shutdown = crate::signal::NeverShutdown;
+        let deadline = Instant::now();
+        let sampler = HostSampler::new(2_147_483_647);
+
+        let _result = collect_payload_window(
+            &mut src,
+            &clock,
+            &writer,
+            &ArcFs(fs.clone()),
+            &mut handler,
+            &server_ports,
+            &cfg,
+            HOUR_0,
+            deadline,
+            &shutdown,
+            &output_dir(),
+            Some(&sampler),
+        )
+        .expect("collect_payload_window");
+
+        let snaps = parse_snapshots_from(&fs);
+        assert_eq!(snaps.len(), 1);
+        assert!(snaps[0].host.is_none(),
+            "nonexistent PID → host block omitted");
     }
 
     // ===========================================
@@ -616,7 +811,7 @@ mod tests {
             HOUR_0,
             deadline,
             &shutdown,
-            &output_dir(),
+            &output_dir(),            None,
         )
         .expect("collect_payload_window");
 
@@ -710,7 +905,7 @@ mod tests {
             HOUR_0,
             Instant::now(),
             &shutdown,
-            &output_dir(),
+            &output_dir(),            None,
         )
         .expect("loop must not propagate event-source errors");
         assert!(result.source_errors >= 1);
@@ -743,7 +938,7 @@ mod tests {
             HOUR_0,
             deadline,
             &shutdown,
-            &output_dir(),
+            &output_dir(),            None,
         )
         .expect("clean shutdown");
         let snaps = parse_snapshots_from(&fs);
@@ -777,7 +972,7 @@ mod tests {
             HOUR_0,
             Instant::now(),
             &shutdown,
-            &output_dir(),
+            &output_dir(),            None,
         );
         match result {
             Err(PayloadCollectorError::Write(_)) => {}
@@ -922,7 +1117,7 @@ mod tests {
             HOUR_0,
             deadline,
             &shutdown,
-            &output_dir(),
+            &output_dir(),            None,
         )
         .expect("shutdown should not error");
         assert_eq!(result.n_pairs, 1, "events drained before shutdown");
@@ -966,7 +1161,7 @@ mod tests {
             &cfg,
             &shutdown,
             &output_dir(),
-            Some(3),
+            Some(3),            None,
         );
         assert_eq!(result.windows_completed, 3);
         assert_eq!(result.windows_failed, 0);
@@ -1005,7 +1200,7 @@ mod tests {
             &cfg,
             &shutdown,
             &output_dir(),
-            Some(5),
+            Some(5),            None,
         );
         // No window writes succeeded, but the loop ran 5 cycles and
         // didn't panic — the no-die contract holds.
@@ -1049,7 +1244,7 @@ mod tests {
             &cfg,
             &shutdown,
             &output_dir(),
-            Some(3),
+            Some(3),            None,
         );
         // All windows complete (source error doesn't fail the WINDOW —
         // the snapshot still gets written), and we tally source_errors.
@@ -1086,6 +1281,7 @@ mod tests {
             &shutdown,
             &output_dir(),
             None, // unbounded — only shutdown terminates
+            None, // host_sampler
         );
         // Shutdown short-circuits before the first window; nothing is
         // emitted but we don't hang.
@@ -1128,7 +1324,7 @@ mod tests {
             &cfg,
             &shutdown,
             &output_dir(),
-            Some(2),
+            Some(2),            None,
         );
         assert_eq!(result.windows_completed, 2);
         assert_eq!(result.total_pairs, 1, "one pair across two windows");
@@ -1166,7 +1362,7 @@ mod tests {
             &cfg,
             &shutdown,
             &output_dir(),
-            Some(2),
+            Some(2),            None,
         );
         assert_eq!(result.windows_completed, 2);
         assert!(result.total_decode_errors >= 3,
@@ -1269,7 +1465,7 @@ mod tests {
             &cfg,
             &shutdown,
             &output_dir(),
-            Some(1),
+            Some(1),            None,
         );
         assert_eq!(result.windows_completed, 1);
         assert_eq!(result.total_pairs, 1);
@@ -1314,7 +1510,7 @@ mod tests {
             HOUR_0,
             Instant::now(),
             &shutdown,
-            &output_dir(),
+            &output_dir(),            None,
         )
         .expect("orchestrator must consume QueueBackedEventSource");
 
@@ -1351,7 +1547,7 @@ mod tests {
             &cfg,
             &shutdown,
             &output_dir(),
-            Some(0),
+            Some(0),            None,
         );
         assert_eq!(result.windows_completed, 0);
         assert_eq!(result.windows_failed, 0);

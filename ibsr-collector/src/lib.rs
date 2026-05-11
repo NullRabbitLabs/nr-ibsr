@@ -9,6 +9,7 @@ pub mod cli;
 pub mod collector;
 pub mod commands;
 pub mod exit;
+pub mod host_telemetry;
 pub mod io;
 pub mod logger;
 pub mod payload;
