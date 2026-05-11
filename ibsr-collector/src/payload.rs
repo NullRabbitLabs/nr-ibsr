@@ -504,14 +504,31 @@ fn append_capped(buf: &mut Vec<u8>, truncated: &mut bool, bytes: &[u8]) {
 }
 
 /// Try to parse `body` as a JSON-RPC envelope. Returns:
-/// - `Some(Some(code))` if the body is valid JSON with a non-null
-///   `error.code: i32` field.
-/// - `Some(None)` if the body is valid JSON-RPC but with no error
+/// - `Some(Some(code))` if the body is a JSON-RPC envelope with a
+///   non-null `error.code: i32` field.
+/// - `Some(None)` if the body is a JSON-RPC envelope without an error
 ///   (i.e. a result envelope, or an error field with null/missing code).
-/// - `None` if the body did not parse as JSON.
+/// - `None` if the body did not parse as a JSON-RPC envelope — either
+///   non-JSON OR valid JSON that isn't a JSON-RPC envelope (REST API
+///   responses, generic JSON payloads).
+///
+/// The presence of the `jsonrpc` field is required as the JSON-RPC
+/// discriminator. Without it, the response could be any JSON document
+/// (`{"foo":"bar"}`, REST responses, etc.) and counting it as a parsed
+/// envelope would inflate the `n_with_parsed_envelope` denominator that
+/// drives `rpc_error_frac`. Blockchain JSON-RPC servers (Solana, Sui,
+/// etc.) all emit `"jsonrpc":"2.0"`, so requiring this field is a
+/// tight, safe heuristic. JSON-RPC 1.0 responses (which omit `jsonrpc`)
+/// are out of scope for v7.
 fn parse_jsonrpc_envelope(body: &[u8]) -> Option<Option<i32>> {
     #[derive(serde::Deserialize)]
     struct Envelope {
+        // Required: presence-only check (we don't constrain the value
+        // to "2.0" so non-spec emitters with "1.0" or even "" still
+        // parse). The discriminator is purely "did the response self-
+        // identify as JSON-RPC?".
+        #[allow(dead_code)]
+        jsonrpc: String,
         #[serde(default)]
         error: Option<RpcError>,
     }
@@ -798,6 +815,7 @@ impl PayloadHandler {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -1657,6 +1675,56 @@ mod tests {
                 assert!(!pair.rpc_envelope_parsed,
                     "HTML body should NOT parse as JSON-RPC envelope");
                 assert_eq!(pair.rpc_error_code, None);
+            }
+            other => panic!("expected paired RpcPair, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn non_rpc_json_response_marks_envelope_unparsed() {
+        // Valid JSON that isn't a JSON-RPC envelope (REST API response,
+        // accidental JSON, etc.) must NOT count as a parsed envelope —
+        // otherwise n_with_parsed_envelope inflates and the
+        // rpc_error_frac denominator becomes wrong. The discriminator
+        // is the `jsonrpc` field; bodies without it are non-envelope.
+        let mut h = PayloadHandler::new(64);
+        let req = b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nBODY";
+        let body = b"{\"foo\":\"bar\",\"data\":[1,2,3]}";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            body.len(),
+        );
+        let mut resp_full = resp.as_bytes().to_vec();
+        resp_full.extend_from_slice(body);
+        h.feed(&ev(Direction::ToServer, req));
+        match h.feed(&ev(Direction::FromServer, &resp_full)) {
+            FeedOutcome::MessageComplete(Some(pair)) => {
+                assert!(!pair.rpc_envelope_parsed,
+                    "valid JSON without a `jsonrpc` field should NOT count as a JSON-RPC envelope");
+                assert_eq!(pair.rpc_error_code, None);
+            }
+            other => panic!("expected paired RpcPair, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn empty_json_object_response_marks_envelope_unparsed() {
+        // The pathological case: body is literally `{}`. Without the
+        // jsonrpc discriminator this is also rejected as non-envelope.
+        let mut h = PayloadHandler::new(64);
+        let req = b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nBODY";
+        let body = b"{}";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            body.len(),
+        );
+        let mut resp_full = resp.as_bytes().to_vec();
+        resp_full.extend_from_slice(body);
+        h.feed(&ev(Direction::ToServer, req));
+        match h.feed(&ev(Direction::FromServer, &resp_full)) {
+            FeedOutcome::MessageComplete(Some(pair)) => {
+                assert!(!pair.rpc_envelope_parsed,
+                    "bare `{{}}` body should NOT parse as JSON-RPC envelope");
             }
             other => panic!("expected paired RpcPair, got {:?}", other),
         }

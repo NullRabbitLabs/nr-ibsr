@@ -186,8 +186,15 @@ impl ResponseAggregates {
     /// - `resp_bytes_total`: sum of all response_bytes.
     ///
     /// Thin wrapper over `from_triples_and_metadata` with no timing or
-    /// status/error metadata; preferred call-site for callers that only have
-    /// byte-pair data.
+    /// status/error metadata. Preserved as the offline-extractor parity
+    /// constructor (matches `responses.py` byte-aggregate contract); new
+    /// call-sites should prefer `from_triples_and_metadata` so the v7
+    /// timing / status / RPC-error fields flow through.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use `from_triples_and_metadata` for v7 timing/status/error fields. \
+                `from_pairs` is preserved for the offline-extractor parity contract only."
+    )]
     pub fn from_pairs(pairs: &[(u64, u64)]) -> Self {
         let triples: Vec<(u64, u64, Option<u64>)> =
             pairs.iter().map(|(q, r)| (*q, *r, None)).collect();
@@ -764,6 +771,7 @@ pub fn string_to_ip_u32(s: &str) -> Result<u32, SnapshotError> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

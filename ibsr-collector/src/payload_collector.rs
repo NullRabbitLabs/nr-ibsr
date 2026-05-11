@@ -373,7 +373,11 @@ fn resolve_pid_from_name(name: &str) -> Option<u32> {
     let dir = std::fs::read_dir("/proc").ok()?;
     for entry in dir.flatten() {
         let file_name = entry.file_name();
-        let pid_str = file_name.to_str()?;
+        let Some(pid_str) = file_name.to_str() else {
+            // Non-UTF8 dirent (extremely rare on /proc, but `?` here
+            // would abort the entire walk early on first occurrence).
+            continue;
+        };
         let pid: u32 = match pid_str.parse() {
             Ok(p) => p,
             Err(_) => continue,
@@ -502,6 +506,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use ibsr_bpf::{
@@ -699,6 +704,33 @@ mod tests {
         let args = make_args(&[]);
         assert!(resolve_host_sampler(&args).is_none(),
             "no --target-pid + no --target-process-name → no sampler");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_host_sampler_resolves_own_process_name() {
+        // Resolve our own /proc/self/comm and pass it as --target-process-name.
+        // The walk should find a matching PID (our own) and produce a sampler.
+        let own_comm = std::fs::read_to_string("/proc/self/comm")
+            .expect("read /proc/self/comm")
+            .trim()
+            .to_string();
+        let args = make_args(&[("--target-process-name", &own_comm)]);
+        let sampler = resolve_host_sampler(&args)
+            .expect("name resolution must produce a sampler for our own comm");
+        // The resolved PID need not equal std::process::id() — comm-collisions
+        // are possible (other test runners with the same name, etc.); what we
+        // assert is that *some* matching process was found.
+        assert!(sampler.pid() > 0, "resolved sampler must carry a valid PID");
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn resolve_host_sampler_target_process_name_returns_none_on_non_linux() {
+        // Non-Linux: /proc walk is unavailable; the name branch returns None.
+        let args = make_args(&[("--target-process-name", "anything")]);
+        assert!(resolve_host_sampler(&args).is_none(),
+            "non-Linux dev hosts must not return a sampler for --target-process-name");
     }
 
     #[cfg(target_os = "linux")]
