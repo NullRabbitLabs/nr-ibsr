@@ -5,6 +5,6 @@
 mod snapshot;
 
 pub use snapshot::{
-    BucketEntry, KeyType, ResponseAggregates, Snapshot, SnapshotError, SCHEMA_VERSION,
-    SUPPORTED_VERSIONS,
+    BucketEntry, KeyType, ResponseAggregates, RpcMetadata, Snapshot, SnapshotError, StatusCounts,
+    SCHEMA_VERSION, SUPPORTED_VERSIONS,
 };

@@ -554,24 +554,24 @@ mod tests {
     // ===========================================
 
     #[test]
-    fn empty_aggregates_yields_v6_snapshot_without_resp_block() {
+    fn empty_aggregates_yields_current_schema_snapshot_without_resp_block() {
         let cfg = config(vec![8899]);
         let clock = MockClock::new(HOUR_1);
         let agg = ResponseAggregates::from_pairs(&[]);
         let snap = build_payload_snapshot(agg, &cfg, &clock, HOUR_0);
-        assert_eq!(snap.version, 6);
+        assert_eq!(snap.version, ibsr_schema::SCHEMA_VERSION);
         assert!(snap.resp_aggregates.is_none());
         assert_eq!(snap.ts_unix_sec, HOUR_1);
         assert_eq!(snap.run_id, HOUR_0);
     }
 
     #[test]
-    fn nonempty_aggregates_yields_v6_snapshot_with_resp_block() {
+    fn nonempty_aggregates_yields_current_schema_snapshot_with_resp_block() {
         let cfg = config(vec![8899]);
         let clock = MockClock::new(HOUR_1);
         let agg = ResponseAggregates::from_pairs(&[(100, 200), (50, 250)]);
         let snap = build_payload_snapshot(agg.clone(), &cfg, &clock, HOUR_0);
-        assert_eq!(snap.version, 6);
+        assert_eq!(snap.version, ibsr_schema::SCHEMA_VERSION);
         assert_eq!(snap.resp_aggregates, Some(agg));
     }
 
@@ -625,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_window_writes_v6_snapshot_with_no_aggregates() {
+    fn empty_window_writes_current_schema_snapshot_with_no_aggregates() {
         let (result, snaps) = run_one_window(vec![]);
         assert_eq!(result.n_pairs, 0);
         assert!(!result.has_aggregates);
@@ -633,7 +633,7 @@ mod tests {
         assert_eq!(result.events_filtered, 0);
         assert_eq!(result.source_errors, 0);
         assert_eq!(snaps.len(), 1);
-        assert_eq!(snaps[0].version, 6);
+        assert_eq!(snaps[0].version, ibsr_schema::SCHEMA_VERSION);
         assert!(snaps[0].resp_aggregates.is_none());
     }
 
@@ -791,7 +791,12 @@ mod tests {
         // exactly match `ResponseAggregates::from_pairs`. This is the
         // bridge contract from ShadowPayload userspace to the Phase 1
         // close-gate cross-validation.
-        let pairs = [(100u64, 200u64), (50, 250), (200, 600)];
+        //
+        // Pair values pick exact-decimal means: req sum=300/count=3 → 100.0,
+        // resp sum=1050/count=3 → 350.0. JSON-round-tripped f64 means in the
+        // live pipeline must equal the directly-computed means; non-clean
+        // divisors (e.g. sum=350) drift in the last bit through JSON.
+        let pairs = [(90u64, 200u64), (60, 250), (150, 600)];
         let mut batches: Vec<Vec<Vec<u8>>> = Vec::new();
         for (req_n, resp_n) in pairs.iter() {
             let req = format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n", req_n);
@@ -810,18 +815,25 @@ mod tests {
         }
         let (_result, snaps) = run_one_window(batches);
         let agg = snaps[0].resp_aggregates.as_ref().expect("aggregates");
-        // Strip port-cardinality fields for the resp.*-only comparison;
-        // those fields are populated by the userspace pipeline's
-        // observe_ports() path (handler now tracks every event's
-        // src/dst port for `pcap.unique_{src,dst}_ports`), which the
-        // offline `from_pairs` doesn't know about.
+        // Strip fields populated by per-event metadata (port tuples,
+        // HTTP status, JSON-RPC envelope, kernel timing) for the
+        // byte-aggregate-only comparison; offline `from_pairs` knows
+        // only request/response byte sizes. The byte aggregates are the
+        // V8 cipher-agnostic manifest contract that pins this test.
         let mut agg_for_resp_only = agg.clone();
         agg_for_resp_only.unique_dst_ports = None;
         agg_for_resp_only.unique_src_ports = None;
+        agg_for_resp_only.status_2xx_frac = None;
+        agg_for_resp_only.status_4xx_frac = None;
+        agg_for_resp_only.status_5xx_frac = None;
+        agg_for_resp_only.rpc_error_distinct_codes = None;
+        agg_for_resp_only.rpc_error_frac = None;
+        agg_for_resp_only.duration_ns_mean = None;
+        agg_for_resp_only.duration_ns_max = None;
         let expected_resp = ResponseAggregates::from_pairs(&[
-            (100, 200),
-            (50, 250),
-            (200, 600),
+            (90, 200),
+            (60, 250),
+            (150, 600),
         ]);
         assert_eq!(agg_for_resp_only, expected_resp,
             "ShadowPayload userspace pipeline must produce resp.* aggregates \

@@ -44,7 +44,7 @@
 //! and on idle timeout. Memory is bounded in userspace.
 
 use ibsr_bpf::{direction as raw_dir, DecodedEvent};
-use ibsr_schema::ResponseAggregates;
+use ibsr_schema::{ResponseAggregates, RpcMetadata, StatusCounts};
 use std::collections::{HashMap, HashSet};
 
 /// Maximum HTTP-head size we'll buffer per direction before giving up
@@ -61,11 +61,19 @@ pub const MAX_HTTP_HEADERS: usize = 64;
 /// non-HTTP traffic that never parses out.
 pub const MAX_DIRECTION_BUFFER_BYTES: usize = 1 * 1024 * 1024;
 
+/// Maximum response body bytes buffered per message for JSON-RPC envelope
+/// parsing. JSON-RPC error envelopes are tiny (~100 bytes); this is well
+/// above the practical envelope size while keeping per-flow memory
+/// bounded. Bodies that exceed this cap mark the buffer as truncated and
+/// the JSON-RPC parse is skipped — byte counting + timing still flow
+/// through unaffected.
+pub const RESP_BODY_BUFFER_CAP: usize = 8 * 1024;
+
 /// Canonical 5-tuple-sans-protocol identifier for a TCP connection.
 /// The same connection's two directions both map to the same `FlowKey`
 /// (the (src_ip, src_port) and (dst_ip, dst_port) pair is sorted
 /// lexicographically so both directions normalize to the same key).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FlowKey {
     pub low_addr: u128,
     pub high_addr: u128,
@@ -178,12 +186,33 @@ impl PayloadEvent {
 /// complete on the same flow. Bytes counts match offline
 /// `record_response(request_size_bytes=..., response_size_bytes=...)`
 /// — i.e. **HTTP body length**, not full message length.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RpcPair {
     pub flow: FlowKey,
     pub request_bytes: u64,
     pub response_bytes: u64,
     pub status_code: Option<u16>,
+
+    /// Timestamp (kernel `bpf_ktime_get_ns`) of the FIRST ToServer event
+    /// observed for this request. Used downstream to compute response
+    /// duration as `resp_completed_ns - req_started_ns`.
+    pub req_started_ns: u64,
+
+    /// Timestamp (kernel `bpf_ktime_get_ns`) of the FromServer event
+    /// that drove `body_remaining` to 0 — i.e. the event at which the
+    /// response message completed.
+    pub resp_completed_ns: u64,
+
+    /// True if the response body parsed cleanly as a JSON-RPC envelope.
+    /// Used by the aggregator's `n_with_parsed_envelope` denominator
+    /// (drives `rpc_error_frac` / `rpc_error_distinct_codes` from
+    /// `None` to populated). False for non-JSON / truncated bodies.
+    pub rpc_envelope_parsed: bool,
+
+    /// JSON-RPC `error.code` value if the response carried a non-null
+    /// `error` field. `None` if the envelope had no error or did not
+    /// parse. Implies `rpc_envelope_parsed == true`.
+    pub rpc_error_code: Option<i32>,
 }
 
 /// Result of `FlowReassembler::feed` — what to do with the consumed event.
@@ -211,6 +240,11 @@ pub struct FlowReassembler {
     /// to-server message completes; cleared when a from-server
     /// response completes and pairs with it.
     pending_request_bytes: Option<u64>,
+    /// Timestamp (kernel `bpf_ktime_get_ns`) captured at the FIRST
+    /// ToServer event of the unpaired request. Stashed alongside
+    /// `pending_request_bytes` so it threads through to the eventual
+    /// `RpcPair.req_started_ns` when the matching response completes.
+    pending_request_started_ns: Option<u64>,
 }
 
 /// State for one direction of a flow.
@@ -234,6 +268,22 @@ struct DirectionState {
     /// arrived in the network (not just the sample). Reset alongside
     /// the rest of the per-message state.
     bytes_seen_pre_head: u64,
+    /// Timestamp (kernel `bpf_ktime_get_ns`) of the first event observed
+    /// for the current message on this direction. Captured at first
+    /// event arrival, cleared on `reset`. Threads through to
+    /// `RpcPair.req_started_ns` (ToServer) or unused (FromServer —
+    /// `resp_completed_ns` instead comes from the completing event).
+    first_event_ts_ns: Option<u64>,
+    /// Bounded buffer of response body bytes for JSON-RPC envelope
+    /// parsing. Populated only on the FromServer direction; capped at
+    /// `RESP_BODY_BUFFER_CAP`. When the cap is hit mid-stream,
+    /// `body_buf_truncated` is set and the JSON-RPC parse is skipped on
+    /// message completion. Empty/unused on the ToServer direction.
+    body_buf: Vec<u8>,
+    /// True if the body buffer hit `RESP_BODY_BUFFER_CAP` before the
+    /// message completed. Skips JSON-RPC envelope parse to avoid
+    /// false-positive parses against truncated JSON.
+    body_buf_truncated: bool,
 }
 
 impl DirectionState {
@@ -245,6 +295,9 @@ impl DirectionState {
         self.body_len_total = None;
         self.status_code = None;
         self.bytes_seen_pre_head = 0;
+        self.first_event_ts_ns = None;
+        self.body_buf.clear();
+        self.body_buf_truncated = false;
     }
 }
 
@@ -270,6 +323,13 @@ impl FlowReassembler {
             Direction::ToServer => (&mut self.to_server, false),
             Direction::FromServer => (&mut self.from_server, true),
         };
+
+        // Capture the per-message start timestamp on the FIRST event of
+        // each new message. Once set, subsequent body events do not
+        // overwrite it — the caller wants the FIRST event's ts.
+        if state.first_event_ts_ns.is_none() {
+            state.first_event_ts_ns = Some(ev.ts_ns);
+        }
 
         let head_was_parsed = state.body_remaining.is_some();
 
@@ -313,10 +373,22 @@ impl FlowReassembler {
                     let body_remaining_init =
                         (body_len as u64).saturating_sub(body_seen_so_far);
                     state.body_remaining = Some(body_remaining_init as usize);
+
+                    // Capture body bytes after the head into the JSON-RPC
+                    // body buffer (FromServer only). Bounded by
+                    // RESP_BODY_BUFFER_CAP. The body bytes already in
+                    // state.buf at this point are the chunk after head_bytes.
+                    if is_response && head_bytes <= state.buf.len() {
+                        append_capped(
+                            &mut state.body_buf,
+                            &mut state.body_buf_truncated,
+                            &state.buf[head_bytes..],
+                        );
+                    }
                     state.buf.clear();
 
                     if body_remaining_init == 0 {
-                        return self.complete_message(ev.flow, is_response);
+                        return self.complete_message(ev, is_response);
                     }
                     return FeedOutcome::HeadComplete;
                 }
@@ -327,18 +399,29 @@ impl FlowReassembler {
         // pure body — count its full network payload toward body
         // completion. The sample buffer is unused for body bytes; body
         // accounting is by network-actual `payload_len` only.
+        //
+        // For FromServer, additionally append sampled bytes to body_buf
+        // for JSON-RPC envelope parsing (bounded by cap).
+        if is_response {
+            append_capped(
+                &mut state.body_buf,
+                &mut state.body_buf_truncated,
+                &ev.payload,
+            );
+        }
+
         if let Some(remaining) = state.body_remaining.as_mut() {
             let consumed = std::cmp::min(*remaining as u64, ev.payload_len as u64) as usize;
             *remaining -= consumed;
             if *remaining == 0 {
-                return self.complete_message(ev.flow, is_response);
+                return self.complete_message(ev, is_response);
             }
         }
 
         FeedOutcome::HeadComplete
     }
 
-    fn complete_message(&mut self, flow: FlowKey, is_response: bool) -> FeedOutcome {
+    fn complete_message(&mut self, ev: &PayloadEvent, is_response: bool) -> FeedOutcome {
         // Snapshot direction state, then reset it for the next message
         // on this direction (HTTP/1.1 keep-alive).
         let body_len = if is_response {
@@ -347,6 +430,25 @@ impl FlowReassembler {
             self.to_server.body_len_total.unwrap_or(0)
         };
         let status = self.from_server.status_code;
+        let direction_first_event_ts = if is_response {
+            self.from_server.first_event_ts_ns.unwrap_or(0)
+        } else {
+            self.to_server.first_event_ts_ns.unwrap_or(0)
+        };
+
+        // Parse JSON-RPC envelope from the buffered response body if it
+        // fit in the cap. Truncated bodies are not parsed.
+        let (rpc_envelope_parsed, rpc_error_code) = if is_response
+            && !self.from_server.body_buf_truncated
+            && !self.from_server.body_buf.is_empty()
+        {
+            match parse_jsonrpc_envelope(&self.from_server.body_buf) {
+                Some(error_code) => (true, error_code),
+                None => (false, None),
+            }
+        } else {
+            (false, None)
+        };
 
         if is_response {
             self.from_server.reset();
@@ -355,23 +457,71 @@ impl FlowReassembler {
         }
 
         if !is_response {
-            // Request completed — stash its body size, await response.
+            // Request completed — stash its body size + start ts; await response.
             self.pending_request_bytes = Some(body_len);
+            self.pending_request_started_ns = Some(direction_first_event_ts);
             return FeedOutcome::MessageComplete(None);
         }
 
         // Response completed — pair with the pending request.
         let request_bytes = self.pending_request_bytes.take();
+        let req_started_ns = self.pending_request_started_ns.take().unwrap_or(0);
         match request_bytes {
             Some(req_bytes) => FeedOutcome::MessageComplete(Some(RpcPair {
-                flow,
+                flow: ev.flow,
                 request_bytes: req_bytes,
                 response_bytes: body_len,
                 status_code: status,
+                req_started_ns,
+                resp_completed_ns: ev.ts_ns,
+                rpc_envelope_parsed,
+                rpc_error_code,
             })),
             None => FeedOutcome::MessageComplete(None),
         }
     }
+}
+
+/// Append `bytes` to the response body buffer, capping at
+/// `RESP_BODY_BUFFER_CAP`. Sets `truncated` if the cap was hit before
+/// all input could be appended. Takes disjoint field references so it
+/// can be called from sites that hold an immutable borrow of another
+/// field on the same `DirectionState`.
+fn append_capped(buf: &mut Vec<u8>, truncated: &mut bool, bytes: &[u8]) {
+    if *truncated {
+        return;
+    }
+    let space = RESP_BODY_BUFFER_CAP.saturating_sub(buf.len());
+    if space == 0 {
+        *truncated = true;
+        return;
+    }
+    let take = space.min(bytes.len());
+    buf.extend_from_slice(&bytes[..take]);
+    if take < bytes.len() {
+        *truncated = true;
+    }
+}
+
+/// Try to parse `body` as a JSON-RPC envelope. Returns:
+/// - `Some(Some(code))` if the body is valid JSON with a non-null
+///   `error.code: i32` field.
+/// - `Some(None)` if the body is valid JSON-RPC but with no error
+///   (i.e. a result envelope, or an error field with null/missing code).
+/// - `None` if the body did not parse as JSON.
+fn parse_jsonrpc_envelope(body: &[u8]) -> Option<Option<i32>> {
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        #[serde(default)]
+        error: Option<RpcError>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RpcError {
+        #[serde(default)]
+        code: Option<i32>,
+    }
+    let env: Envelope = serde_json::from_slice(body).ok()?;
+    Some(env.error.and_then(|e| e.code))
 }
 
 #[derive(Debug)]
@@ -458,11 +608,27 @@ fn content_length(headers: &[httparse::Header<'_>]) -> usize {
 /// emit to match offline `summarise_pcap`'s `top_n=5` semantic.
 #[derive(Debug, Default)]
 pub struct WindowAggregator {
-    pairs: Vec<(u64, u64)>,
-    /// Populated optionally for diagnostics.
+    /// Per-pair (request_bytes, response_bytes, duration_ns) triples.
+    /// Duration is `Some` only when the pair carries non-zero req/resp
+    /// timestamps (i.e. monotonic kernel ts capture succeeded).
+    triples: Vec<(u64, u64, Option<u64>)>,
+
+    // HTTP status counters (drive ResponseAggregates::status_*_frac via
+    // StatusCounts). Denominator (`n_with_parsed_status`) excludes pairs
+    // whose response did not parse a status line — see
+    // `ResponseAggregates::from_triples_and_metadata` semantics.
     n_status_2xx: u64,
     n_status_4xx: u64,
     n_status_5xx: u64,
+    n_with_parsed_status: u64,
+
+    // JSON-RPC error metadata (drives ResponseAggregates::rpc_error_*).
+    // `n_with_parsed_envelope` is the gate that flips both rpc fields
+    // from None to populated.
+    rpc_error_codes: Vec<i32>,
+    rpc_error_count: u64,
+    n_with_parsed_envelope: u64,
+
     /// All distinct dst_port values observed in any TC payload event
     /// during the current window. Used for `pcap.unique_dst_ports`.
     dst_ports_seen: std::collections::HashSet<u16>,
@@ -477,13 +643,28 @@ impl WindowAggregator {
     }
 
     pub fn record(&mut self, pair: &RpcPair) {
-        self.pairs.push((pair.request_bytes, pair.response_bytes));
+        let duration_ns = if pair.resp_completed_ns > pair.req_started_ns {
+            Some(pair.resp_completed_ns - pair.req_started_ns)
+        } else {
+            None
+        };
+        self.triples.push((pair.request_bytes, pair.response_bytes, duration_ns));
+
         if let Some(code) = pair.status_code {
+            self.n_with_parsed_status += 1;
             match code {
                 200..=299 => self.n_status_2xx += 1,
                 400..=499 => self.n_status_4xx += 1,
                 500..=599 => self.n_status_5xx += 1,
                 _ => {}
+            }
+        }
+
+        if pair.rpc_envelope_parsed {
+            self.n_with_parsed_envelope += 1;
+            if let Some(code) = pair.rpc_error_code {
+                self.rpc_error_codes.push(code);
+                self.rpc_error_count += 1;
             }
         }
     }
@@ -500,21 +681,41 @@ impl WindowAggregator {
     /// Emit aggregates for the current window and reset state.
     /// Includes the port-cardinality features capped at 5.
     pub fn take_window(&mut self) -> ResponseAggregates {
+        let status_counts = StatusCounts {
+            n_2xx: self.n_status_2xx,
+            n_4xx: self.n_status_4xx,
+            n_5xx: self.n_status_5xx,
+            n_with_parsed_status: self.n_with_parsed_status,
+        };
+        let rpc_metadata = RpcMetadata {
+            error_codes: std::mem::take(&mut self.rpc_error_codes),
+            error_count: self.rpc_error_count,
+            n_with_parsed_envelope: self.n_with_parsed_envelope,
+        };
         let dst_card = self.dst_ports_seen.len();
         let src_card = self.src_ports_seen.len();
-        let agg = ResponseAggregates::from_pairs(&self.pairs)
-            .with_port_cardinalities(dst_card, src_card);
-        self.pairs.clear();
+        let agg = ResponseAggregates::from_triples_and_metadata(
+            &self.triples,
+            status_counts,
+            rpc_metadata,
+        )
+        .with_port_cardinalities(dst_card, src_card);
+
+        self.triples.clear();
         self.n_status_2xx = 0;
         self.n_status_4xx = 0;
         self.n_status_5xx = 0;
+        self.n_with_parsed_status = 0;
+        self.rpc_error_count = 0;
+        self.n_with_parsed_envelope = 0;
+        // rpc_error_codes already drained via std::mem::take above.
         self.dst_ports_seen.clear();
         self.src_ports_seen.clear();
         agg
     }
 
     pub fn n_pairs(&self) -> usize {
-        self.pairs.len()
+        self.triples.len()
     }
 }
 
@@ -839,13 +1040,20 @@ mod tests {
             h.feed(&ev(Direction::FromServer, &resp_body));
         }
         let agg_via_handler = h.take_window();
-        // Strip port-cardinality fields before comparing — they're
-        // populated by the handler path (which sees event ports) but
-        // not by from_pairs alone. Compare on the responses.* features
-        // that both paths compute.
+        // Strip fields the handler populates from per-event metadata
+        // (port tuples, HTTP status, JSON-RPC envelope, kernel timing)
+        // before comparing — `from_pairs` knows only byte counts.
+        // Compare on the byte-aggregate features that both paths compute.
         let mut agg_for_compare = agg_via_handler.clone();
         agg_for_compare.unique_dst_ports = None;
         agg_for_compare.unique_src_ports = None;
+        agg_for_compare.status_2xx_frac = None;
+        agg_for_compare.status_4xx_frac = None;
+        agg_for_compare.status_5xx_frac = None;
+        agg_for_compare.rpc_error_distinct_codes = None;
+        agg_for_compare.rpc_error_frac = None;
+        agg_for_compare.duration_ns_mean = None;
+        agg_for_compare.duration_ns_max = None;
         let agg_via_direct = ResponseAggregates::from_pairs(&[
             (100, 200), (50, 250), (200, 600),
         ]);
@@ -1013,12 +1221,14 @@ mod tests {
             request_bytes: 0,
             response_bytes: 100,
             status_code: Some(200),
+            ..Default::default()
         });
         agg.record(&RpcPair {
             flow: flow(),
             request_bytes: 50,
             response_bytes: 250,
             status_code: Some(200),
+            ..Default::default()
         });
         let r = agg.take_window();
         assert_eq!(r.count, 2);
@@ -1033,6 +1243,168 @@ mod tests {
         assert_eq!(r.count, 0);
         assert!(r.amp_ratio_mean.is_none());
         assert!(r.req_bytes_max.is_none());
+    }
+
+    #[test]
+    fn aggregator_emits_status_fractions_with_parsed_denominator() {
+        // 4 pairs all with parseable HTTP status: 2 × 2xx, 1 × 4xx, 1 × 5xx.
+        // Fractions denominator = n_with_parsed_status (4).
+        let mut agg = WindowAggregator::new();
+        for code in [200u16, 200, 404, 503] {
+            agg.record(&RpcPair {
+                flow: flow(),
+                request_bytes: 100,
+                response_bytes: 100,
+                status_code: Some(code),
+                ..Default::default()
+            });
+        }
+        let r = agg.take_window();
+        assert_eq!(r.status_2xx_frac, Some(0.5));
+        assert_eq!(r.status_4xx_frac, Some(0.25));
+        assert_eq!(r.status_5xx_frac, Some(0.25));
+    }
+
+    #[test]
+    fn aggregator_emits_status_fractions_skip_unparsed_responses() {
+        // 2 of 3 pairs had parseable status (200, 500); 1 was non-HTTP.
+        // Denominator = 2, not 3.
+        let mut agg = WindowAggregator::new();
+        agg.record(&RpcPair {
+            flow: flow(),
+            request_bytes: 100,
+            response_bytes: 100,
+            status_code: Some(200),
+            ..Default::default()
+        });
+        agg.record(&RpcPair {
+            flow: flow(),
+            request_bytes: 100,
+            response_bytes: 100,
+            status_code: Some(500),
+            ..Default::default()
+        });
+        agg.record(&RpcPair {
+            flow: flow(),
+            request_bytes: 100,
+            response_bytes: 100,
+            status_code: None, // non-HTTP / no status parsed
+            ..Default::default()
+        });
+        let r = agg.take_window();
+        // 1/2 = 0.5 (not 1/3)
+        assert_eq!(r.status_2xx_frac, Some(0.5));
+        assert_eq!(r.status_4xx_frac, Some(0.0));
+        assert_eq!(r.status_5xx_frac, Some(0.5));
+    }
+
+    #[test]
+    fn aggregator_emits_rpc_error_fields_when_envelopes_parsed() {
+        // 4 pairs all with parsed JSON-RPC envelopes: 2 errors with codes
+        // [-32602, -32601], 2 success.
+        let mut agg = WindowAggregator::new();
+        for (envelope_parsed, error_code) in [
+            (true, Some(-32602)),
+            (true, Some(-32601)),
+            (true, None),
+            (true, None),
+        ] {
+            agg.record(&RpcPair {
+                flow: flow(),
+                request_bytes: 100,
+                response_bytes: 100,
+                rpc_envelope_parsed: envelope_parsed,
+                rpc_error_code: error_code,
+                ..Default::default()
+            });
+        }
+        let r = agg.take_window();
+        // 2 distinct error codes
+        assert_eq!(r.rpc_error_distinct_codes, Some(2));
+        // 2 errors out of 4 pairs (denominator is `count`, not `n_with_parsed_envelope`)
+        assert_eq!(r.rpc_error_frac, Some(0.5));
+    }
+
+    #[test]
+    fn aggregator_emits_rpc_none_when_no_envelopes_parsed() {
+        // No pair had rpc_envelope_parsed=true.
+        let mut agg = WindowAggregator::new();
+        agg.record(&RpcPair {
+            flow: flow(),
+            request_bytes: 100,
+            response_bytes: 100,
+            ..Default::default()
+        });
+        let r = agg.take_window();
+        assert_eq!(r.rpc_error_distinct_codes, None);
+        assert_eq!(r.rpc_error_frac, None);
+    }
+
+    #[test]
+    fn aggregator_emits_duration_from_pair_timestamps() {
+        // Pairs with req_started_ns + resp_completed_ns → durations.
+        let mut agg = WindowAggregator::new();
+        agg.record(&RpcPair {
+            flow: flow(),
+            request_bytes: 100,
+            response_bytes: 100,
+            req_started_ns: 1_000_000,
+            resp_completed_ns: 3_000_000, // duration = 2_000_000
+            ..Default::default()
+        });
+        agg.record(&RpcPair {
+            flow: flow(),
+            request_bytes: 100,
+            response_bytes: 100,
+            req_started_ns: 5_000_000,
+            resp_completed_ns: 9_000_000, // duration = 4_000_000
+            ..Default::default()
+        });
+        let r = agg.take_window();
+        // mean = (2_000_000 + 4_000_000) / 2 = 3_000_000
+        assert_eq!(r.duration_ns_mean, Some(3_000_000));
+        // max = 4_000_000
+        assert_eq!(r.duration_ns_max, Some(4_000_000));
+    }
+
+    #[test]
+    fn aggregator_emits_duration_none_when_pairs_lack_timing() {
+        // Pairs with req_started_ns == resp_completed_ns == 0 (default) →
+        // no duration captured.
+        let mut agg = WindowAggregator::new();
+        agg.record(&RpcPair {
+            flow: flow(),
+            request_bytes: 100,
+            response_bytes: 100,
+            ..Default::default()
+        });
+        let r = agg.take_window();
+        assert_eq!(r.duration_ns_mean, None);
+        assert_eq!(r.duration_ns_max, None);
+    }
+
+    #[test]
+    fn aggregator_resets_metadata_state_after_take_window() {
+        // Pin: take_window resets ALL state, not just pairs/ports.
+        let mut agg = WindowAggregator::new();
+        agg.record(&RpcPair {
+            flow: flow(),
+            request_bytes: 100,
+            response_bytes: 100,
+            status_code: Some(200),
+            req_started_ns: 1_000,
+            resp_completed_ns: 5_000,
+            rpc_envelope_parsed: true,
+            rpc_error_code: Some(-32602),
+            ..Default::default()
+        });
+        let _ = agg.take_window();
+        let r2 = agg.take_window();
+        assert_eq!(r2.count, 0);
+        assert_eq!(r2.status_2xx_frac, None);
+        assert_eq!(r2.duration_ns_mean, None);
+        assert_eq!(r2.rpc_error_distinct_codes, None);
+        assert_eq!(r2.rpc_error_frac, None);
     }
 
     #[test]
@@ -1144,5 +1516,177 @@ mod tests {
         assert_eq!(agg.count, 1);
         assert_eq!(agg.req_bytes_max, Some(4));
         assert_eq!(agg.resp_bytes_max, Some(7));
+    }
+
+    // ===========================================
+    // Test Category — v7 timing + JSON-RPC error
+    // (closes A.2 of PLAN-PRODUCTION-FEATURE-SURFACE)
+    // ===========================================
+
+    fn ev_ts(direction: Direction, payload: &[u8], ts_ns: u64) -> PayloadEvent {
+        let mut e = ev(direction, payload);
+        e.ts_ns = ts_ns;
+        e
+    }
+
+    #[test]
+    fn pair_carries_request_start_timestamp_from_first_to_server_event() {
+        // Single-event request: req_started_ns = ts_ns of that event.
+        let mut h = PayloadHandler::new(64);
+        let req = b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nBODY";
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\npayload";
+        h.feed(&ev_ts(Direction::ToServer, req, 100_000));
+        match h.feed(&ev_ts(Direction::FromServer, resp, 500_000)) {
+            FeedOutcome::MessageComplete(Some(pair)) => {
+                assert_eq!(pair.req_started_ns, 100_000);
+            }
+            other => panic!("expected paired RpcPair, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pair_carries_response_complete_timestamp_from_completing_event() {
+        // resp_completed_ns must be the ts_ns of the FromServer event that
+        // drove `body_remaining` to 0 — not the first response event.
+        let mut h = PayloadHandler::new(64);
+        let req = b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nBODY";
+        // Response head + first 4 bytes of body in event 1, last 3 bytes in event 2.
+        let resp_head = b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\npayl";
+        let resp_tail = b"oad";
+        h.feed(&ev_ts(Direction::ToServer, req, 100_000));
+        let r1 = h.feed(&ev_ts(Direction::FromServer, resp_head, 500_000));
+        assert!(matches!(r1, FeedOutcome::HeadComplete));
+        match h.feed(&ev_ts(Direction::FromServer, resp_tail, 700_000)) {
+            FeedOutcome::MessageComplete(Some(pair)) => {
+                assert_eq!(pair.resp_completed_ns, 700_000,
+                    "resp_completed_ns must come from the body-completing event, not the head event");
+                assert_eq!(pair.req_started_ns, 100_000);
+            }
+            other => panic!("expected paired RpcPair, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pair_carries_first_event_ts_for_multi_event_request() {
+        // Multi-event request: req_started_ns = ts_ns of the FIRST ToServer
+        // event for this request, not subsequent ones.
+        let mut h = PayloadHandler::new(64);
+        let req_head = b"POST / HTTP/1.1\r\nContent-Length: 7\r\n\r\npay";
+        let req_tail = b"load";
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nBODY";
+        h.feed(&ev_ts(Direction::ToServer, req_head, 100_000));
+        h.feed(&ev_ts(Direction::ToServer, req_tail, 200_000));
+        match h.feed(&ev_ts(Direction::FromServer, resp, 500_000)) {
+            FeedOutcome::MessageComplete(Some(pair)) => {
+                assert_eq!(pair.req_started_ns, 100_000,
+                    "req_started_ns must be the first ToServer event's ts, not the later one");
+                assert_eq!(pair.resp_completed_ns, 500_000);
+            }
+            other => panic!("expected paired RpcPair, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn jsonrpc_error_envelope_populates_error_code() {
+        // JSON-RPC error envelope in response body → rpc_envelope_parsed=true,
+        // rpc_error_code=Some(-32602).
+        let mut h = PayloadHandler::new(64);
+        let req_body: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlock\"}";
+        let req_head = format!(
+            "POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            req_body.len(),
+        );
+        let mut req_full = req_head.as_bytes().to_vec();
+        req_full.extend_from_slice(req_body);
+        let body = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"Invalid params\"}}";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            body.len(),
+        );
+        let mut resp_full = resp.as_bytes().to_vec();
+        resp_full.extend_from_slice(body);
+        h.feed(&ev(Direction::ToServer, &req_full));
+        match h.feed(&ev(Direction::FromServer, &resp_full)) {
+            FeedOutcome::MessageComplete(Some(pair)) => {
+                assert!(pair.rpc_envelope_parsed,
+                    "JSON-RPC error envelope should mark rpc_envelope_parsed");
+                assert_eq!(pair.rpc_error_code, Some(-32602));
+            }
+            other => panic!("expected paired RpcPair, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn jsonrpc_success_envelope_marks_parsed_with_no_error() {
+        // JSON-RPC success envelope → rpc_envelope_parsed=true, rpc_error_code=None.
+        let mut h = PayloadHandler::new(64);
+        let req = b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nBODY";
+        let body = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":42}";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            body.len(),
+        );
+        let mut resp_full = resp.as_bytes().to_vec();
+        resp_full.extend_from_slice(body);
+        h.feed(&ev(Direction::ToServer, req));
+        match h.feed(&ev(Direction::FromServer, &resp_full)) {
+            FeedOutcome::MessageComplete(Some(pair)) => {
+                assert!(pair.rpc_envelope_parsed,
+                    "valid JSON-RPC success envelope should mark rpc_envelope_parsed");
+                assert_eq!(pair.rpc_error_code, None);
+            }
+            other => panic!("expected paired RpcPair, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn non_jsonrpc_response_marks_envelope_unparsed() {
+        // Non-JSON HTTP response → rpc_envelope_parsed=false, rpc_error_code=None.
+        let mut h = PayloadHandler::new(64);
+        let req = b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nBODY";
+        let body = b"<html>not json</html>";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            body.len(),
+        );
+        let mut resp_full = resp.as_bytes().to_vec();
+        resp_full.extend_from_slice(body);
+        h.feed(&ev(Direction::ToServer, req));
+        match h.feed(&ev(Direction::FromServer, &resp_full)) {
+            FeedOutcome::MessageComplete(Some(pair)) => {
+                assert!(!pair.rpc_envelope_parsed,
+                    "HTML body should NOT parse as JSON-RPC envelope");
+                assert_eq!(pair.rpc_error_code, None);
+            }
+            other => panic!("expected paired RpcPair, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn oversize_response_body_skips_jsonrpc_parse() {
+        // Body > RESP_BODY_BUFFER_CAP (8 KiB) → buffer truncates, parse skipped.
+        // Pair must still be produced (timing/status/bytes all work), just
+        // without JSON-RPC envelope info.
+        let mut h = PayloadHandler::new(64);
+        let req = b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nBODY";
+        let body_size: usize = 12 * 1024;
+        let body = vec![b'x'; body_size];
+        let resp_head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            body_size,
+        );
+        let mut resp_full = resp_head.as_bytes().to_vec();
+        resp_full.extend_from_slice(&body);
+        h.feed(&ev(Direction::ToServer, req));
+        match h.feed(&ev(Direction::FromServer, &resp_full)) {
+            FeedOutcome::MessageComplete(Some(pair)) => {
+                assert!(!pair.rpc_envelope_parsed,
+                    "truncated body should not be parsed as JSON-RPC");
+                assert_eq!(pair.rpc_error_code, None);
+                assert_eq!(pair.response_bytes, body_size as u64,
+                    "byte counting still works regardless of buffer truncation");
+            }
+            other => panic!("expected paired RpcPair, got {:?}", other),
+        }
     }
 }

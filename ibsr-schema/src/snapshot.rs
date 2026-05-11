@@ -3,6 +3,7 @@
 use serde::de::{self, MapAccess, Visitor};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashSet;
 use std::fmt;
 use std::net::Ipv4Addr;
 
@@ -16,11 +17,20 @@ use std::net::Ipv4Addr;
 ///            response-amplification aggregates: req_bytes_max, resp_bytes_max,
 ///            amp_ratio_{mean,median,max}). Field semantics match
 ///            nr-substrate's nr_training/features/responses.py exactly.
-pub const SCHEMA_VERSION: u32 = 6;
+/// Version 7: Extended ResponseAggregates with response timing
+///            (duration_ns_{mean,max}), HTTP status fractions
+///            (status_{2xx,4xx,5xx}_frac), JSON-RPC error metadata
+///            (rpc_error_distinct_codes, rpc_error_frac), and derived
+///            byte means (req_bytes_mean, resp_bytes_mean). All new
+///            fields are Option-typed with skip_serializing_if so v7
+///            readers parse v6 snapshots cleanly and v6 readers ignore
+///            the new keys.
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Schema versions this reader understands. v5 lacks resp_aggregates (StrictCounter
-/// mode); v6 may carry resp_aggregates (ShadowPayload mode).
-pub const SUPPORTED_VERSIONS: &[u32] = &[5, 6];
+/// mode); v6 may carry resp_aggregates (ShadowPayload mode); v7 adds optional
+/// timing/status/error/mean fields on resp_aggregates.
+pub const SUPPORTED_VERSIONS: &[u32] = &[5, 6, 7];
 
 /// Per-window response-amplification aggregates. Only emitted by ShadowPayload-mode
 /// collectors (`ibsr collect-payload`); absent on StrictCounter (`ibsr collect`)
@@ -78,6 +88,89 @@ pub struct ResponseAggregates {
     /// userspace-handler tracking path as `unique_dst_ports`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unique_src_ports: Option<u32>,
+
+    /// Mean response duration (ns), computed per-pair as
+    /// `resp_completed_ns - req_started_ns` and averaged over pairs with
+    /// a non-zero duration. None if no eligible pair existed. v7+.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ns_mean: Option<u64>,
+
+    /// Maximum response duration (ns) observed in window. None if count == 0
+    /// or no pair carried timing metadata. v7+.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ns_max: Option<u64>,
+
+    /// Fraction of responses with HTTP status 2xx, in [0, 1]. Denominator
+    /// is the count of responses with a parseable HTTP status line; non-HTTP
+    /// responses are excluded. None if no response carried a parseable
+    /// status. v7+.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_2xx_frac: Option<f64>,
+
+    /// Fraction of responses with HTTP status 4xx, in [0, 1]. Same
+    /// denominator semantics as `status_2xx_frac`. v7+.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_4xx_frac: Option<f64>,
+
+    /// Fraction of responses with HTTP status 5xx, in [0, 1]. Same
+    /// denominator semantics as `status_2xx_frac`. v7+.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_5xx_frac: Option<f64>,
+
+    /// Cardinality of distinct JSON-RPC `error.code` values observed in the
+    /// window, capped at 5 to match offline `summarise_responses` semantics.
+    /// None if no JSON-RPC error envelope was parsed. v7+.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpc_error_distinct_codes: Option<u32>,
+
+    /// Fraction of responses with a non-null JSON-RPC `error` field, in
+    /// [0, 1]. Denominator is `count` (all pairs in window). None if no
+    /// response was parseable as JSON-RPC. v7+.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpc_error_frac: Option<f64>,
+
+    /// Mean request size in bytes, derived as `sum(req_bytes) / count`.
+    /// None if count == 0. v7+.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub req_bytes_mean: Option<f64>,
+
+    /// Mean response size in bytes, derived as `sum(resp_bytes) / count`.
+    /// None if count == 0. v7+.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resp_bytes_mean: Option<f64>,
+}
+
+/// HTTP status-code counters for a window. Inputs to
+/// `ResponseAggregates::from_triples_and_metadata`.
+///
+/// `n_with_parsed_status` is the denominator used for `status_*_frac`: it is
+/// the count of responses where a `HTTP/x.y CCC ...` status line was parsed.
+/// Non-HTTP responses (raw JSON, non-conformant, mid-stream truncation) do
+/// not contribute to either numerator or denominator. When
+/// `n_with_parsed_status == 0`, all three status fractions emit as `None`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StatusCounts {
+    pub n_2xx: u64,
+    pub n_4xx: u64,
+    pub n_5xx: u64,
+    pub n_with_parsed_status: u64,
+}
+
+/// JSON-RPC error metadata for a window. Inputs to
+/// `ResponseAggregates::from_triples_and_metadata`.
+///
+/// `error_codes` is the full sequence of `error.code` values observed across
+/// responses (duplicates allowed; the constructor computes distinct cardinality
+/// and caps at 5 to match offline `summarise_responses` semantics).
+/// `error_count` is the count of responses with a non-null `error` field.
+/// `n_with_parsed_envelope` is the count of responses where JSON-RPC envelope
+/// parsing succeeded (whether or not `error` was present); when 0, both
+/// `rpc_error_distinct_codes` and `rpc_error_frac` emit as `None`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RpcMetadata {
+    pub error_codes: Vec<i32>,
+    pub error_count: u64,
+    pub n_with_parsed_envelope: u64,
 }
 
 impl ResponseAggregates {
@@ -89,8 +182,48 @@ impl ResponseAggregates {
     /// - `amp_ratio_*`: ratios are computed per-pair, but only over pairs where
     ///   request > 0; if no pair qualifies, all amp_ratio_* are None.
     /// - `resp_bytes_total`: sum of all response_bytes.
+    ///
+    /// Thin wrapper over `from_triples_and_metadata` with no timing or
+    /// status/error metadata; preferred call-site for callers that only have
+    /// byte-pair data.
     pub fn from_pairs(pairs: &[(u64, u64)]) -> Self {
-        if pairs.is_empty() {
+        let triples: Vec<(u64, u64, Option<u64>)> =
+            pairs.iter().map(|(q, r)| (*q, *r, None)).collect();
+        Self::from_triples_and_metadata(
+            &triples,
+            StatusCounts::default(),
+            RpcMetadata::default(),
+        )
+    }
+
+    /// Compute per-window aggregates from per-pair (request_bytes, response_bytes,
+    /// duration_ns) triples plus optional HTTP status / JSON-RPC error metadata.
+    ///
+    /// Field semantics (v7+):
+    /// - `count`, `resp_bytes_total`, `req_bytes_max`, `resp_bytes_max`,
+    ///   `amp_ratio_*`: identical to `from_pairs` semantics, derived from the
+    ///   first two elements of each triple.
+    /// - `req_bytes_mean` / `resp_bytes_mean`: arithmetic mean over all triples;
+    ///   `None` only if the triples slice is empty.
+    /// - `duration_ns_mean`: arithmetic mean over triples whose `Some(d)` carry
+    ///   `d > 0`; `None` if no such triple exists. 0-duration triples are
+    ///   excluded from the mean to keep the metric meaningful for sub-µs RPCs.
+    /// - `duration_ns_max`: max over triples carrying `Some(d)` (any value);
+    ///   `None` if no triple carried timing.
+    /// - `status_*_frac`: numerator from `status_counts.n_*xx`; denominator is
+    ///   `status_counts.n_with_parsed_status`. All three emit `None` when the
+    ///   denominator is 0 (non-HTTP windows or no status parsed).
+    /// - `rpc_error_distinct_codes`: cardinality of distinct values in
+    ///   `rpc_metadata.error_codes`, capped at 5 to match offline
+    ///   `summarise_responses`. `None` when `n_with_parsed_envelope == 0`.
+    /// - `rpc_error_frac`: `error_count / count`. `None` when
+    ///   `n_with_parsed_envelope == 0`.
+    pub fn from_triples_and_metadata(
+        triples: &[(u64, u64, Option<u64>)],
+        status_counts: StatusCounts,
+        rpc_metadata: RpcMetadata,
+    ) -> Self {
+        if triples.is_empty() {
             return Self {
                 count: 0,
                 resp_bytes_total: 0,
@@ -101,18 +234,33 @@ impl ResponseAggregates {
                 amp_ratio_max: None,
                 unique_dst_ports: None,
                 unique_src_ports: None,
+                duration_ns_mean: None,
+                duration_ns_max: None,
+                status_2xx_frac: None,
+                status_4xx_frac: None,
+                status_5xx_frac: None,
+                rpc_error_distinct_codes: None,
+                rpc_error_frac: None,
+                req_bytes_mean: None,
+                resp_bytes_mean: None,
             };
         }
 
-        let count = pairs.len() as u64;
-        let resp_bytes_total: u64 = pairs.iter().map(|(_, r)| *r).sum();
-        let req_bytes_max = pairs.iter().map(|(q, _)| *q).max();
-        let resp_bytes_max = pairs.iter().map(|(_, r)| *r).max();
+        let count = triples.len() as u64;
+        let count_f = count as f64;
 
-        let mut ratios: Vec<f64> = pairs
+        let resp_bytes_total: u64 = triples.iter().map(|(_, r, _)| *r).sum();
+        let req_bytes_total: u64 = triples.iter().map(|(q, _, _)| *q).sum();
+        let req_bytes_max = triples.iter().map(|(q, _, _)| *q).max();
+        let resp_bytes_max = triples.iter().map(|(_, r, _)| *r).max();
+
+        let req_bytes_mean = Some(req_bytes_total as f64 / count_f);
+        let resp_bytes_mean = Some(resp_bytes_total as f64 / count_f);
+
+        let mut ratios: Vec<f64> = triples
             .iter()
-            .filter(|(q, _)| *q > 0)
-            .map(|(q, r)| (*r as f64) / (*q as f64))
+            .filter(|(q, _, _)| *q > 0)
+            .map(|(q, r, _)| (*r as f64) / (*q as f64))
             .collect();
 
         let (amp_mean, amp_median, amp_max) = if ratios.is_empty() {
@@ -131,6 +279,46 @@ impl ResponseAggregates {
             (Some(mean), Some(median), Some(max))
         };
 
+        let durations_with_timing: Vec<u64> =
+            triples.iter().filter_map(|(_, _, d)| *d).collect();
+        let duration_ns_max = durations_with_timing.iter().copied().max();
+        let nonzero_durations: Vec<u64> = durations_with_timing
+            .iter()
+            .copied()
+            .filter(|d| *d > 0)
+            .collect();
+        let duration_ns_mean = if nonzero_durations.is_empty() {
+            None
+        } else {
+            let sum: u64 = nonzero_durations.iter().sum();
+            Some(sum / nonzero_durations.len() as u64)
+        };
+
+        let (status_2xx_frac, status_4xx_frac, status_5xx_frac) =
+            if status_counts.n_with_parsed_status == 0 {
+                (None, None, None)
+            } else {
+                let denom = status_counts.n_with_parsed_status as f64;
+                (
+                    Some(status_counts.n_2xx as f64 / denom),
+                    Some(status_counts.n_4xx as f64 / denom),
+                    Some(status_counts.n_5xx as f64 / denom),
+                )
+            };
+
+        let (rpc_error_distinct_codes, rpc_error_frac) =
+            if rpc_metadata.n_with_parsed_envelope == 0 {
+                (None, None)
+            } else {
+                let distinct: HashSet<i32> =
+                    rpc_metadata.error_codes.iter().copied().collect();
+                let capped = distinct.len().min(5) as u32;
+                (
+                    Some(capped),
+                    Some(rpc_metadata.error_count as f64 / count_f),
+                )
+            };
+
         Self {
             count,
             resp_bytes_total,
@@ -141,6 +329,15 @@ impl ResponseAggregates {
             amp_ratio_max: amp_max,
             unique_dst_ports: None,
             unique_src_ports: None,
+            duration_ns_mean,
+            duration_ns_max,
+            status_2xx_frac,
+            status_4xx_frac,
+            status_5xx_frac,
+            rpc_error_distinct_codes,
+            rpc_error_frac,
+            req_bytes_mean,
+            resp_bytes_mean,
         }
     }
 
@@ -874,12 +1071,12 @@ mod tests {
 
     #[test]
     fn test_schema_version_constant() {
-        assert_eq!(SCHEMA_VERSION, 6);
+        assert_eq!(SCHEMA_VERSION, 7);
     }
 
     #[test]
     fn test_supported_versions_constant() {
-        assert_eq!(SUPPORTED_VERSIONS, &[5, 6]);
+        assert_eq!(SUPPORTED_VERSIONS, &[5, 6, 7]);
     }
 
     #[test]
@@ -1293,30 +1490,88 @@ mod tests {
     }
 
     #[test]
-    fn test_v6_snapshot_with_aggregates_round_trips() {
-        let agg = ResponseAggregates::from_pairs(&[
-            (100, 200),
-            (50, 250),
-            (200, 200),
-        ]);
+    fn test_v6_snapshot_round_trips_through_v7_reader() {
+        // After the v6→v7 bump, a v6 snapshot (no v7-only fields) must still
+        // parse cleanly through the v7-aware reader. Forward-compat invariant:
+        // existing ShadowPayload-mode collectors emitting v6 must remain
+        // readable. Regression-pin against accidentally dropping v6 from
+        // SUPPORTED_VERSIONS during the bump.
+        let v6_json = r#"{"version":6,"aggregation":"src_ip_dst_port","ts_unix_sec":1000,"interval_sec":60,"run_id":1000,"counter_mode":"cumulative","base_ts_unix_sec":1000,"dst_ports":[8080],"buckets":[]}"#;
+
+        let restored = Snapshot::from_json(v6_json).expect("v6 should round-trip under v7 reader");
+        assert_eq!(restored.version, 6);
+        assert!(restored.resp_aggregates.is_none());
+    }
+
+    #[test]
+    fn test_v7_snapshot_with_aggregates_round_trips() {
+        // Inputs picked to produce exact-decimal means so the JSON round-trip
+        // is bit-stable (f64 → JSON → f64 drifts the last bit on repeating
+        // decimals). Sum(req)=300, sum(resp)=600, count=2 → means 150.0/300.0.
+        let agg = ResponseAggregates::from_pairs(&[(100, 200), (200, 400)]);
         let snapshot = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000)
             .with_resp_aggregates(agg.clone());
 
         let json = snapshot.to_json();
-        let restored = Snapshot::from_json(&json).expect("v6 should round-trip");
+        let restored = Snapshot::from_json(&json).expect("v7 should round-trip");
 
-        assert_eq!(restored.version, 6);
+        assert_eq!(restored.version, 7);
         assert_eq!(restored.resp_aggregates, Some(agg));
     }
 
     #[test]
-    fn test_v6_snapshot_without_aggregates_omits_field() {
-        // v6 with no aggregates: JSON should not contain a `resp_aggregates`
+    fn test_v7_snapshot_without_aggregates_omits_field() {
+        // v7 with no aggregates: JSON should not contain a `resp_aggregates`
         // key at all (skip_serializing_if=Option::is_none). Stays compact for
         // StrictCounter-mode-equivalent windows.
         let snapshot = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000);
         let json = snapshot.to_json();
         assert!(!json.contains("resp_aggregates"), "JSON should omit resp_aggregates: {}", json);
+    }
+
+    #[test]
+    fn test_v7_resp_aggregates_omits_metadata_dependent_fields_when_none() {
+        // The v7-only fields that depend on extra metadata (timing, HTTP
+        // status, JSON-RPC error parsing) must not appear in the JSON when
+        // their inputs were absent. Pre-v7 readers see a v7 snapshot with
+        // no v7-only keys and parse it as v6-shaped.
+        //
+        // Note: req_bytes_mean / resp_bytes_mean are derivable from byte
+        // pairs alone and ARE populated when count > 0, so they are not
+        // listed here.
+        let agg = ResponseAggregates::from_pairs(&[(100, 200)]);
+        let snapshot = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000)
+            .with_resp_aggregates(agg);
+        let json = snapshot.to_json();
+
+        for absent_key in [
+            "duration_ns_mean",
+            "duration_ns_max",
+            "status_2xx_frac",
+            "status_4xx_frac",
+            "status_5xx_frac",
+            "rpc_error_distinct_codes",
+            "rpc_error_frac",
+        ] {
+            assert!(
+                !json.contains(absent_key),
+                "v7 JSON should omit metadata-dependent field {} when no metadata supplied: {}",
+                absent_key,
+                json,
+            );
+        }
+    }
+
+    #[test]
+    fn test_v7_resp_aggregates_includes_byte_means_when_count_positive() {
+        // *_bytes_mean derive from byte pairs alone (no extra metadata) and
+        // must be present in JSON when count > 0.
+        let agg = ResponseAggregates::from_pairs(&[(100, 200)]);
+        let snapshot = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000)
+            .with_resp_aggregates(agg);
+        let json = snapshot.to_json();
+        assert!(json.contains("req_bytes_mean"), "missing req_bytes_mean in: {}", json);
+        assert!(json.contains("resp_bytes_mean"), "missing resp_bytes_mean in: {}", json);
     }
 
     #[test]
@@ -1431,4 +1686,252 @@ mod tests {
         // median of sorted [1.0, 2.0, 5.0] = 2.0
         assert_eq!(agg.amp_ratio_median, Some(2.0));
     }
+
+    // ===========================================
+    // Test Category H — Schema v7 Fields
+    // (timing, HTTP status, JSON-RPC error, derived means)
+    // via from_triples_and_metadata
+    // ===========================================
+
+    #[test]
+    fn test_from_triples_empty_yields_all_none() {
+        let agg = ResponseAggregates::from_triples_and_metadata(
+            &[],
+            StatusCounts::default(),
+            RpcMetadata::default(),
+        );
+        assert_eq!(agg.count, 0);
+        assert_eq!(agg.resp_bytes_total, 0);
+        assert_eq!(agg.req_bytes_max, None);
+        assert_eq!(agg.resp_bytes_max, None);
+        assert_eq!(agg.amp_ratio_mean, None);
+        assert_eq!(agg.amp_ratio_median, None);
+        assert_eq!(agg.amp_ratio_max, None);
+        assert_eq!(agg.duration_ns_mean, None);
+        assert_eq!(agg.duration_ns_max, None);
+        assert_eq!(agg.status_2xx_frac, None);
+        assert_eq!(agg.status_4xx_frac, None);
+        assert_eq!(agg.status_5xx_frac, None);
+        assert_eq!(agg.rpc_error_distinct_codes, None);
+        assert_eq!(agg.rpc_error_frac, None);
+        assert_eq!(agg.req_bytes_mean, None);
+        assert_eq!(agg.resp_bytes_mean, None);
+    }
+
+    #[test]
+    fn test_from_triples_no_metadata_matches_from_pairs_for_byte_aggregates() {
+        // Pairs converted to triples with no duration and empty metadata
+        // should produce the same byte/ratio aggregates as from_pairs.
+        let pairs = [(100, 200), (50, 250), (200, 200)];
+        let triples: Vec<(u64, u64, Option<u64>)> =
+            pairs.iter().map(|(q, r)| (*q, *r, None)).collect();
+
+        let agg_pairs = ResponseAggregates::from_pairs(&pairs);
+        let agg_triples = ResponseAggregates::from_triples_and_metadata(
+            &triples,
+            StatusCounts::default(),
+            RpcMetadata::default(),
+        );
+
+        assert_eq!(agg_pairs.count, agg_triples.count);
+        assert_eq!(agg_pairs.resp_bytes_total, agg_triples.resp_bytes_total);
+        assert_eq!(agg_pairs.req_bytes_max, agg_triples.req_bytes_max);
+        assert_eq!(agg_pairs.resp_bytes_max, agg_triples.resp_bytes_max);
+        assert_eq!(agg_pairs.amp_ratio_mean, agg_triples.amp_ratio_mean);
+        assert_eq!(agg_pairs.amp_ratio_median, agg_triples.amp_ratio_median);
+        assert_eq!(agg_pairs.amp_ratio_max, agg_triples.amp_ratio_max);
+    }
+
+    #[test]
+    fn test_from_triples_populates_byte_means_when_count_positive() {
+        // *_bytes_mean is derivable from triples alone (no extra metadata).
+        // Plan: req_bytes_mean = sum(req)/count, resp_bytes_mean = sum(resp)/count.
+        let triples = [(100, 200, None), (50, 250, None), (200, 600, None)];
+        let agg = ResponseAggregates::from_triples_and_metadata(
+            &triples,
+            StatusCounts::default(),
+            RpcMetadata::default(),
+        );
+        // sum(req) = 350, count = 3 → mean = 350/3
+        assert!(
+            (agg.req_bytes_mean.unwrap() - (350.0 / 3.0)).abs() < 1e-9,
+            "req_bytes_mean = 350/3, got {:?}", agg.req_bytes_mean,
+        );
+        // sum(resp) = 1050, count = 3 → mean = 350.0
+        assert_eq!(agg.resp_bytes_mean, Some(350.0));
+    }
+
+    #[test]
+    fn test_from_triples_duration_only_counts_some_values() {
+        // Mixed: 2 with timing, 1 without. Mean averages over Some values
+        // with d > 0; max takes the largest Some.
+        let triples = [
+            (100, 200, Some(1_000_000)),
+            (100, 200, Some(3_000_000)),
+            (100, 200, None), // no timing — excluded from both mean and max
+        ];
+        let agg = ResponseAggregates::from_triples_and_metadata(
+            &triples,
+            StatusCounts::default(),
+            RpcMetadata::default(),
+        );
+        // mean over [1_000_000, 3_000_000] = 2_000_000 ns
+        assert_eq!(agg.duration_ns_mean, Some(2_000_000));
+        assert_eq!(agg.duration_ns_max, Some(3_000_000));
+    }
+
+    #[test]
+    fn test_from_triples_duration_excludes_zero_from_mean() {
+        // Plan: "averaged over pairs with non-zero duration". 0-duration
+        // pairs ARE included in the max but NOT in the mean.
+        let triples = [
+            (100, 200, Some(0)),
+            (100, 200, Some(2_000_000)),
+        ];
+        let agg = ResponseAggregates::from_triples_and_metadata(
+            &triples,
+            StatusCounts::default(),
+            RpcMetadata::default(),
+        );
+        // mean over [2_000_000] only (0 excluded) = 2_000_000
+        assert_eq!(agg.duration_ns_mean, Some(2_000_000));
+        // max over [0, 2_000_000] = 2_000_000
+        assert_eq!(agg.duration_ns_max, Some(2_000_000));
+    }
+
+    #[test]
+    fn test_from_triples_duration_all_none_yields_none() {
+        let triples = [(100, 200, None), (50, 250, None)];
+        let agg = ResponseAggregates::from_triples_and_metadata(
+            &triples,
+            StatusCounts::default(),
+            RpcMetadata::default(),
+        );
+        assert_eq!(agg.duration_ns_mean, None);
+        assert_eq!(agg.duration_ns_max, None);
+    }
+
+    #[test]
+    fn test_from_triples_status_fractions_with_parsed_denominator() {
+        // 4 responses, denominator (n_with_parsed_status) = 4: 2x 2xx, 1x 4xx, 1x 5xx
+        let triples = [(100, 200, None); 4];
+        let status = StatusCounts {
+            n_2xx: 2,
+            n_4xx: 1,
+            n_5xx: 1,
+            n_with_parsed_status: 4,
+        };
+        let agg = ResponseAggregates::from_triples_and_metadata(
+            &triples,
+            status,
+            RpcMetadata::default(),
+        );
+        assert_eq!(agg.status_2xx_frac, Some(0.5));
+        assert_eq!(agg.status_4xx_frac, Some(0.25));
+        assert_eq!(agg.status_5xx_frac, Some(0.25));
+    }
+
+    #[test]
+    fn test_from_triples_status_fractions_skip_unparsed_responses() {
+        // 4 pairs but only 2 had parseable status lines (others were non-HTTP).
+        // Denominator is 2, not 4.
+        let triples = [(100, 200, None); 4];
+        let status = StatusCounts {
+            n_2xx: 1,
+            n_4xx: 0,
+            n_5xx: 1,
+            n_with_parsed_status: 2,
+        };
+        let agg = ResponseAggregates::from_triples_and_metadata(
+            &triples,
+            status,
+            RpcMetadata::default(),
+        );
+        assert_eq!(agg.status_2xx_frac, Some(0.5));
+        assert_eq!(agg.status_4xx_frac, Some(0.0));
+        assert_eq!(agg.status_5xx_frac, Some(0.5));
+    }
+
+    #[test]
+    fn test_from_triples_status_none_when_no_parsed() {
+        // No HTTP status lines parsed → all status_*_frac stay None.
+        let triples = [(100, 200, None); 3];
+        let agg = ResponseAggregates::from_triples_and_metadata(
+            &triples,
+            StatusCounts::default(),
+            RpcMetadata::default(),
+        );
+        assert_eq!(agg.status_2xx_frac, None);
+        assert_eq!(agg.status_4xx_frac, None);
+        assert_eq!(agg.status_5xx_frac, None);
+    }
+
+    #[test]
+    fn test_from_triples_rpc_error_distinct_and_frac() {
+        // 10 pairs, 4 error responses, 3 distinct error codes.
+        let triples = [(100, 200, None); 10];
+        let rpc = RpcMetadata {
+            error_codes: vec![-32602, -32602, -32601, -32700],
+            error_count: 4,
+            n_with_parsed_envelope: 10,
+        };
+        let agg = ResponseAggregates::from_triples_and_metadata(
+            &triples,
+            StatusCounts::default(),
+            rpc,
+        );
+        // distinct {-32602, -32601, -32700} = 3
+        assert_eq!(agg.rpc_error_distinct_codes, Some(3));
+        // frac = 4/10 = 0.4
+        assert_eq!(agg.rpc_error_frac, Some(0.4));
+    }
+
+    #[test]
+    fn test_from_triples_rpc_error_caps_distinct_at_five() {
+        // 10 distinct error codes → capped at 5.
+        let triples = [(100, 200, None); 20];
+        let rpc = RpcMetadata {
+            error_codes: (0..10).collect(),
+            error_count: 10,
+            n_with_parsed_envelope: 20,
+        };
+        let agg = ResponseAggregates::from_triples_and_metadata(
+            &triples,
+            StatusCounts::default(),
+            rpc,
+        );
+        assert_eq!(agg.rpc_error_distinct_codes, Some(5));
+    }
+
+    #[test]
+    fn test_from_triples_rpc_none_when_no_envelope_parsed() {
+        let triples = [(100, 200, None); 5];
+        let agg = ResponseAggregates::from_triples_and_metadata(
+            &triples,
+            StatusCounts::default(),
+            RpcMetadata::default(),
+        );
+        assert_eq!(agg.rpc_error_distinct_codes, None);
+        assert_eq!(agg.rpc_error_frac, None);
+    }
+
+    #[test]
+    fn test_from_triples_rpc_zero_errors_with_envelopes_parsed() {
+        // All 5 responses parsed cleanly as JSON-RPC, none had error fields.
+        let triples = [(100, 200, None); 5];
+        let rpc = RpcMetadata {
+            error_codes: vec![],
+            error_count: 0,
+            n_with_parsed_envelope: 5,
+        };
+        let agg = ResponseAggregates::from_triples_and_metadata(
+            &triples,
+            StatusCounts::default(),
+            rpc,
+        );
+        // No distinct codes observed → still Some(0) because envelopes WERE parsed.
+        assert_eq!(agg.rpc_error_distinct_codes, Some(0));
+        assert_eq!(agg.rpc_error_frac, Some(0.0));
+    }
+
 }
