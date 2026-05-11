@@ -370,7 +370,14 @@ pub fn resolve_host_sampler(args: &crate::cli::CollectPayloadArgs) -> Option<Hos
 /// returns `None` on non-Linux dev hosts.
 #[cfg(target_os = "linux")]
 fn resolve_pid_from_name(name: &str) -> Option<u32> {
+    // Collect ALL matching PIDs, then return the lowest. `read_dir` on
+    // /proc has no defined ordering; without this collect-then-sort,
+    // multi-worker processes (e.g. `sui-node` with many threads sharing
+    // a `comm`) produce a nondeterministic resolved PID run-to-run.
+    // The lowest PID is conventionally the parent / longest-lived
+    // process — a sensible default when comm collisions exist.
     let dir = std::fs::read_dir("/proc").ok()?;
+    let mut matches: Vec<u32> = Vec::new();
     for entry in dir.flatten() {
         let file_name = entry.file_name();
         let Some(pid_str) = file_name.to_str() else {
@@ -385,11 +392,11 @@ fn resolve_pid_from_name(name: &str) -> Option<u32> {
         let comm_path = format!("/proc/{}/comm", pid);
         if let Ok(comm) = std::fs::read_to_string(&comm_path) {
             if comm.trim() == name {
-                return Some(pid);
+                matches.push(pid);
             }
         }
     }
-    None
+    matches.into_iter().min()
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -810,6 +817,135 @@ mod tests {
         assert_eq!(snaps.len(), 1);
         assert!(snaps[0].host.is_none(),
             "nonexistent PID → host block omitted");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn collect_payload_window_omits_host_when_process_exits_mid_window() {
+        // Plan-promised case: baseline capture succeeds, then the
+        // target process exits before end-of-window capture. The host
+        // block must be omitted (we don't fabricate a partial delta).
+        //
+        // Mechanism:
+        // 1. Spawn a sleep-100ms child. /proc/<pid>/{stat,status} live.
+        // 2. Spawn a background thread that calls child.wait(): this
+        //    REAPS the child the moment it exits, so /proc/<pid>
+        //    actually disappears (rather than lingering as a zombie
+        //    with the parent — us — still holding the wait slot).
+        // 3. Call collect_payload_window with a 500ms deadline.
+        //    Baseline (t≈0) succeeds. Loop polls until deadline. Child
+        //    exits at t≈100ms, reaper wakes, /proc/<pid> disappears.
+        //    End capture at t≈500ms fails → host block omitted.
+        use std::process::Command;
+        use std::time::Duration as StdDuration;
+
+        let child = Command::new("sleep")
+            .arg("0.1")
+            .spawn()
+            .expect("spawn sleep child");
+        let pid = child.id();
+        // Move the Child handle into a reaper thread so the kernel
+        // releases /proc/<pid> as soon as the child exits (otherwise
+        // it stays as a zombie until we wait()).
+        let reaper = std::thread::spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+        });
+        let sampler = HostSampler::new(pid);
+
+        let mut src = MockPayloadEventSource::from_batches(vec![]);
+        let clock = MockClock::new(HOUR_1);
+        let fs = Arc::new(MockFilesystem::new());
+        let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir());
+        let cfg = config(vec![8899]);
+        let mut handler = PayloadHandler::new(64);
+        let server_ports = server_ports_set(&[8899]);
+        let shutdown = crate::signal::NeverShutdown;
+        let deadline = Instant::now() + StdDuration::from_millis(500);
+
+        let _result = collect_payload_window(
+            &mut src,
+            &clock,
+            &writer,
+            &ArcFs(fs.clone()),
+            &mut handler,
+            &server_ports,
+            &cfg,
+            HOUR_0,
+            deadline,
+            &shutdown,
+            &output_dir(),
+            Some(&sampler),
+        )
+        .expect("collect_payload_window");
+
+        // Join the reaper to be tidy (child has long since exited).
+        reaper.join().expect("reaper thread");
+
+        let snaps = parse_snapshots_from(&fs);
+        assert_eq!(snaps.len(), 1);
+        assert!(snaps[0].host.is_none(),
+            "process exited mid-window → host block omitted");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn collect_payload_loop_threads_host_sampler_to_window() {
+        // Plan-promised coverage gap: the loop's `host_sampler` parameter
+        // must thread through to each window call. Run a single-window
+        // loop with a /proc/self sampler and verify the emitted snapshot
+        // carries a host block (proves the loop didn't drop the param).
+        let mut src = MockPayloadEventSource::from_batches(vec![]);
+        let clock = MockClock::new(HOUR_1);
+        let fs = Arc::new(MockFilesystem::new());
+        let writer = StandardSnapshotWriter::new(ArcFs(fs.clone()), output_dir());
+        let mut cfg = config(vec![8899]);
+        cfg.interval_sec = 1; // short window so the test finishes promptly
+        let mut handler = PayloadHandler::new(64);
+        let server_ports = server_ports_set(&[8899]);
+        let shutdown = crate::signal::NeverShutdown;
+        let sampler = HostSampler::new(std::process::id());
+
+        let result = collect_payload_loop(
+            &mut src,
+            &clock,
+            &writer,
+            &ArcFs(fs.clone()),
+            &mut handler,
+            &server_ports,
+            &cfg,
+            &shutdown,
+            &output_dir(),
+            Some(1),
+            Some(&sampler),
+        );
+        assert_eq!(result.windows_completed, 1);
+        let snaps = parse_snapshots_from(&fs);
+        assert_eq!(snaps.len(), 1);
+        let host = snaps[0].host.as_ref()
+            .expect("loop must thread host_sampler through to window emit");
+        assert!(host.rss_max.is_some(),
+            "/proc/self RSS should always be readable");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_pid_from_name_is_deterministic_under_multi_match() {
+        // /proc/<pid>/comm-collision case: there are commonly multiple
+        // processes with the same comm (kernel threads, multi-worker
+        // services). resolve_pid_from_name must return the lowest PID
+        // deterministically across runs, not whatever readdir returns
+        // first. Probe via /proc/self/comm — own process is one match;
+        // assert determinism by running twice.
+        let own_comm = std::fs::read_to_string("/proc/self/comm")
+            .expect("read /proc/self/comm")
+            .trim()
+            .to_string();
+        let args = make_args(&[("--target-process-name", &own_comm)]);
+        let s1 = resolve_host_sampler(&args).expect("first resolution");
+        let s2 = resolve_host_sampler(&args).expect("second resolution");
+        assert_eq!(s1.pid(), s2.pid(),
+            "name resolution must be deterministic across runs");
     }
 
     // ===========================================

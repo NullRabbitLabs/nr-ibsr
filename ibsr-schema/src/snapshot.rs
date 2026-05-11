@@ -382,7 +382,11 @@ pub struct HostTelemetry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_mean: Option<f64>,
 
-    /// Maximum process CPU% observed in window. v7+.
+    /// Maximum process CPU% observed in window. v7's single-thread
+    /// sampling captures only two data points (window start + end),
+    /// so this field collapses to the same value as `cpu_mean`. A
+    /// future v8 with 1Hz mid-window sampling will provide true
+    /// intra-window max. v7+.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_max: Option<f64>,
 
@@ -2022,6 +2026,56 @@ mod tests {
     // Test Category I — v7 HostTelemetry block
     // (closes B.1 of PLAN-PRODUCTION-FEATURE-SURFACE)
     // ===========================================
+
+    #[test]
+    fn test_v7_snapshot_round_trips_full_metadata_resp_aggregates() {
+        // Pin: a ResponseAggregates with ALL v7 metadata fields populated
+        // (timing, status fractions, RPC error fields, byte means)
+        // round-trips bit-stable through JSON. Closes the Phase A.3
+        // coverage gap: prior tests only round-tripped byte-pair-derived
+        // fields. f64 fractions chosen for exact-decimal representation
+        // (1/2, 1/4) so deserialisation matches the source exactly.
+        let triples = [
+            (100u64, 200u64, Some(2_000_000u64)), // duration 2 ms
+            (100, 200, Some(4_000_000)),          // duration 4 ms
+            (100, 200, Some(6_000_000)),          // duration 6 ms
+            (100, 200, Some(8_000_000)),          // duration 8 ms
+        ];
+        // 4 responses, all with parseable HTTP status: 2x 2xx, 1x 4xx, 1x 5xx.
+        let status = StatusCounts {
+            n_2xx: 2,
+            n_4xx: 1,
+            n_5xx: 1,
+            n_with_parsed_status: 4,
+        };
+        // All 4 envelope-parsed; one had error.code = -32602.
+        let rpc = RpcMetadata {
+            error_codes: vec![-32602],
+            error_count: 1,
+            n_with_parsed_envelope: 4,
+        };
+        let agg = ResponseAggregates::from_triples_and_metadata(&triples, status, rpc)
+            .with_port_cardinalities(2, 2);
+
+        // Sanity-check the source values populate every metadata field.
+        assert_eq!(agg.duration_ns_mean, Some(5_000_000)); // (2+4+6+8)/4 = 5 ms
+        assert_eq!(agg.duration_ns_max, Some(8_000_000));
+        assert_eq!(agg.status_2xx_frac, Some(0.5));
+        assert_eq!(agg.status_4xx_frac, Some(0.25));
+        assert_eq!(agg.status_5xx_frac, Some(0.25));
+        assert_eq!(agg.rpc_error_distinct_codes, Some(1));
+        assert_eq!(agg.rpc_error_frac, Some(0.25));
+        assert_eq!(agg.req_bytes_mean, Some(100.0));
+        assert_eq!(agg.resp_bytes_mean, Some(200.0));
+
+        let snapshot = Snapshot::new(1000, &[8080], vec![], 60, 1000, 1000)
+            .with_resp_aggregates(agg.clone());
+        let json = snapshot.to_json();
+        let restored = Snapshot::from_json(&json).expect("v7 should round-trip");
+        // Full struct equality: every populated field must survive
+        // the JSON round-trip bit-identically.
+        assert_eq!(restored.resp_aggregates, Some(agg));
+    }
 
     #[test]
     fn test_v7_snapshot_with_host_block_round_trips() {

@@ -34,27 +34,47 @@ use std::{fs, io};
 pub const CLOCK_TICKS_PER_SEC: u64 = 100;
 
 /// Maximum size of `/proc/<pid>/net/tcp` we will parse before
-/// short-circuiting to `num_connections=0`. Production servers rarely
-/// hit this — it caps the worst-case CPU cost on a degenerate snapshot.
+/// short-circuiting to `None`. Production servers rarely hit this —
+/// it caps the worst-case CPU cost on a degenerate snapshot, and
+/// surfaces "we don't know" via Option rather than a false 0.
 pub const NET_TCP_MAX_BYTES: usize = 50 * 1024 * 1024;
+
+/// Minimum elapsed time between baseline + end captures for rate
+/// fields (cpu_*, rss_slope_bps) to be emitted. Below this threshold,
+/// floating-point arithmetic on tiny intervals produces astronomical
+/// per-second values from microsecond-scale ground truth. 100 ms is
+/// far below any production window cadence (typically 60s) but above
+/// any plausible accidental near-zero interval from a test fixture.
+pub const MIN_ELAPSED_SEC: f64 = 0.1;
 
 /// One captured `/proc` snapshot for a target PID. Combine two
 /// snapshots (start-of-window + end-of-window) via [`delta`] to produce
 /// a [`HostTelemetry`] block.
+///
+/// Each field is `Option<T>`: `None` means "we could not read this
+/// value" (file missing, permission denied — typical for
+/// `/proc/<pid>/io` without CAP_SYS_PTRACE — or oversized
+/// `/proc/<pid>/net/tcp`). `Some(0)` means "zero, with confidence".
+/// The distinction propagates through [`delta`] so a missing field
+/// surfaces as `None` in the emitted `HostTelemetry`, not a misleading
+/// `Some(0)`.
 #[derive(Debug, Clone)]
 pub struct HostSnapshot {
     /// utime + stime in jiffies (from `/proc/<pid>/stat`).
-    pub cpu_jiffies: u64,
+    pub cpu_jiffies: Option<u64>,
     /// VmRSS in bytes (from `/proc/<pid>/status`, `VmRSS: N kB`).
-    pub rss_bytes: u64,
+    pub rss_bytes: Option<u64>,
     /// Open file-descriptor count (number of entries in
     /// `/proc/<pid>/fd`).
-    pub num_fds: u32,
+    pub num_fds: Option<u32>,
     /// ESTABLISHED-state TCP connection count from
-    /// `/proc/<pid>/net/tcp`.
-    pub num_connections: u32,
+    /// `/proc/<pid>/net/tcp`. `None` if the file was oversized
+    /// ([`NET_TCP_MAX_BYTES`]) or unreadable.
+    pub num_connections: Option<u32>,
     /// Cumulative disk-write bytes from `/proc/<pid>/io::write_bytes`.
-    pub io_write_bytes: u64,
+    /// `None` if `/proc/<pid>/io` is unreadable (commonly: collector
+    /// lacks CAP_SYS_PTRACE).
+    pub io_write_bytes: Option<u64>,
     /// Wall-clock instant the snapshot was captured. Drives elapsed-
     /// time calculations in [`delta`].
     pub captured_at: Instant,
@@ -77,12 +97,14 @@ impl HostSampler {
 
     /// Capture a `/proc` snapshot for the configured pid.
     ///
-    /// Returns `Err` if the target process is gone or any required
-    /// file is unreadable; the caller should downgrade to "no host
-    /// telemetry" emit on the next snapshot. Best-effort: missing-but-
-    /// permitted files (e.g. `/proc/<pid>/io` requires CAP_SYS_PTRACE
-    /// on most distros) silently fall back to 0; only `stat` and
-    /// `status` are required.
+    /// Returns `Err` if the target process is gone (neither `stat` nor
+    /// `status` is readable) — the caller should downgrade to "no host
+    /// telemetry" emit. Best-effort per field: parser failure or
+    /// missing-but-permitted files (e.g. `/proc/<pid>/io` requires
+    /// CAP_SYS_PTRACE on most distros, `/proc/<pid>/net/tcp` may be
+    /// oversized) surface as `None` on the individual field rather
+    /// than failing the whole capture. The downstream [`delta`] then
+    /// emits the corresponding `HostTelemetry` fields as `None`.
     #[cfg(target_os = "linux")]
     pub fn capture(&self) -> io::Result<HostSnapshot> {
         let pid = self.pid;
@@ -91,20 +113,14 @@ impl HostSampler {
         let io_str = fs::read_to_string(format!("/proc/{}/io", pid)).ok();
         let net_tcp = fs::read_to_string(format!("/proc/{}/net/tcp", pid)).ok();
         let num_fds = fs::read_dir(format!("/proc/{}/fd", pid))
-            .map(|d| d.filter_map(|e| e.ok()).count() as u32)
-            .unwrap_or(0);
+            .ok()
+            .map(|d| d.filter_map(|e| e.ok()).count() as u32);
         Ok(HostSnapshot {
-            cpu_jiffies: parse_cpu_jiffies(&stat).unwrap_or(0),
-            rss_bytes: parse_rss_bytes(&status).unwrap_or(0),
+            cpu_jiffies: parse_cpu_jiffies(&stat),
+            rss_bytes: parse_rss_bytes(&status),
             num_fds,
-            num_connections: net_tcp
-                .as_deref()
-                .map(parse_established_count)
-                .unwrap_or(0),
-            io_write_bytes: io_str
-                .as_deref()
-                .and_then(parse_io_write_bytes)
-                .unwrap_or(0),
+            num_connections: net_tcp.as_deref().and_then(parse_established_count),
+            io_write_bytes: io_str.as_deref().and_then(parse_io_write_bytes),
             captured_at: Instant::now(),
         })
     }
@@ -126,9 +142,11 @@ impl HostSampler {
 ///
 /// Field semantics:
 /// - `cpu_mean` / `cpu_max`: percent-of-one-core
-///   `(jiffies_delta / clock_ticks_per_sec) / elapsed_sec * 100`.
-///   Both fields collapse to the same value in the v7 single-thread
-///   sampling model — see module docstring.
+///   `(jiffies_delta / clock_ticks_per_sec) / elapsed_sec * 100`. v7
+///   single-thread sampling has only one data point per window, so
+///   `cpu_max` collapses to the same value as `cpu_mean` (documented
+///   on the schema field). A future v8 with mid-window sampling will
+///   provide true intra-window max.
 /// - `rss_delta`: signed bytes (`end.rss - start.rss`).
 /// - `rss_max`: end-of-window value (`end.rss`).
 /// - `rss_slope_bps`: `rss_delta / elapsed_sec`.
@@ -136,9 +154,12 @@ impl HostSampler {
 /// - `num_connections_max`: end-of-window value.
 /// - `io_write_delta`: signed bytes.
 ///
-/// `elapsed_sec == 0` (effectively-instant capture pair) collapses
-/// rate fields (`cpu_*`, `rss_slope_bps`) to `None` to avoid divide-by-
-/// zero / infinity emit. Delta fields and max fields stay populated.
+/// Per-field `Option` propagation: when either side's field is `None`
+/// (because the underlying `/proc` file was unreadable or oversized),
+/// the corresponding output field emits as `None` rather than a
+/// misleading delta against an implicit 0. Rate fields (`cpu_*`,
+/// `rss_slope_bps`) additionally require `elapsed_sec >= MIN_ELAPSED_SEC`
+/// to avoid astronomical per-second values on near-zero windows.
 pub fn delta(
     start: &HostSnapshot,
     end: &HostSnapshot,
@@ -148,35 +169,56 @@ pub fn delta(
         .captured_at
         .saturating_duration_since(start.captured_at)
         .as_secs_f64();
+    let rate_ok = elapsed_sec >= MIN_ELAPSED_SEC && clock_ticks_per_sec > 0;
 
-    let (cpu_mean, cpu_max) = if elapsed_sec > 0.0 && clock_ticks_per_sec > 0 {
-        let jiffies_delta = end.cpu_jiffies.saturating_sub(start.cpu_jiffies);
-        let cpu_secs = jiffies_delta as f64 / clock_ticks_per_sec as f64;
-        let pct = (cpu_secs / elapsed_sec) * 100.0;
-        (Some(pct), Some(pct))
-    } else {
-        (None, None)
+    let cpu_pct = match (start.cpu_jiffies, end.cpu_jiffies) {
+        (Some(s), Some(e)) if rate_ok => {
+            let jiffies_delta = e.saturating_sub(s);
+            let cpu_secs = jiffies_delta as f64 / clock_ticks_per_sec as f64;
+            Some((cpu_secs / elapsed_sec) * 100.0)
+        }
+        _ => None,
     };
 
-    let rss_delta = end.rss_bytes as i64 - start.rss_bytes as i64;
-    let rss_slope_bps = if elapsed_sec > 0.0 {
-        Some(rss_delta as f64 / elapsed_sec)
-    } else {
-        None
+    let (rss_delta, rss_max, rss_slope_bps) = match (start.rss_bytes, end.rss_bytes) {
+        (Some(s), Some(e)) => {
+            let d = e as i64 - s as i64;
+            let slope = if elapsed_sec >= MIN_ELAPSED_SEC {
+                Some(d as f64 / elapsed_sec)
+            } else {
+                None
+            };
+            (Some(d), Some(e), slope)
+        }
+        _ => (None, None, None),
+    };
+
+    let num_fds_delta = match (start.num_fds, end.num_fds) {
+        (Some(s), Some(e)) => Some(e as i64 - s as i64),
+        _ => None,
+    };
+
+    let (num_connections_delta, num_connections_max) =
+        match (start.num_connections, end.num_connections) {
+            (Some(s), Some(e)) => (Some(e as i64 - s as i64), Some(e)),
+            _ => (None, None),
+        };
+
+    let io_write_delta = match (start.io_write_bytes, end.io_write_bytes) {
+        (Some(s), Some(e)) => Some(e as i64 - s as i64),
+        _ => None,
     };
 
     HostTelemetry {
-        cpu_mean,
-        cpu_max,
-        rss_delta: Some(rss_delta),
-        rss_max: Some(end.rss_bytes),
+        cpu_mean: cpu_pct,
+        cpu_max: cpu_pct,
+        rss_delta,
+        rss_max,
         rss_slope_bps,
-        num_fds_delta: Some(end.num_fds as i64 - start.num_fds as i64),
-        num_connections_delta: Some(
-            end.num_connections as i64 - start.num_connections as i64,
-        ),
-        num_connections_max: Some(end.num_connections),
-        io_write_delta: Some(end.io_write_bytes as i64 - start.io_write_bytes as i64),
+        num_fds_delta,
+        num_connections_delta,
+        num_connections_max,
+        io_write_delta,
     }
 }
 
@@ -227,17 +269,21 @@ pub fn parse_io_write_bytes(io_str: &str) -> Option<u64> {
 /// body. State column (4th whitespace-split field on each data line)
 /// equals `01` for `TCP_ESTABLISHED`. Skips the header line.
 ///
-/// Files larger than [`NET_TCP_MAX_BYTES`] short-circuit to 0; see
-/// module docstring for the rationale.
-pub fn parse_established_count(net_tcp: &str) -> u32 {
+/// Files larger than [`NET_TCP_MAX_BYTES`] short-circuit to `None` —
+/// "we skipped parsing, don't claim 0 connections". The caller (and
+/// thus the schema field) will then emit `num_connections_*` as
+/// `None` rather than fabricating a delta against an implicit zero.
+pub fn parse_established_count(net_tcp: &str) -> Option<u32> {
     if net_tcp.len() > NET_TCP_MAX_BYTES {
-        return 0;
+        return None;
     }
-    net_tcp
-        .lines()
-        .skip(1) // header
-        .filter(|line| line.split_whitespace().nth(3) == Some("01"))
-        .count() as u32
+    Some(
+        net_tcp
+            .lines()
+            .skip(1) // header
+            .filter(|line| line.split_whitespace().nth(3) == Some("01"))
+            .count() as u32,
+    )
 }
 
 #[cfg(test)]
@@ -324,20 +370,23 @@ mod tests {
             "   2: 0100007F:1F90 0100007F:8B7C 01 00000000:00000000 00:00000000 00000000     0        0 67891 1 0000000000000000 20 4 30 10 -1\n",
             "   3: 0100007F:8B7E 0100007F:1F90 06 00000000:00000000 00:00000000 00000000     0        0 0 0 0000000000000000\n",
         );
-        assert_eq!(parse_established_count(net_tcp), 2);
+        assert_eq!(parse_established_count(net_tcp), Some(2));
     }
 
     #[test]
-    fn parse_established_count_returns_zero_for_header_only_file() {
+    fn parse_established_count_returns_some_zero_for_header_only_file() {
+        // Empty file = Some(0) (confidence-zero), not None (unknown).
         let net_tcp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
-        assert_eq!(parse_established_count(net_tcp), 0);
+        assert_eq!(parse_established_count(net_tcp), Some(0));
     }
 
     #[test]
-    fn parse_established_count_short_circuits_oversized_input() {
-        // Synthetic >50 MiB string — must NOT count, must return 0 fast.
+    fn parse_established_count_short_circuits_oversized_input_to_none() {
+        // Synthetic >50 MiB string — surfaces as `None` ("we didn't
+        // parse") rather than a misleading `Some(0)` that would
+        // produce phantom negative deltas downstream.
         let big = "x".repeat(NET_TCP_MAX_BYTES + 1);
-        assert_eq!(parse_established_count(&big), 0);
+        assert_eq!(parse_established_count(&big), None);
     }
 
     // ===========================================
@@ -353,11 +402,22 @@ mod tests {
         captured_at: Instant,
     ) -> HostSnapshot {
         HostSnapshot {
-            cpu_jiffies,
-            rss_bytes,
-            num_fds,
-            num_connections,
-            io_write_bytes,
+            cpu_jiffies: Some(cpu_jiffies),
+            rss_bytes: Some(rss_bytes),
+            num_fds: Some(num_fds),
+            num_connections: Some(num_connections),
+            io_write_bytes: Some(io_write_bytes),
+            captured_at,
+        }
+    }
+
+    fn empty_snapshot(captured_at: Instant) -> HostSnapshot {
+        HostSnapshot {
+            cpu_jiffies: None,
+            rss_bytes: None,
+            num_fds: None,
+            num_connections: None,
+            io_write_bytes: None,
             captured_at,
         }
     }
@@ -412,6 +472,73 @@ mod tests {
         // Delta fields stay populated
         assert_eq!(d.rss_delta, Some(100));
         assert_eq!(d.rss_max, Some(200));
+    }
+
+    #[test]
+    fn delta_collapses_rate_fields_below_min_elapsed_threshold() {
+        // 10 ms elapsed is far below MIN_ELAPSED_SEC (100 ms). Without
+        // the threshold, 50 jiffies / 10 ms would emit cpu% =
+        // (50/100) / 0.01 * 100 = 5000% — nonsense from a micro-window.
+        // The threshold collapses cpu_* + rss_slope_bps to None.
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_millis(10);
+        let s0 = snapshot(0, 1_000, 0, 0, 0, t0);
+        let s1 = snapshot(50, 2_000, 0, 0, 0, t1);
+        let d = delta(&s0, &s1, 100);
+        assert_eq!(d.cpu_mean, None,
+            "elapsed < MIN_ELAPSED_SEC must collapse cpu_mean to None");
+        assert_eq!(d.cpu_max, None);
+        assert_eq!(d.rss_slope_bps, None,
+            "elapsed < MIN_ELAPSED_SEC must collapse rss_slope_bps to None");
+        // Non-rate fields still populate.
+        assert_eq!(d.rss_delta, Some(1_000));
+        assert_eq!(d.rss_max, Some(2_000));
+    }
+
+    #[test]
+    fn delta_emits_none_for_missing_fields_on_either_side() {
+        // Per-field Option propagation: if either snapshot is missing a
+        // field (typical: /proc/<pid>/io unreadable without
+        // CAP_SYS_PTRACE), the corresponding delta is None — NOT a
+        // misleading delta against an implicit zero.
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(1);
+        let mut s0 = snapshot(10, 1_000, 5, 3, 100, t0);
+        let mut s1 = snapshot(20, 2_000, 7, 5, 200, t1);
+        // Wipe io_write_bytes from end snapshot — simulates IO file
+        // becoming unreadable mid-window.
+        s1.io_write_bytes = None;
+        // Also: net/tcp went oversized on the START side only.
+        s0.num_connections = None;
+        let d = delta(&s0, &s1, 100);
+        assert_eq!(d.io_write_delta, None,
+            "io_write_delta must be None when either side is None, \
+             not Some(0) (which would falsely claim zero writes)");
+        assert_eq!(d.num_connections_delta, None);
+        assert_eq!(d.num_connections_max, None);
+        // Other fields, both sides Some → still populated.
+        assert_eq!(d.rss_delta, Some(1_000));
+        assert_eq!(d.cpu_mean, Some(10.0)); // (20-10) jiffies / 100 ticks / 1s * 100% = 10%
+    }
+
+    #[test]
+    fn delta_emits_all_none_when_both_snapshots_empty() {
+        // Pathological: both captures returned None for every field
+        // (e.g. /proc/<pid>/stat parser failure on both sides).
+        // delta() must surface that as a fully-None HostTelemetry,
+        // not a struct of Some(0)s.
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(1);
+        let d = delta(&empty_snapshot(t0), &empty_snapshot(t1), 100);
+        assert_eq!(d.cpu_mean, None);
+        assert_eq!(d.cpu_max, None);
+        assert_eq!(d.rss_delta, None);
+        assert_eq!(d.rss_max, None);
+        assert_eq!(d.rss_slope_bps, None);
+        assert_eq!(d.num_fds_delta, None);
+        assert_eq!(d.num_connections_delta, None);
+        assert_eq!(d.num_connections_max, None);
+        assert_eq!(d.io_write_delta, None);
     }
 
     #[test]
